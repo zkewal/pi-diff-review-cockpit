@@ -5,6 +5,7 @@ import { createFallbackAnalysis } from "./analysis.js";
 import { parseDiffReviewArgs } from "./command.js";
 import { loadReviewFileContents } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
+import { buildGitHubPrReviewDataset } from "./sources/github-pr.js";
 import { buildLocalReviewDataset } from "./sources/local.js";
 import type {
   ReviewCancelPayload,
@@ -121,13 +122,10 @@ export default function (pi: ExtensionAPI) {
     }
 
     const command = parseDiffReviewArgs(args);
-    if (command.mode !== "local") {
-      ctx.ui.notify("GitHub PR review is not implemented in this build yet.", "warning");
-      return;
-    }
-
-    const dataset = await buildLocalReviewDataset(pi, ctx);
-    const { repoRoot, files, commits } = dataset;
+    const dataset = command.mode === "github-pr"
+      ? await buildGitHubPrReviewDataset(pi, ctx, command.url)
+      : await buildLocalReviewDataset(pi, ctx);
+    const { workingRoot, files } = dataset;
     const analysis = createFallbackAnalysis(dataset, "AI analysis has not run yet.");
     if (files.length === 0) {
       ctx.ui.notify("No reviewable files found.", "info");
@@ -157,7 +155,7 @@ export default function (pi: ExtensionAPI) {
       const cached = contentCache.get(cacheKey);
       if (cached != null) return cached;
 
-      const pending = loadReviewFileContents(pi, repoRoot, file, scope, commitSha);
+      const pending = loadReviewFileContents(pi, workingRoot, file, scope, commitSha);
       contentCache.set(cacheKey, pending);
       return pending;
     };
