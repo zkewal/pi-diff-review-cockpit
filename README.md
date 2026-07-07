@@ -1,39 +1,43 @@
-# pi-diff-review
+# pi-diff-review-cockpit
 
-This is pure slop, see: https://pi.dev/session/#d4ce533cedbd60040f2622dc3db950e2
+`pi-diff-review-cockpit` is a review cockpit for Pi. Today it keeps the fast native diff window from `pi-diff-review` for local review. The MLP is adding source adapters, AI-generated review maps, findings triage, approval packets, and explicit GitHub PR review publishing in later tasks.
 
-It is my hope, that someone takes this idea and makes it gud.
+## Install
 
-Native diff review window for pi, powered by [Glimpse](https://github.com/hazat/glimpse) and Monaco.
-
-```
-pi install git:https://github.com/badlogic/pi-diff-review
+```bash
+pi install git:https://github.com/zkewal/pi-diff-review-cockpit
 ```
 
-## What it does
+For local development:
 
-Adds a `/diff-review` command to pi.
+```bash
+pi install /Users/kewalzanzmeria/Desktop/ho-repos/pi-diff-review-cockpit
+```
 
-The command:
+## Commands
 
-1. opens a native review window
-2. lets you switch between `git diff`, `last commit`, and `all files` scopes
-3. shows a collapsible sidebar with fuzzy file search
-4. shows git status markers in the sidebar for changed files and untracked files
-5. lazy-loads file contents on demand as you switch files and scopes
-6. lets you draft comments on the original side, modified side, or whole file
-7. inserts the resulting feedback prompt into the pi editor when you submit
+```text
+/diff-review
+```
+
+`/diff-review` preserves local review behavior for working tree diffs, last commit, commit history, and all-files snapshots.
+
+## Planned MLP Workflow
+
+```text
+/diff-review pr https://github.com/owner/repo/pull/123
+```
+
+`/diff-review pr <url>` is planned for the cockpit MLP. Later tasks will add the isolated review worktree, GitHub PR metadata loading, Review Map, Findings Inbox, and explicit GitHub review publishing flow.
+
+## Planned GitHub Publish Policy
+
+The planned cockpit workflow reads PR metadata and existing comments when GitHub access is available. It will not post comments, approvals, or change requests automatically. Publishing selected comments as a GitHub review will require a human click in the review window.
 
 ## Requirements
 
 - macOS, Linux, or Windows
 - Node.js 20+
 - `pi` installed
+- `gh` authenticated for private GitHub PRs in the planned cockpit workflow
 - internet access for the Tailwind and Monaco CDNs used by the review window
-
-### Windows notes
-
-Glimpse now supports Windows. To build the native host during install you need:
-
-- .NET 8 SDK
-- Microsoft Edge WebView2 Runtime
