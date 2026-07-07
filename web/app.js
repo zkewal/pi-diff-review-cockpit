@@ -27,9 +27,13 @@ const state = {
   fileContents: {},
   fileErrors: {},
   pendingRequestIds: {},
+  activeDiffSide: "modified",
+  activeDiffLine: null,
+  pendingHunkFocus: null,
 };
 
 const sidebarEl = document.getElementById("sidebar");
+const mainPaneEl = document.getElementById("main-pane");
 const sidebarTitleEl = document.getElementById("sidebar-title");
 const sidebarSearchInputEl = document.getElementById("sidebar-search-input");
 const toggleSidebarButton = document.getElementById("toggle-sidebar-button");
@@ -76,6 +80,8 @@ let originalModel = null;
 let modifiedModel = null;
 let originalDecorations = [];
 let modifiedDecorations = [];
+let originalKeyboardDecorations = [];
+let modifiedKeyboardDecorations = [];
 let activeViewZones = [];
 let editorResizeObserver = null;
 let requestSequence = 0;
@@ -360,6 +366,83 @@ function activeFileShowsDiff() {
   return activeComparison() != null;
 }
 
+function getEditorForSide(side) {
+  if (!diffEditor) return null;
+  return side === "original" ? diffEditor.getOriginalEditor() : diffEditor.getModifiedEditor();
+}
+
+function getFocusedDiffSide() {
+  if (!diffEditor) return state.activeDiffSide;
+  if (diffEditor.getOriginalEditor().hasTextFocus()) return "original";
+  if (diffEditor.getModifiedEditor().hasTextFocus()) return "modified";
+  return state.activeDiffSide;
+}
+
+function rangesForSide(comparison, side) {
+  if (!comparison) return [];
+  return side === "original"
+    ? comparison.commentableOriginalLines || []
+    : comparison.commentableModifiedLines || [];
+}
+
+function clampRangeToCommentable(startLine, endLine, ranges) {
+  const start = Math.min(startLine, endLine);
+  const end = Math.max(startLine, endLine);
+  const containingRange = (ranges || []).find((range) => start >= range.start && end <= range.end);
+  if (!containingRange) return null;
+  return { startLine: start, endLine: end };
+}
+
+function getReviewableRangesForFile(file = activeFile()) {
+  const comparison = getScopeComparison(file, state.currentScope);
+  if (!comparison) return [];
+
+  const modified = rangesForSide(comparison, "modified").map((range) => ({ ...range, side: "modified" }));
+  const original = rangesForSide(comparison, "original").map((range) => ({ ...range, side: "original" }));
+  const primary = modified.length > 0 ? modified : original;
+  return primary.sort((a, b) => a.start - b.start);
+}
+
+function updateKeyboardLineDecoration(side, startLine, endLine = startLine) {
+  if (!diffEditor || !monacoApi || startLine == null) return;
+  state.activeDiffSide = side;
+  state.activeDiffLine = startLine;
+  const decoration = {
+    range: new monacoApi.Range(startLine, 1, endLine, 1),
+    options: { isWholeLine: true, className: "review-keyboard-line" },
+  };
+
+  if (side === "original") {
+    originalKeyboardDecorations = diffEditor.getOriginalEditor().deltaDecorations(originalKeyboardDecorations, [decoration]);
+    modifiedKeyboardDecorations = diffEditor.getModifiedEditor().deltaDecorations(modifiedKeyboardDecorations, []);
+  } else {
+    modifiedKeyboardDecorations = diffEditor.getModifiedEditor().deltaDecorations(modifiedKeyboardDecorations, [decoration]);
+    originalKeyboardDecorations = diffEditor.getOriginalEditor().deltaDecorations(originalKeyboardDecorations, []);
+  }
+}
+
+function focusDiffLine(side, line, endLine = line) {
+  const editor = getEditorForSide(side);
+  if (!editor || line == null) return false;
+  state.activeDiffSide = side;
+  state.activeDiffLine = line;
+  editor.focus();
+  editor.setPosition({ lineNumber: line, column: 1 });
+  editor.revealLineInCenter(line);
+  updateKeyboardLineDecoration(side, line, endLine);
+  return true;
+}
+
+function getCurrentDiffPosition() {
+  const side = getFocusedDiffSide();
+  const editor = getEditorForSide(side);
+  const position = editor?.getPosition();
+  return {
+    side,
+    line: position?.lineNumber || state.activeDiffLine || null,
+  };
+}
+
 function getScopeFilePath(file) {
   const comparison = getScopeComparison(file, state.currentScope);
   return comparison?.newPath || comparison?.oldPath || file?.path || "";
@@ -564,12 +647,125 @@ function ensureFileLoaded(fileId, scope = state.currentScope) {
 function openFile(fileId) {
   if (state.activeFileId === fileId) {
     ensureFileLoaded(fileId, state.currentScope);
+    requestAnimationFrame(applyPendingHunkFocus);
     return;
   }
   saveCurrentScrollPosition();
   state.activeFileId = fileId;
+  state.activeDiffLine = null;
+  state.activeDiffSide = "modified";
   renderAll({ restoreFileScroll: true });
   ensureFileLoaded(fileId, state.currentScope);
+}
+
+function openFileWithPendingHunk(fileId, direction = 1) {
+  state.pendingHunkFocus = { fileId, direction };
+  openFile(fileId);
+}
+
+function getCurrentChapterIndex() {
+  const chapters = getReviewChapters();
+  if (chapters.length === 0) return -1;
+  if (state.activeInsight.type === "chapter") {
+    const index = chapters.findIndex((chapter) => chapter.id === state.activeInsight.id);
+    if (index >= 0) return index;
+  }
+  if (state.activeFileId) {
+    const index = chapters.findIndex((chapter) => (chapter.fileIds || []).includes(state.activeFileId));
+    if (index >= 0) return index;
+  }
+  return 0;
+}
+
+function openChapterByIndex(index) {
+  const chapters = getReviewChapters();
+  if (chapters.length === 0) return false;
+  const boundedIndex = Math.max(0, Math.min(chapters.length - 1, index));
+  const chapter = chapters[boundedIndex];
+  if (!chapter) return false;
+  state.activeSidebarTab = "review-map";
+  state.activeInsight = { type: "chapter", id: chapter.id };
+  const fileId = firstExistingChapterFileId(chapter);
+  if (fileId) {
+    openFileWithPendingHunk(fileId, 1);
+  } else {
+    renderAll({ restoreFileScroll: false });
+  }
+  return true;
+}
+
+function moveChapter(direction) {
+  const index = getCurrentChapterIndex();
+  if (index < 0) return false;
+  return openChapterByIndex(index + direction);
+}
+
+function getKeyboardFileList() {
+  if (state.activeInsight.type === "chapter") {
+    const chapter = getReviewChapter(state.activeInsight.id);
+    const files = chapter ? getChapterDisplayFiles(chapter) : [];
+    if (files.length > 0) return files;
+  }
+  const filteredFiles = getFilteredFiles();
+  return filteredFiles.length > 0 ? filteredFiles : getScopedFiles();
+}
+
+function moveFile(direction) {
+  const files = getKeyboardFileList();
+  if (files.length === 0) return false;
+  const foundIndex = files.findIndex((file) => file.id === state.activeFileId);
+  const currentIndex = foundIndex >= 0 ? foundIndex : direction > 0 ? -1 : files.length;
+  const nextIndex = Math.max(0, Math.min(files.length - 1, currentIndex + direction));
+  const nextFile = files[nextIndex];
+  if (!nextFile) return false;
+  openFileWithPendingHunk(nextFile.id, direction >= 0 ? 1 : -1);
+  return true;
+}
+
+function moveToAdjacentReviewFile(direction) {
+  const files = getKeyboardFileList().filter((file) => getReviewableRangesForFile(file).length > 0);
+  if (files.length === 0) return false;
+  const currentIndex = files.findIndex((file) => file.id === state.activeFileId);
+  const fallbackIndex = direction > 0 ? -1 : files.length;
+  const nextIndex = Math.max(0, Math.min(files.length - 1, (currentIndex >= 0 ? currentIndex : fallbackIndex) + direction));
+  const nextFile = files[nextIndex];
+  if (!nextFile || nextFile.id === state.activeFileId) return false;
+  openFileWithPendingHunk(nextFile.id, direction);
+  return true;
+}
+
+function focusHunk(direction) {
+  const file = activeFile();
+  const ranges = getReviewableRangesForFile(file);
+  if (ranges.length === 0) return moveToAdjacentReviewFile(direction);
+
+  const current = getCurrentDiffPosition();
+  const sameSideRanges = ranges.filter((range) => range.side === current.side);
+  const candidateRanges = sameSideRanges.length > 0 ? sameSideRanges : ranges;
+  const currentLine = current.line ?? (direction > 0 ? 0 : Number.POSITIVE_INFINITY);
+  const target = direction > 0
+    ? candidateRanges.find((range) => range.start > currentLine) || null
+    : [...candidateRanges].reverse().find((range) => range.start < currentLine) || null;
+
+  if (target) {
+    focusDiffLine(target.side, target.start, target.end);
+    return true;
+  }
+
+  return moveToAdjacentReviewFile(direction);
+}
+
+function applyPendingHunkFocus() {
+  const pending = state.pendingHunkFocus;
+  if (!pending || pending.fileId !== state.activeFileId) return;
+  const ranges = getReviewableRangesForFile(activeFile());
+  if (ranges.length === 0) {
+    state.pendingHunkFocus = null;
+    return;
+  }
+  const target = pending.direction < 0 ? ranges[ranges.length - 1] : ranges[0];
+  state.pendingHunkFocus = null;
+  if (target) focusDiffLine(target.side, target.start, target.end);
 }
 
 function renderTreeNode(node, depth) {
@@ -612,6 +808,7 @@ function renderTreeNode(node, depth) {
     const stats = diffstatHtml(fileDiffstatCounts(file), { compact: true });
     const button = document.createElement("button");
     button.type = "button";
+    if (file.id === state.activeFileId) button.setAttribute("aria-current", "true");
     button.className = [
       "group flex w-full items-center justify-between gap-2 px-2 py-1 text-left text-[13px]",
       file.id === state.activeFileId ? "bg-[#373e47] text-white" : reviewed ? "text-[#c9d1d9] hover:bg-[#21262d]" : "text-[#8b949e] hover:bg-[#21262d] hover:text-[#c9d1d9]",
@@ -647,6 +844,7 @@ function renderSearchResults(files) {
     const stats = diffstatHtml(fileDiffstatCounts(file), { compact: true });
     const button = document.createElement("button");
     button.type = "button";
+    if (file.id === state.activeFileId) button.setAttribute("aria-current", "true");
     button.className = [
       "group flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left",
       file.id === state.activeFileId ? "bg-[#373e47] text-white" : "text-[#c9d1d9] hover:bg-[#21262d]",
@@ -1017,6 +1215,7 @@ function renderReviewMap() {
     const stats = diffstatHtml(chapterDiffstatCounts(chapter), { compact: true, showZero: true });
     const button = document.createElement("button");
     button.type = "button";
+    if (active) button.setAttribute("aria-current", "true");
     button.className = [
       "mb-2 block w-full rounded-md border p-3 text-left",
       active ? "border-[#2ea043]/40 bg-[#238636]/10" : "border-review-border bg-[#010409] hover:bg-[#161b22]",
@@ -1060,6 +1259,7 @@ function renderFindings() {
     const active = state.activeInsight.type === "finding" && state.activeInsight.id === finding.id;
     const button = document.createElement("button");
     button.type = "button";
+    if (active) button.setAttribute("aria-current", "true");
     button.className = [
       "mb-2 block w-full rounded-md border p-3 text-left",
       active ? "border-[#2ea043]/40 bg-[#238636]/10" : "border-review-border bg-[#010409] hover:bg-[#161b22]",
@@ -1183,10 +1383,22 @@ function showTextModal(options) {
   document.body.appendChild(backdrop);
   const textarea = backdrop.querySelector("#review-modal-text");
   const close = () => backdrop.remove();
-  backdrop.querySelector("#review-modal-cancel").addEventListener("click", close);
-  backdrop.querySelector("#review-modal-save").addEventListener("click", () => {
+  const save = () => {
     options.onSave(textarea.value.trim());
     close();
+  };
+  backdrop.querySelector("#review-modal-cancel").addEventListener("click", close);
+  backdrop.querySelector("#review-modal-save").addEventListener("click", save);
+  backdrop.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      save();
+    }
   });
   backdrop.addEventListener("click", (event) => {
     if (event.target === backdrop) close();
@@ -1255,10 +1467,7 @@ function showPublishGitHubModal() {
   const eventSelect = backdrop.querySelector("#github-review-event");
   const textarea = backdrop.querySelector("#github-review-body");
   const close = () => backdrop.remove();
-
-  eventSelect.value = suggestedGitHubReviewEvent();
-  backdrop.querySelector("#github-publish-cancel").addEventListener("click", close);
-  backdrop.querySelector("#github-publish-submit").addEventListener("click", () => {
+  const publish = () => {
     syncCommentBodiesFromDOM();
     window.glimpse.send({
       type: "publish-github-review",
@@ -1267,6 +1476,21 @@ function showPublishGitHubModal() {
       submit: buildSubmitPayload(),
     });
     close();
+  };
+
+  eventSelect.value = suggestedGitHubReviewEvent();
+  backdrop.querySelector("#github-publish-cancel").addEventListener("click", close);
+  backdrop.querySelector("#github-publish-submit").addEventListener("click", publish);
+  backdrop.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      publish();
+    }
   });
   backdrop.addEventListener("click", (event) => {
     if (event.target === backdrop) close();
@@ -1339,6 +1563,32 @@ function renderCommentDOM(comment, onDelete) {
   textarea.value = comment.body || "";
   textarea.addEventListener("input", () => {
     comment.body = textarea.value;
+  });
+  textarea.addEventListener("keydown", (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      comment.body = textarea.value.trim();
+      if (!comment.body) {
+        onDelete();
+        return;
+      }
+      textarea.blur();
+      if (comment.side !== "file") {
+        setTimeout(() => focusDiffLine(comment.side, comment.startLine, comment.endLine ?? comment.startLine), 0);
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (!textarea.value.trim()) {
+        onDelete();
+        return;
+      }
+      textarea.blur();
+      if (comment.side !== "file") {
+        setTimeout(() => focusDiffLine(comment.side, comment.startLine, comment.endLine ?? comment.startLine), 0);
+      }
+    }
   });
   container.querySelector("[data-action='delete']").addEventListener("click", onDelete);
   if (!comment.body) setTimeout(() => textarea.focus(), 50);
@@ -1503,10 +1753,12 @@ function mountFile(options = {}) {
     layoutEditor();
     if (options.restoreFileScroll) restoreFileScrollPosition();
     if (options.preserveScroll) restoreScrollState(scrollState);
+    applyPendingHunkFocus();
     setTimeout(() => {
       layoutEditor();
       if (options.restoreFileScroll) restoreFileScrollPosition();
       if (options.preserveScroll) restoreScrollState(scrollState);
+      applyPendingHunkFocus();
     }, 50);
   });
 }
@@ -1541,24 +1793,45 @@ function renderAll(options = {}) {
   }
 }
 
+function addInlineComment(side, startLine, endLine = startLine) {
+  const file = activeFile();
+  if (!file || !canCommentOnSide(file, side) || !isActiveFileReady()) return false;
+  const ranges = rangesForSide(activeComparison(), side);
+  const commentRange = clampRangeToCommentable(startLine, endLine, ranges);
+  if (!commentRange) return false;
+
+  state.comments.push({
+    id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
+    fileId: file.id,
+    scope: state.currentScope,
+    commitSha: state.currentScope === "commit" ? state.selectedCommitSha : undefined,
+    side,
+    startLine: commentRange.startLine,
+    endLine: commentRange.endLine,
+    body: "",
+  });
+  updateCommentsUI();
+  focusDiffLine(side, commentRange.startLine, commentRange.endLine);
+  return true;
+}
+
+function addInlineCommentAtCursor() {
+  const side = getFocusedDiffSide();
+  const editor = getEditorForSide(side);
+  if (!editor) return false;
+  const selection = editor.getSelection();
+  const position = editor.getPosition();
+  const startLine = selection ? selection.startLineNumber : position?.lineNumber;
+  const endLine = selection ? selection.endLineNumber : position?.lineNumber;
+  if (!startLine || !endLine) return false;
+  return addInlineComment(side, startLine, endLine);
+}
+
 function createGlyphHoverActions(editor, side) {
   let hoverDecoration = [];
 
   function openDraftAtLine(line) {
-    const file = activeFile();
-    if (!file || !canCommentOnSide(file, side) || !isActiveFileReady()) return;
-    state.comments.push({
-      id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
-      fileId: file.id,
-      scope: state.currentScope,
-      commitSha: state.currentScope === "commit" ? state.selectedCommitSha : undefined,
-      side,
-      startLine: line,
-      endLine: line,
-      body: "",
-    });
-    updateCommentsUI();
-    editor.revealLineInCenter(line);
+    addInlineComment(side, line, line);
   }
 
   editor.onMouseMove((event) => {
@@ -1670,6 +1943,8 @@ function setupMonaco() {
 
     createGlyphHoverActions(diffEditor.getOriginalEditor(), "original");
     createGlyphHoverActions(diffEditor.getModifiedEditor(), "modified");
+    trackEditorCursor(diffEditor.getOriginalEditor(), "original");
+    trackEditorCursor(diffEditor.getModifiedEditor(), "modified");
 
     if (typeof ResizeObserver !== "undefined") {
       editorResizeObserver = new ResizeObserver(() => {
@@ -1734,16 +2009,304 @@ function buildSubmitPayload() {
   };
 }
 
-submitButton.addEventListener("click", () => {
+function finishReview() {
   syncCommentBodiesFromDOM();
   window.glimpse.send(buildSubmitPayload());
   window.glimpse.close();
-});
+}
 
-cancelButton.addEventListener("click", () => {
+function cancelReview() {
   window.glimpse.send({ type: "cancel" });
   window.glimpse.close();
-});
+}
+
+function toggleChangedAreasOnly() {
+  if (!activeFileShowsDiff()) return;
+  state.hideUnchanged = !state.hideUnchanged;
+  applyEditorOptions();
+  updateToggleButtons();
+  requestAnimationFrame(layoutEditor);
+}
+
+function toggleWrapLines() {
+  state.wrapLines = !state.wrapLines;
+  applyEditorOptions();
+  updateToggleButtons();
+  requestAnimationFrame(() => {
+    layoutEditor();
+    setTimeout(layoutEditor, 50);
+  });
+}
+
+function toggleCurrentFileReviewed() {
+  const file = activeFile();
+  if (!file) return;
+  state.reviewedFiles[file.id] = !isFileReviewed(file.id);
+  renderTree();
+}
+
+function toggleCurrentChapterReviewed() {
+  const chapters = getReviewChapters();
+  const chapter = chapters[getCurrentChapterIndex()];
+  if (!chapter) return;
+  state.reviewedChapters[chapter.id] = !state.reviewedChapters[chapter.id];
+  state.activeInsight = { type: "chapter", id: chapter.id };
+  renderTree();
+}
+
+function focusSidebarPane() {
+  if (state.sidebarCollapsed) {
+    state.sidebarCollapsed = false;
+    updateSidebarLayout();
+  }
+  sidebarEl.focus();
+  setTimeout(() => {
+    const target = fileTreeEl.querySelector("[aria-current='true'], button") || sidebarSearchInputEl;
+    target?.focus();
+  }, 0);
+}
+
+function focusDiffPane() {
+  mainPaneEl.focus();
+  const ranges = getReviewableRangesForFile(activeFile());
+  if (state.activeDiffLine != null) {
+    focusDiffLine(state.activeDiffSide, state.activeDiffLine);
+    return;
+  }
+  if (ranges[0]) {
+    focusDiffLine(ranges[0].side, ranges[0].start, ranges[0].end);
+    return;
+  }
+  diffEditor?.getModifiedEditor().focus();
+}
+
+function focusInsightPane() {
+  insightPanelEl.focus();
+  setTimeout(() => {
+    const target = insightContentEl.querySelector("[aria-current='true'], button, textarea");
+    target?.focus();
+  }, 0);
+}
+
+function focusFileSearch() {
+  if (state.sidebarCollapsed) {
+    state.sidebarCollapsed = false;
+    updateSidebarLayout();
+  }
+  sidebarSearchInputEl.focus();
+  sidebarSearchInputEl.select();
+}
+
+function trackEditorCursor(editor, side) {
+  editor.onDidChangeCursorPosition((event) => {
+    if (!editor.hasTextFocus()) return;
+    state.activeDiffSide = side;
+    state.activeDiffLine = event.position?.lineNumber ?? null;
+    if (state.activeDiffLine != null) updateKeyboardLineDecoration(side, state.activeDiffLine);
+  });
+}
+
+function isTextEntryTarget(target) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.closest(".review-modal-card")) return true;
+  if (target.matches("textarea[data-comment-id], #sidebar-search-input, input, select, [contenteditable='true']")) return true;
+  return target.tagName === "TEXTAREA" && target.hasAttribute("data-comment-id");
+}
+
+function shortcutAction(id, label, shortcut, run, options = {}) {
+  return {
+    id,
+    label,
+    shortcut,
+    keywords: options.keywords || "",
+    enabled: options.enabled || (() => true),
+    match: options.match || (() => false),
+    run,
+  };
+}
+
+function getKeyboardActions() {
+  const key = (expected, options = {}) => (event) => {
+    if (options.metaOrCtrl && !(event.metaKey || event.ctrlKey)) return false;
+    if (!options.metaOrCtrl && (event.metaKey || event.ctrlKey || event.altKey)) return false;
+    if (!!options.shift !== event.shiftKey) return false;
+    return event.key.toLowerCase() === expected.toLowerCase();
+  };
+
+  return [
+    shortcutAction("help", "Show keyboard shortcuts", "?", showKeyboardShortcutsModal, {
+      keywords: "help shortcuts",
+      match: (event) => !event.metaKey && !event.ctrlKey && !event.altKey && event.key === "?",
+    }),
+    shortcutAction("palette", "Open command palette", "Cmd/Ctrl+K", showCommandPalette, {
+      keywords: "command palette",
+      match: key("k", { metaOrCtrl: true }),
+    }),
+    shortcutAction("focus-sidebar", "Focus review map or files", "1", focusSidebarPane, { match: key("1") }),
+    shortcutAction("focus-diff", "Focus diff", "2", focusDiffPane, { match: key("2") }),
+    shortcutAction("focus-context", "Focus chapter context", "3", focusInsightPane, { match: key("3") }),
+    shortcutAction("search-files", "Search files", "/", focusFileSearch, { match: key("/") }),
+    shortcutAction("next-chapter", "Next chapter", "]", () => moveChapter(1), { match: key("]") }),
+    shortcutAction("previous-chapter", "Previous chapter", "[", () => moveChapter(-1), { match: key("[") }),
+    shortcutAction("next-file", "Next file", "Shift+J", () => moveFile(1), { match: key("j", { shift: true }) }),
+    shortcutAction("previous-file", "Previous file", "Shift+K", () => moveFile(-1), { match: key("k", { shift: true }) }),
+    shortcutAction("next-hunk", "Next changed hunk", "J", () => focusHunk(1), { match: key("j") }),
+    shortcutAction("previous-hunk", "Previous changed hunk", "K", () => focusHunk(-1), { match: key("k") }),
+    shortcutAction("comment-line", "Add line comment", "C", addInlineCommentAtCursor, {
+      enabled: () => activeFileShowsDiff(),
+      match: key("c"),
+    }),
+    shortcutAction("comment-file", "Add file comment", "Shift+C", showFileCommentModal, { match: key("c", { shift: true }) }),
+    shortcutAction("mark-file-reviewed", "Mark file reviewed", "R", toggleCurrentFileReviewed, { match: key("r") }),
+    shortcutAction("mark-chapter-reviewed", "Mark chapter reviewed", "Shift+R", toggleCurrentChapterReviewed, { match: key("r", { shift: true }) }),
+    shortcutAction("toggle-changed-only", "Toggle changed areas only", "U", toggleChangedAreasOnly, {
+      enabled: () => activeFileShowsDiff(),
+      match: key("u"),
+    }),
+    shortcutAction("toggle-wrap", "Toggle line wrap", "W", toggleWrapLines, { match: key("w") }),
+    shortcutAction("overall-note", "Edit overall note", "O", showOverallCommentModal, { match: key("o") }),
+    shortcutAction("approval-packet", "Edit approval packet", "A", showApprovalPacketModal, { match: key("a") }),
+    shortcutAction("publish-github", "Publish to GitHub", "P", showPublishGitHubModal, {
+      enabled: () => !publishGitHubButton.classList.contains("hidden"),
+      match: key("p"),
+    }),
+    shortcutAction("finish-review", "Finish review", "", finishReview, {
+      keywords: "submit complete done",
+    }),
+  ];
+}
+
+function showKeyboardShortcutsModal() {
+  const actions = getKeyboardActions().filter((action) => action.shortcut);
+  const backdrop = document.createElement("div");
+  backdrop.className = "review-modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="review-modal-card">
+      <div class="mb-1 text-base font-semibold text-white">Keyboard shortcuts</div>
+      <div class="mb-4 text-sm text-review-muted">Navigate the review, add comments, and mark progress without leaving the keyboard.</div>
+      <div class="grid gap-2 sm:grid-cols-2">
+        ${actions.map((action) => `
+          <div class="flex items-center justify-between gap-4 rounded-md border border-review-border bg-[#010409] px-3 py-2">
+            <span class="text-sm text-review-text">${escapeHtml(action.label)}</span>
+            <kbd class="shrink-0 rounded border border-review-border bg-review-panel px-2 py-1 text-[11px] font-semibold text-review-muted">${escapeHtml(action.shortcut)}</kbd>
+          </div>
+        `).join("")}
+      </div>
+      <div class="mt-4 flex justify-end">
+        <button data-action="close" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-4 py-2 text-sm font-medium text-review-text hover:bg-[#21262d]">Close</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  const close = () => backdrop.remove();
+  backdrop.querySelector("[data-action='close']").addEventListener("click", close);
+  backdrop.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+    }
+  });
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) close();
+  });
+  backdrop.querySelector("[data-action='close']").focus();
+}
+
+function showCommandPalette() {
+  const backdrop = document.createElement("div");
+  backdrop.className = "review-modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="review-modal-card p-0">
+      <div class="border-b border-review-border p-3">
+        <input id="command-palette-input" type="text" spellcheck="false" autocomplete="off" placeholder="Run a review command" class="w-full rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none placeholder:text-review-muted focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+      </div>
+      <div id="command-palette-list" class="scrollbar-thin max-h-[360px] overflow-auto p-2"></div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  const input = backdrop.querySelector("#command-palette-input");
+  const list = backdrop.querySelector("#command-palette-list");
+  let selectedIndex = 0;
+
+  const getVisibleActions = () => {
+    const query = input.value.trim().toLowerCase();
+    return getKeyboardActions()
+      .filter((action) => action.enabled())
+      .filter((action) => {
+        if (!query) return true;
+        return `${action.label} ${action.shortcut} ${action.keywords}`.toLowerCase().includes(query);
+      });
+  };
+
+  const runAction = (action) => {
+    if (!action || !action.enabled()) return;
+    backdrop.remove();
+    action.run();
+  };
+
+  const render = () => {
+    const actions = getVisibleActions();
+    selectedIndex = Math.max(0, Math.min(selectedIndex, actions.length - 1));
+    list.innerHTML = actions.length === 0
+      ? `<div class="px-3 py-6 text-center text-sm text-review-muted">No matching commands.</div>`
+      : actions.map((action, index) => `
+        <button data-action-id="${escapeHtml(action.id)}" class="flex w-full items-center justify-between gap-4 rounded-md px-3 py-2 text-left ${index === selectedIndex ? "bg-[#238636]/15 text-white" : "text-review-text hover:bg-[#21262d]"}">
+          <span class="text-sm">${escapeHtml(action.label)}</span>
+          ${action.shortcut ? `<kbd class="shrink-0 rounded border border-review-border bg-review-panel px-2 py-1 text-[11px] font-semibold text-review-muted">${escapeHtml(action.shortcut)}</kbd>` : `<span class="text-[11px] text-review-muted">Palette</span>`}
+        </button>
+      `).join("");
+    list.querySelectorAll("[data-action-id]").forEach((button) => {
+      button.addEventListener("click", () => runAction(actions.find((action) => action.id === button.getAttribute("data-action-id"))));
+    });
+  };
+
+  input.addEventListener("input", () => {
+    selectedIndex = 0;
+    render();
+  });
+  backdrop.addEventListener("keydown", (event) => {
+    const actions = getVisibleActions();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      backdrop.remove();
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      selectedIndex = Math.min(actions.length - 1, selectedIndex + 1);
+      render();
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      selectedIndex = Math.max(0, selectedIndex - 1);
+      render();
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      runAction(actions[selectedIndex]);
+    }
+  });
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) backdrop.remove();
+  });
+  render();
+  input.focus();
+}
+
+function handleGlobalShortcut(event) {
+  if (isTextEntryTarget(event.target)) return;
+  if (document.querySelector(".review-modal-backdrop")) return;
+  const action = getKeyboardActions().find((candidate) => candidate.enabled() && candidate.match(event));
+  if (!action) return;
+  event.preventDefault();
+  action.run();
+}
+
+submitButton.addEventListener("click", finishReview);
+
+cancelButton.addEventListener("click", cancelReview);
 
 publishGitHubButton.addEventListener("click", () => {
   showPublishGitHubModal();
@@ -1761,29 +2324,11 @@ fileCommentButton.addEventListener("click", () => {
   showFileCommentModal();
 });
 
-toggleUnchangedButton.addEventListener("click", () => {
-  state.hideUnchanged = !state.hideUnchanged;
-  applyEditorOptions();
-  updateToggleButtons();
-  requestAnimationFrame(layoutEditor);
-});
+toggleUnchangedButton.addEventListener("click", toggleChangedAreasOnly);
 
-toggleWrapButton.addEventListener("click", () => {
-  state.wrapLines = !state.wrapLines;
-  applyEditorOptions();
-  updateToggleButtons();
-  requestAnimationFrame(() => {
-    layoutEditor();
-    setTimeout(layoutEditor, 50);
-  });
-});
+toggleWrapButton.addEventListener("click", toggleWrapLines);
 
-toggleReviewedButton.addEventListener("click", () => {
-  const file = activeFile();
-  if (!file) return;
-  state.reviewedFiles[file.id] = !isFileReviewed(file.id);
-  renderTree();
-});
+toggleReviewedButton.addEventListener("click", toggleCurrentFileReviewed);
 
 tabReviewMapButton.addEventListener("click", () => setSidebarTab("review-map"));
 
@@ -1838,6 +2383,8 @@ commitSelectEl.addEventListener("change", () => {
   const file = activeFile();
   if (file) ensureFileLoaded(file.id, state.currentScope);
 });
+
+document.addEventListener("keydown", handleGlobalShortcut);
 
 populateCommitSelect();
 ensureActiveFileForScope();

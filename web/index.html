@@ -107,6 +107,12 @@
     background: #58a6ff;
   }
 
+  .monaco-editor .review-keyboard-line {
+    background: rgba(88, 166, 255, 0.16);
+    outline: 1px solid rgba(88, 166, 255, 0.45);
+    outline-offset: -1px;
+  }
+
   .monaco-editor .review-glyph-plus {
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' width='16' height='16'%3E%3Cpath fill='%23c9d1d9' d='M7.75 2a.75.75 0 0 1 .75.75V7h4.25a.75.75 0 0 1 0 1.5H8.5v4.25a.75.75 0 0 1-1.5 0V8.5H2.75a.75.75 0 0 1 0-1.5H7V2.75A.75.75 0 0 1 7.75 2Z'%3E%3C/path%3E%3C/svg%3E");
     background-repeat: no-repeat;
@@ -203,7 +209,7 @@
   </div>
 
   <div id="content-layout" class="flex min-h-0 flex-1">
-    <aside id="sidebar" class="flex min-h-0 shrink-0 flex-col border-r border-review-border bg-[#0d1117]" style="width: 280px; min-width: 280px; flex-basis: 280px; overflow: hidden;">
+    <aside id="sidebar" tabindex="-1" class="flex min-h-0 shrink-0 flex-col border-r border-review-border bg-[#0d1117]" style="width: 280px; min-width: 280px; flex-basis: 280px; overflow: hidden;">
     <div class="border-b border-review-border px-4 py-3">
       <div class="mb-2 flex items-center justify-between gap-2">
         <div id="sidebar-title" class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Files</div>
@@ -226,7 +232,7 @@
     <div id="file-tree" class="scrollbar-thin min-h-0 flex-1 overflow-auto px-2 pb-2"></div>
   </aside>
 
-    <main id="main-pane" class="flex min-h-0 min-w-0 flex-1 flex-col bg-[#0d1117]">
+    <main id="main-pane" tabindex="-1" class="flex min-h-0 min-w-0 flex-1 flex-col bg-[#0d1117]">
     <div class="flex items-center justify-between gap-4 border-b border-review-border bg-[#0d1117] px-4 py-2">
       <div class="min-w-0">
         <div id="current-file-label" class="truncate text-sm font-semibold text-white"></div>
@@ -242,7 +248,7 @@
     <div id="file-comments-container" class="hidden border-b border-review-border bg-[#0d1117] px-4 py-0"></div>
     <div id="editor-container" class="min-h-0 min-w-0 flex-1"></div>
     </main>
-    <aside id="insight-panel" class="flex min-h-0 w-[360px] shrink-0 flex-col border-l border-review-border bg-[#0d1117]">
+    <aside id="insight-panel" tabindex="-1" class="flex min-h-0 w-[360px] shrink-0 flex-col border-l border-review-border bg-[#0d1117]">
       <div class="border-b border-review-border px-4 py-3">
         <div id="insight-panel-title" class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review context</div>
         <div id="source-label" class="mt-1 truncate text-sm font-medium text-white"></div>
