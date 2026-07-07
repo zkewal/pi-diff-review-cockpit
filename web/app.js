@@ -865,11 +865,16 @@ function renderInsightForChapter(chapter) {
           ${visibleFiles.length === 0 ? `<div class="text-sm text-review-muted">No files linked.</div>` : visibleFiles.map((file) => {
             const status = file.gitDiff?.status ?? file.worktreeStatus;
             const stats = diffstatHtml(diffstatCountsFromComparison(file.gitDiff), { compact: true });
+            const active = file.id === state.activeFileId;
             return `
-              <button data-file-id="${escapeHtml(file.id)}" class="block w-full rounded-md px-2 py-1.5 text-left text-xs text-review-text hover:bg-[#21262d]">
+              <button
+                data-file-id="${escapeHtml(file.id)}"
+                ${active ? `aria-current="true"` : ""}
+                class="block w-full rounded-md border px-2 py-1.5 text-left text-xs ${active ? "border-[#2ea043]/40 bg-[#238636]/10 text-white" : "border-transparent text-review-text hover:bg-[#21262d]"}"
+              >
                 <span class="flex min-w-0 items-center gap-2">
                   ${status ? `<span class="shrink-0 font-medium ${statusBadgeClass(status)}">${escapeHtml(statusLabel(status).charAt(0))}</span>` : ""}
-                  <span class="min-w-0 flex-1 truncate">${escapeHtml(file.path)}</span>
+                  <span class="min-w-0 flex-1 truncate ${active ? "font-medium" : ""}">${escapeHtml(file.path)}</span>
                   ${stats}
                 </span>
               </button>
