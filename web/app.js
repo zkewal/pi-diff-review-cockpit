@@ -321,6 +321,55 @@ function isFileReviewed(fileId) {
   return state.reviewedFiles[fileId] === true;
 }
 
+function isCommentInScope(comment, scope = state.currentScope) {
+  return comment.scope === scope && (comment.scope !== "commit" || comment.commitSha === state.selectedCommitSha);
+}
+
+function getDraftComments(scope = state.currentScope) {
+  return state.comments.filter((comment) => isCommentInScope(comment, scope));
+}
+
+function getDraftCommentsForFile(fileId, scope = state.currentScope) {
+  return state.comments.filter((comment) => comment.fileId === fileId && isCommentInScope(comment, scope));
+}
+
+function getDraftCommentsForChapter(chapter, scope = state.currentScope) {
+  const fileIds = new Set(chapter.fileIds || []);
+  return state.comments.filter((comment) => fileIds.has(comment.fileId) && isCommentInScope(comment, scope));
+}
+
+function commentLocationLabel(comment) {
+  if (comment.side === "file" || comment.startLine == null) return "File comment";
+  const side = comment.side === "original" ? "Original" : "Modified";
+  const range = comment.endLine != null && comment.endLine !== comment.startLine
+    ? `${comment.startLine}-${comment.endLine}`
+    : `${comment.startLine}`;
+  return `${side} line ${range}`;
+}
+
+function commentSummaryHtml(comments, emptyText) {
+  const visibleComments = comments.slice(0, 6);
+  const hiddenCount = Math.max(0, comments.length - visibleComments.length);
+  if (visibleComments.length === 0) {
+    return `<div class="text-sm text-review-muted">${escapeHtml(emptyText)}</div>`;
+  }
+  return `
+    <div class="space-y-2">
+      ${visibleComments.map((comment) => {
+        const file = getFileById(comment.fileId);
+        const body = String(comment.body || "").trim();
+        return `
+          <div class="rounded-md border border-review-border bg-[#010409] p-2">
+            <div class="truncate text-[11px] font-medium text-review-muted">${escapeHtml(getScopeDisplayPath(file, comment.scope))} • ${escapeHtml(commentLocationLabel(comment))}</div>
+            <div class="mt-1 line-clamp-2 text-xs leading-5 text-review-text">${escapeHtml(body || "Empty draft comment")}</div>
+          </div>
+        `;
+      }).join("")}
+      ${hiddenCount > 0 ? `<div class="px-2 text-xs text-review-muted">${hiddenCount} more draft comment(s).</div>` : ""}
+    </div>
+  `;
+}
+
 function getScopedFiles() {
   switch (state.currentScope) {
     case "git-diff":
@@ -799,7 +848,7 @@ function renderTreeNode(node, depth) {
     }
 
     const file = child.file;
-    const count = state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope && (comment.scope !== "commit" || comment.commitSha === state.selectedCommitSha)).length;
+    const count = getDraftCommentsForFile(file.id).length;
     const reviewed = isFileReviewed(file.id);
     const requestState = getRequestState(file.id, state.currentScope);
     const loading = requestState.requestId != null && requestState.contents == null;
@@ -835,7 +884,7 @@ function renderSearchResults(files) {
     const path = getFileSearchPath(file);
     const baseName = getBaseName(path);
     const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-    const count = state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope && (comment.scope !== "commit" || comment.commitSha === state.selectedCommitSha)).length;
+    const count = getDraftCommentsForFile(file.id).length;
     const reviewed = isFileReviewed(file.id);
     const requestState = getRequestState(file.id, state.currentScope);
     const loading = requestState.requestId != null && requestState.contents == null;
@@ -992,11 +1041,18 @@ function insightActionButtonClass(active) {
 function renderDefaultInsight() {
   insightPanelTitleEl.textContent = "Review context";
   const packet = reviewData.analysis?.approvalPacket;
+  const draftComments = getDraftComments();
   if (!packet) {
     insightContentEl.innerHTML = `
-      <div class="space-y-3 text-sm text-review-muted">
-        <div>No analysis context available.</div>
-        <div>Select a chapter or finding to inspect details.</div>
+      <div class="space-y-4">
+        <div class="space-y-3 text-sm text-review-muted">
+          <div>No analysis context available.</div>
+          <div>Select a chapter or AI finding to inspect details.</div>
+        </div>
+        <div>
+          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Draft comments</div>
+          <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments yet.")}</div>
+        </div>
       </div>
     `;
     return;
@@ -1018,7 +1074,12 @@ function renderDefaultInsight() {
       ${packet.body ? `
         <pre class="scrollbar-thin max-h-[360px] overflow-auto whitespace-pre-wrap rounded-md border border-review-border bg-[#010409] p-3 text-xs leading-5 text-review-text">${escapeHtml(packet.body)}</pre>
       ` : ""}
-      <div class="text-xs text-review-muted">Select a chapter or finding to inspect details.</div>
+      <div>
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Draft comments</div>
+        <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments yet.")}</div>
+        <div class="mt-2 text-xs text-review-muted">Draft comments are local until you finish the review or publish to GitHub.</div>
+      </div>
+      <div class="text-xs text-review-muted">Select a chapter or AI finding to inspect details.</div>
     </div>
   `;
 }
@@ -1040,6 +1101,7 @@ function renderInsightForChapter(chapter) {
   const visibleFiles = files.slice(0, 60);
   const hiddenFileCount = Math.max(0, files.length - visibleFiles.length);
   const findings = (chapter.findingIds || []).map(getReviewFinding).filter(Boolean);
+  const draftComments = getDraftCommentsForChapter(chapter);
 
   insightContentEl.innerHTML = `
     <div class="space-y-4">
@@ -1054,6 +1116,8 @@ function renderInsightForChapter(chapter) {
         <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-review-muted">
           ${diffstatHtml(chapterDiffstatCounts(chapter), { showZero: true })}
           <span>${(chapter.fileIds || []).length} file(s)</span>
+          <span>${draftComments.length} draft comment(s)</span>
+          <span>${(chapter.findingIds || []).length} AI finding(s)</span>
         </div>
       </div>
       <button id="chapter-reviewed-toggle" class="${insightActionButtonClass(reviewed)}">${reviewed ? "Mark not reviewed" : "Mark chapter reviewed"}</button>
@@ -1064,6 +1128,7 @@ function renderInsightForChapter(chapter) {
             const status = file.gitDiff?.status ?? file.worktreeStatus;
             const stats = diffstatHtml(diffstatCountsFromComparison(file.gitDiff), { compact: true });
             const active = file.id === state.activeFileId;
+            const commentCount = getDraftCommentsForFile(file.id).length;
             return `
               <button
                 data-file-id="${escapeHtml(file.id)}"
@@ -1073,6 +1138,7 @@ function renderInsightForChapter(chapter) {
                 <span class="flex min-w-0 items-center gap-2">
                   ${status ? `<span class="shrink-0 font-medium ${statusBadgeClass(status)}">${escapeHtml(statusLabel(status).charAt(0))}</span>` : ""}
                   <span class="min-w-0 flex-1 truncate ${active ? "font-medium" : ""}">${escapeHtml(file.path)}</span>
+                  ${commentCount > 0 ? `<span class="shrink-0 rounded-full bg-[#1f2937] px-1.5 py-0.5 text-[10px] font-medium text-[#c9d1d9]">${commentCount} comment(s)</span>` : ""}
                   ${stats}
                 </span>
               </button>
@@ -1082,9 +1148,13 @@ function renderInsightForChapter(chapter) {
         </div>
       </div>
       <div>
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Findings</div>
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Draft comments</div>
+        <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments in this chapter.")}</div>
+      </div>
+      <div>
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">AI findings</div>
         <div class="mt-2 space-y-2">
-          ${findings.length === 0 ? `<div class="text-sm text-review-muted">No findings linked.</div>` : findings.map((finding) => `
+          ${findings.length === 0 ? `<div class="text-sm text-review-muted">No AI findings linked.</div>` : findings.map((finding) => `
             <button data-finding-id="${escapeHtml(finding.id)}" class="block w-full rounded-md border border-review-border bg-[#010409] p-2 text-left hover:bg-[#161b22]">
               <div class="flex items-center justify-between gap-2 text-[11px]">
                 <span class="${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
@@ -1130,7 +1200,7 @@ function setFindingStatus(finding, status) {
 }
 
 function renderInsightForFinding(finding) {
-  insightPanelTitleEl.textContent = "Finding context";
+  insightPanelTitleEl.textContent = "AI finding context";
   const status = state.findingStatuses[finding.id] || "new";
   const acceptedComment = state.acceptedFindingComments[finding.id] || "";
 
@@ -1213,6 +1283,7 @@ function renderReviewMap() {
     const reviewed = state.reviewedChapters[chapter.id] === true;
     const active = state.activeInsight.type === "chapter" && state.activeInsight.id === chapter.id;
     const stats = diffstatHtml(chapterDiffstatCounts(chapter), { compact: true, showZero: true });
+    const draftCommentCount = getDraftCommentsForChapter(chapter).length;
     const button = document.createElement("button");
     button.type = "button";
     if (active) button.setAttribute("aria-current", "true");
@@ -1230,7 +1301,8 @@ function renderReviewMap() {
       <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-review-muted">
         <span>${(chapter.fileIds || []).length} file(s)</span>
         ${stats}
-        <span>${(chapter.findingIds || []).length} finding(s)</span>
+        <span>${draftCommentCount} draft comment(s)</span>
+        <span>${(chapter.findingIds || []).length} AI finding(s)</span>
       </div>
     `;
     button.addEventListener("click", () => {
@@ -1307,7 +1379,7 @@ function renderTree() {
   analysisStatusEl.textContent = reviewData.analysis?.message || "";
 
   const scopedFiles = getScopedFiles();
-  const comments = state.comments.length;
+  const comments = getDraftComments().length;
 
   if (state.activeSidebarTab === "review-map") {
     const chapters = getReviewChapters();
@@ -1315,7 +1387,7 @@ function renderTree() {
     renderReviewMap();
     sidebarTitleEl.textContent = "Review map";
     setSummary(
-      `${chapters.length} chapter(s) • ${findings.length} finding(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}`,
+      `${chapters.length} chapter(s) • ${findings.length} AI finding(s) • ${comments} draft comment(s)${state.overallComment ? " • overall note" : ""}`,
       coverageDiffstatCounts(reviewData.analysis?.coverage),
     );
     updateToggleButtons();
@@ -1328,9 +1400,9 @@ function renderTree() {
     const findings = getReviewFindings();
     const newFindings = findings.filter((finding) => (state.findingStatuses[finding.id] || "new") === "new").length;
     renderFindings();
-    sidebarTitleEl.textContent = "Findings";
+    sidebarTitleEl.textContent = "AI findings";
     setSummary(
-      `${findings.length} finding(s) • ${newFindings} new • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}`,
+      `${findings.length} AI finding(s) • ${newFindings} new • ${comments} draft comment(s)${state.overallComment ? " • overall note" : ""}`,
       coverageDiffstatCounts(reviewData.analysis?.coverage),
     );
     updateToggleButtons();
@@ -1358,7 +1430,7 @@ function renderTree() {
   sidebarTitleEl.textContent = scopeLabel(state.currentScope);
   const filteredSuffix = state.fileFilter.trim() ? ` • ${visibleFiles.length} shown` : "";
   setSummary(
-    `${scopedFiles.length} file(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}${filteredSuffix}`,
+    `${scopedFiles.length} file(s) • ${comments} draft comment(s)${state.overallComment ? " • overall note" : ""}${filteredSuffix}`,
     state.currentScope === "all-files" ? null : scopedDiffstatCounts(scopedFiles, state.currentScope),
   );
   updateToggleButtons();
@@ -1448,7 +1520,7 @@ function showPublishGitHubModal() {
   backdrop.innerHTML = `
     <div class="review-modal-card">
       <div class="mb-2 text-base font-semibold text-white">Publish to GitHub</div>
-      <div class="mb-4 text-sm text-review-muted">Choose the review verdict and body to post.</div>
+      <div class="mb-4 text-sm text-review-muted">Choose the review verdict and body to post. Current local draft comments will be sent to GitHub; published comments are not synced back into this window yet.</div>
       <label class="mb-2 block text-xs font-medium uppercase tracking-wider text-review-muted" for="github-review-event">Verdict</label>
       <select id="github-review-event" class="mb-4 w-full rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
         <option value="COMMENT">Comment</option>
@@ -1555,11 +1627,30 @@ function renderCommentDOM(comment, onDelete) {
   container.innerHTML = `
     <div class="mb-2 flex items-center justify-between gap-3">
       <div class="text-xs font-semibold text-review-text">${escapeHtml(title)}</div>
-      <button data-action="delete" class="cursor-pointer rounded-md border border-transparent bg-transparent px-2 py-1 text-xs font-medium text-review-muted hover:bg-red-500/10 hover:text-red-400">Delete</button>
+      <span class="text-[11px] font-medium text-review-muted">Draft</span>
     </div>
     <textarea data-comment-id="${escapeHtml(comment.id)}" class="scrollbar-thin min-h-[76px] w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="Leave a comment"></textarea>
+    <div class="mt-2 flex items-center justify-between gap-3">
+      <div class="text-xs text-review-muted">Saved locally until you finish the review or publish to GitHub.</div>
+      <div class="flex shrink-0 items-center gap-2">
+        <button data-action="delete" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Delete</button>
+        <button data-action="save" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Save draft</button>
+      </div>
+    </div>
   `;
   const textarea = container.querySelector("textarea");
+  const saveDraft = () => {
+    comment.body = textarea.value.trim();
+    if (!comment.body) {
+      onDelete();
+      return;
+    }
+    textarea.value = comment.body;
+    textarea.blur();
+    if (comment.side !== "file") {
+      setTimeout(() => focusDiffLine(comment.side, comment.startLine, comment.endLine ?? comment.startLine), 0);
+    }
+  };
   textarea.value = comment.body || "";
   textarea.addEventListener("input", () => {
     comment.body = textarea.value;
@@ -1567,15 +1658,7 @@ function renderCommentDOM(comment, onDelete) {
   textarea.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       event.preventDefault();
-      comment.body = textarea.value.trim();
-      if (!comment.body) {
-        onDelete();
-        return;
-      }
-      textarea.blur();
-      if (comment.side !== "file") {
-        setTimeout(() => focusDiffLine(comment.side, comment.startLine, comment.endLine ?? comment.startLine), 0);
-      }
+      saveDraft();
       return;
     }
     if (event.key === "Escape") {
@@ -1591,6 +1674,7 @@ function renderCommentDOM(comment, onDelete) {
     }
   });
   container.querySelector("[data-action='delete']").addEventListener("click", onDelete);
+  container.querySelector("[data-action='save']").addEventListener("click", saveDraft);
   if (!comment.body) setTimeout(() => textarea.focus(), 50);
   return container;
 }
