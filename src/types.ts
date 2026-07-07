@@ -1,3 +1,4 @@
+import type { Api, Model, ThinkingLevel } from "@earendil-works/pi-ai";
 import type { ReviewSourceMetadata } from "./sources/types.js";
 
 export type ReviewScope = "git-diff" | "last-commit" | "commit" | "all-files";
@@ -155,6 +156,40 @@ export interface ReviewFileErrorMessage {
 
 export type AiReviewRunStatus = "idle" | "running" | "done" | "failed";
 export type AiReviewStepStatus = "queued" | "running" | "done" | "failed";
+export type AiReviewDepth = "fast" | "standard" | "deep";
+export type AiReviewPhase = "scout" | "chapter" | "validation" | "synthesis";
+
+export interface AiReviewResolvedPhaseConfig {
+  model: string | null;
+  reasoning: "off" | ThinkingLevel;
+}
+
+export interface AiReviewResolvedConfig {
+  depth: AiReviewDepth;
+  parallelChapterReviews: number;
+  maxPatchCharsPerFile: number;
+  maxChapterPatchChars: number;
+  maxFindingsPerChapter: number;
+  configPaths: string[];
+  warnings: string[];
+  phases: Record<AiReviewPhase, AiReviewResolvedPhaseConfig>;
+}
+
+export interface AiReviewRuntimePhaseConfig {
+  model: Model<Api> | null;
+  reasoning?: ThinkingLevel;
+  modelLabel: string;
+}
+
+export interface AiReviewRuntimeConfig {
+  depth: AiReviewDepth;
+  parallelChapterReviews: number;
+  maxPatchCharsPerFile: number;
+  maxChapterPatchChars: number;
+  maxFindingsPerChapter: number;
+  phases: Record<AiReviewPhase, AiReviewRuntimePhaseConfig>;
+  public: AiReviewResolvedConfig;
+}
 
 export interface AiReviewChapterProgress {
   chapterId: string;
@@ -166,10 +201,11 @@ export interface AiReviewChapterProgress {
 
 export interface AiReviewProgress {
   status: AiReviewRunStatus;
-  phase: "idle" | "scout" | "chapter-review" | "validation" | "done";
+  phase: "idle" | AiReviewPhase | "chapter-review" | "done";
   message: string;
   scoutSummary: string;
   chapters: AiReviewChapterProgress[];
+  config?: AiReviewResolvedConfig;
 }
 
 export interface ReviewAiReviewProgressMessage {
@@ -278,6 +314,7 @@ export interface ReviewWindowData {
   commits: ReviewCommit[];
   source: ReviewSourceMetadata;
   analysis: ReviewAnalysis;
+  aiReviewConfig?: AiReviewResolvedConfig;
   session?: {
     status: ReviewSessionRestoreStatus;
     message: string;

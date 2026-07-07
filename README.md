@@ -30,6 +30,35 @@ pi install /Users/kewalzanzmeria/Desktop/ho-repos/pi-diff-review-cockpit
 
 `/diff-review pr <url>` loads GitHub PR metadata, prepares an isolated review worktree under `~/.cache/pi-diff-review-cockpit/github/`, and opens the cockpit review window for the PR diff.
 
+## PI Review Configuration
+
+AI review defaults to the active PI model, `standard` depth, three parallel chapter agents, and per-phase reasoning of scout `low`, chapter agents `medium`, validation `high`, and synthesis `high`.
+
+Configuration is dependency-free JSON for now. The cockpit reads, in order:
+
+- `~/.config/pi-diff-review-cockpit/config.json`
+- `<repo>/.pi-diff-review-cockpit/config.json`
+- `<repo>/pi-diff-review-cockpit.config.json`
+- `PI_DIFF_REVIEW_COCKPIT_CONFIG=/path/to/config.json`
+
+Later files override earlier files. Example:
+
+```json
+{
+  "aiReview": {
+    "depth": "deep",
+    "parallelChapterReviews": 2,
+    "maxFindingsPerChapter": 12,
+    "phases": {
+      "scout": { "reasoning": "medium" },
+      "chapter": { "provider": "openai-codex", "model": "your-model-id", "reasoning": "high" },
+      "validation": { "reasoning": "high" },
+      "synthesis": { "reasoning": "high" }
+    }
+  }
+}
+```
+
 ## GitHub Publish Policy
 
 The cockpit workflow reads PR metadata when GitHub access is available. It will not post comments, approvals, or change requests automatically. Publishing selected comments as a GitHub review requires a human click in the review window.

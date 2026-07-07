@@ -4,6 +4,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
 import { createAiReviewFailedProgress, runAiReview } from "./ai-review.js";
+import { loadAiReviewRuntimeConfig } from "./ai-review-config.js";
 import { analyzeReviewDataset } from "./analysis.js";
 import { parseDiffReviewArgs } from "./command.js";
 import { loadReviewFileContents } from "./git.js";
@@ -215,6 +216,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify("Restored cached review map.", "info");
       analysis = sessionResolution.analysis;
     }
+    const aiReviewConfig = await loadAiReviewRuntimeConfig(ctx, dataset);
 
     let sessionSnapshot: ReviewSessionSnapshot | null = sessionResolution.snapshot;
     let saveChain: Promise<void> = Promise.resolve();
@@ -261,6 +263,7 @@ export default function (pi: ExtensionAPI) {
     const html = buildReviewHtml({
       ...dataset,
       analysis,
+      aiReviewConfig: aiReviewConfig.public,
       session: {
         status: sessionResolution.status,
         message: sessionResolution.message,
@@ -409,7 +412,7 @@ export default function (pi: ExtensionAPI) {
               type: "ai-review-error",
               requestId: message.requestId,
               message: "An AI review is already running.",
-              progress: createAiReviewFailedProgress(analysis, "An AI review is already running."),
+              progress: createAiReviewFailedProgress(analysis, "An AI review is already running.", aiReviewConfig),
             });
             return;
           }
@@ -418,6 +421,7 @@ export default function (pi: ExtensionAPI) {
           try {
             const result = await runAiReview(ctx, dataset, analysis, {
               getFilePatch: loadFilePatch,
+              config: aiReviewConfig,
               onProgress: (progress) => {
                 if (!canUpdateAiReview()) return;
                 sendWindowMessage({
@@ -461,7 +465,7 @@ export default function (pi: ExtensionAPI) {
               type: "ai-review-error",
               requestId: message.requestId,
               message: messageText,
-              progress: createAiReviewFailedProgress(analysis, messageText),
+              progress: createAiReviewFailedProgress(analysis, messageText, aiReviewConfig),
             });
           } finally {
             aiReviewInFlight = false;

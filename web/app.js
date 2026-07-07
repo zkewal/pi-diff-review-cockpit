@@ -95,6 +95,7 @@ const state = {
     status: "idle",
     message: "AI review has not run.",
     progress: null,
+    config: reviewData.aiReviewConfig || null,
   },
 };
 
@@ -1177,8 +1178,45 @@ function insightActionButtonClass(active) {
     : "cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d]";
 }
 
+function aiReviewConfigHtml(config) {
+  if (!config) return "";
+  const phaseLabels = {
+    scout: "Scout",
+    chapter: "Agents",
+    validation: "Critic",
+    synthesis: "Synthesis",
+  };
+  const phases = ["scout", "chapter", "validation", "synthesis"]
+    .map((phase) => {
+      const phaseConfig = config.phases?.[phase];
+      if (!phaseConfig) return "";
+      const model = phaseConfig.model || "active PI model";
+      return `
+        <div class="rounded border border-review-border bg-[#0d1117]/70 px-2 py-1">
+          <div class="text-[10px] font-semibold uppercase tracking-wider text-review-muted">${phaseLabels[phase]}</div>
+          <div class="mt-0.5 truncate text-[11px] text-review-text" title="${escapeHtml(model)}">${escapeHtml(model)}</div>
+          <div class="text-[10px] text-review-muted">reasoning: ${escapeHtml(phaseConfig.reasoning || "off")}</div>
+        </div>
+      `;
+    })
+    .join("");
+  const warnings = Array.isArray(config.warnings) ? config.warnings : [];
+  return `
+    <div class="relative mt-3">
+      <div class="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-review-muted">
+        <span>Depth: <span class="text-review-text">${escapeHtml(humanizeToken(config.depth || "standard"))}</span></span>
+        <span>${Number(config.parallelChapterReviews || 0)} parallel agent(s)</span>
+        <span>cap ${Number(config.maxFindingsPerChapter || 0)} finding(s)/chapter</span>
+      </div>
+      <div class="grid grid-cols-2 gap-1.5">${phases}</div>
+      ${warnings.length > 0 ? `<div class="mt-2 rounded border border-[#d29922]/30 bg-[#d29922]/10 px-2 py-1.5 text-[11px] leading-4 text-[#e3b341]">${warnings.map(escapeHtml).join("<br>")}</div>` : ""}
+    </div>
+  `;
+}
+
 function aiReviewPanelHtml(chapterId = null) {
   const progress = state.aiReview.progress;
+  const config = progress?.config || state.aiReview.config || reviewData.aiReviewConfig || null;
   const title = chapterId ? "PI chapter review" : "PI review";
   const running = progress?.status === "running";
   if (!progress) {
@@ -1193,6 +1231,7 @@ function aiReviewPanelHtml(chapterId = null) {
         </div>
         <div class="relative mt-2 text-sm text-review-text">Parallel patch review is ready.</div>
         <div class="relative mt-2 text-xs text-review-muted">Run PI review to fan out chapter subagents and stream findings back into the diff.</div>
+        ${aiReviewConfigHtml(config)}
       </div>
     `;
   }
@@ -1226,6 +1265,7 @@ function aiReviewPanelHtml(chapterId = null) {
         ${failedCount > 0 ? `<span class="text-[#f85149]">${failedCount} failed</span>` : ""}
         <span>${totalFindings} finding(s)</span>
       </div>
+      ${aiReviewConfigHtml(config)}
       ${progress.scoutSummary ? `<div class="relative mt-2 text-xs leading-5 text-review-muted">${escapeHtml(progress.scoutSummary)}</div>` : ""}
       <div class="relative mt-3 space-y-1.5">
         ${visibleChapters.map((chapter) => `
@@ -2302,6 +2342,7 @@ window.__reviewReceive = function (message) {
       status: message.progress?.status || "running",
       message: message.progress?.message || "AI review is running.",
       progress: message.progress,
+      config: message.progress?.config || state.aiReview.config,
     };
     renderTree();
     return;
@@ -2315,6 +2356,7 @@ window.__reviewReceive = function (message) {
       status: message.progress?.status || "running",
       message: message.progress?.message || "PI subagent results are streaming.",
       progress: message.progress,
+      config: message.progress?.config || state.aiReview.config,
     };
     renderTree();
     syncViewZones();
@@ -2331,6 +2373,7 @@ window.__reviewReceive = function (message) {
       status: message.progress?.status || "done",
       message: message.progress?.message || "AI review complete.",
       progress: message.progress,
+      config: message.progress?.config || state.aiReview.config,
     };
     renderAll({ preserveScroll: true });
     return;
@@ -2343,6 +2386,7 @@ window.__reviewReceive = function (message) {
       status: "failed",
       message: message.message || "AI review failed.",
       progress: message.progress || state.aiReview.progress,
+      config: message.progress?.config || state.aiReview.config,
     };
     renderTree();
     return;
@@ -2495,6 +2539,7 @@ function runAiReviewFromUi() {
       phase: "scout",
       message: "Starting AI review.",
       scoutSummary: "",
+      config: state.aiReview.config,
       chapters: getReviewChapters().map((chapter) => ({
         chapterId: chapter.id,
         title: chapter.title,
