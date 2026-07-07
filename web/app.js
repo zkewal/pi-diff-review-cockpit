@@ -392,7 +392,7 @@ function findingStatusLabel(status) {
     case "accepted-comment": return "Drafted";
     case "dismissed": return "Dismissed";
     case "accepted-risk": return "Accepted risk";
-    default: return "New";
+    default: return "Needs review";
   }
 }
 
@@ -455,6 +455,17 @@ function getDraftCommentsForChapter(chapter, scope = state.currentScope) {
   return state.comments.filter((comment) => fileIds.has(comment.fileId) && isCommentInScope(comment, scope));
 }
 
+function findingStatusCounts() {
+  return getReviewFindings().reduce((counts, finding) => {
+    const status = state.findingStatuses[finding.id] || "new";
+    counts.total += 1;
+    if (status === "accepted-comment") counts.drafted += 1;
+    else if (status === "dismissed" || status === "accepted-risk") counts.dismissed += 1;
+    else counts.open += 1;
+    return counts;
+  }, { total: 0, open: 0, drafted: 0, dismissed: 0 });
+}
+
 function commentLocationLabel(comment) {
   if (comment.side === "file" || comment.startLine == null) return "File comment";
   const side = comment.side === "original" ? "Original" : "Modified";
@@ -476,15 +487,45 @@ function commentSummaryHtml(comments, emptyText) {
         const file = getFileById(comment.fileId);
         const body = String(comment.body || "").trim();
         return `
-          <div class="rounded-md border border-review-border bg-[#010409] p-2">
+          <button data-comment-jump-id="${escapeHtml(comment.id)}" class="block w-full cursor-pointer rounded-md border border-review-border bg-[#010409] p-2 text-left hover:bg-[#161b22]">
             <div class="truncate text-[11px] font-medium text-review-muted">${escapeHtml(getScopeDisplayPath(file, comment.scope))} • ${escapeHtml(commentLocationLabel(comment))}</div>
             <div class="mt-1 line-clamp-2 text-xs leading-5 text-review-text">${escapeHtml(body || "Empty draft comment")}</div>
-          </div>
+          </button>
         `;
       }).join("")}
       ${hiddenCount > 0 ? `<div class="px-2 text-xs text-review-muted">${hiddenCount} more draft comment(s).</div>` : ""}
     </div>
   `;
+}
+
+function openDraftCommentFromSummary(commentId) {
+  const comment = state.comments.find((item) => item.id === commentId);
+  const file = comment ? getFileById(comment.fileId) : null;
+  if (!comment || !file) return;
+
+  saveCurrentScrollPosition();
+  state.currentScope = comment.scope;
+  if (comment.scope === "commit" && comment.commitSha) {
+    state.selectedCommitSha = comment.commitSha;
+    commitSelectEl.value = comment.commitSha;
+  }
+  state.activeFileId = file.id;
+  if (comment.side === "original" || comment.side === "modified") {
+    state.activeDiffSide = comment.side;
+    state.activeDiffLine = comment.startLine;
+  }
+  renderAll({ restoreFileScroll: true });
+  ensureFileLoaded(file.id, comment.scope);
+
+  if (comment.side !== "file" && comment.startLine != null) {
+    setTimeout(() => focusDiffLine(comment.side, comment.startLine, comment.endLine ?? comment.startLine), 50);
+  }
+}
+
+function bindCommentSummaryLinks() {
+  insightContentEl.querySelectorAll("[data-comment-jump-id]").forEach((button) => {
+    button.addEventListener("click", () => openDraftCommentFromSummary(button.getAttribute("data-comment-jump-id")));
+  });
 }
 
 function getScopedFiles() {
@@ -1312,29 +1353,58 @@ function aiReviewPanelHtml(chapterId = null) {
 }
 
 function renderDefaultInsight() {
-  insightPanelTitleEl.textContent = "Review context";
+  insightPanelTitleEl.textContent = "Review assistant";
   const packet = reviewData.analysis?.approvalPacket;
   const draftComments = getDraftComments();
+  const findingCounts = findingStatusCounts();
+  const reviewQueueHtml = `
+    <div class="rounded-md border border-review-border bg-[#010409] p-3">
+      <div class="flex items-center justify-between gap-3">
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review queue</div>
+        <span class="text-[11px] text-review-muted">${findingCounts.total} AI finding(s)</span>
+      </div>
+      <div class="mt-3 grid grid-cols-3 gap-2">
+        <div class="rounded border border-[#58a6ff]/30 bg-[#58a6ff]/10 px-2 py-1.5">
+          <div class="text-sm font-semibold text-[#79c0ff]">${findingCounts.open}</div>
+          <div class="text-[10px] uppercase tracking-wider text-review-muted">To review</div>
+        </div>
+        <div class="rounded border border-[#2ea043]/30 bg-[#238636]/10 px-2 py-1.5">
+          <div class="text-sm font-semibold text-[#3fb950]">${findingCounts.drafted}</div>
+          <div class="text-[10px] uppercase tracking-wider text-review-muted">Drafted</div>
+        </div>
+        <div class="rounded border border-review-border bg-review-panel px-2 py-1.5">
+          <div class="text-sm font-semibold text-review-text">${findingCounts.dismissed}</div>
+          <div class="text-[10px] uppercase tracking-wider text-review-muted">Closed</div>
+        </div>
+      </div>
+      <div class="mt-3 text-xs leading-5 text-review-muted">
+        AI findings are suggestions. Drafted items become normal local comments and are published with the rest of the review.
+      </div>
+    </div>
+  `;
   if (!packet) {
     insightContentEl.innerHTML = `
       <div class="space-y-4">
         ${aiReviewPanelHtml()}
+        ${reviewQueueHtml}
         <div class="space-y-3 text-sm text-review-muted">
           <div>No analysis context available.</div>
-          <div>Select a chapter or AI finding to inspect details.</div>
+          <div>Select a chapter or finding to inspect details.</div>
         </div>
         <div>
-          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Draft comments</div>
+          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Local draft comments</div>
           <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments yet.")}</div>
         </div>
       </div>
     `;
+    bindCommentSummaryLinks();
     return;
   }
 
   insightContentEl.innerHTML = `
     <div class="space-y-4">
       ${aiReviewPanelHtml()}
+      ${reviewQueueHtml}
       <div>
         <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Approval packet</div>
         <div class="mt-2 text-sm font-medium text-white">${escapeHtml(packet.summary)}</div>
@@ -1350,13 +1420,14 @@ function renderDefaultInsight() {
         <pre class="scrollbar-thin max-h-[360px] overflow-auto whitespace-pre-wrap rounded-md border border-review-border bg-[#010409] p-3 text-xs leading-5 text-review-text">${escapeHtml(packet.body)}</pre>
       ` : ""}
       <div>
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Draft comments</div>
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Local draft comments</div>
         <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments yet.")}</div>
-        <div class="mt-2 text-xs text-review-muted">Draft comments are local until you finish the review or publish to GitHub.</div>
+        <div class="mt-2 text-xs text-review-muted">Draft comments autosave locally until you finish the review or publish to GitHub.</div>
       </div>
-      <div class="text-xs text-review-muted">Select a chapter or AI finding to inspect details.</div>
+      <div class="text-xs text-review-muted">Select a chapter or finding to inspect details.</div>
     </div>
   `;
+  bindCommentSummaryLinks();
 }
 
 function getChapterFiles(chapter) {
@@ -1370,13 +1441,20 @@ function getChapterDisplayFiles(chapter) {
 }
 
 function renderInsightForChapter(chapter) {
-  insightPanelTitleEl.textContent = "Chapter files";
+  insightPanelTitleEl.textContent = "Chapter queue";
   const reviewed = state.reviewedChapters[chapter.id] === true;
   const files = getChapterDisplayFiles(chapter);
   const visibleFiles = files.slice(0, 60);
   const hiddenFileCount = Math.max(0, files.length - visibleFiles.length);
   const findings = (chapter.findingIds || []).map(getReviewFinding).filter(Boolean);
   const draftComments = getDraftCommentsForChapter(chapter);
+  const chapterFindingCounts = findings.reduce((counts, finding) => {
+    const status = state.findingStatuses[finding.id] || "new";
+    if (status === "accepted-comment") counts.drafted += 1;
+    else if (status === "dismissed" || status === "accepted-risk") counts.dismissed += 1;
+    else counts.open += 1;
+    return counts;
+  }, { open: 0, drafted: 0, dismissed: 0 });
 
   insightContentEl.innerHTML = `
     <div class="space-y-4">
@@ -1394,12 +1472,15 @@ function renderInsightForChapter(chapter) {
           ${diffstatHtml(chapterDiffstatCounts(chapter), { showZero: true })}
           <span>${(chapter.fileIds || []).length} file(s)</span>
           <span>${draftComments.length} draft comment(s)</span>
-          <span>${(chapter.findingIds || []).length} AI finding(s)</span>
+          <span>${chapterFindingCounts.open} finding(s) to review</span>
         </div>
       </div>
       <button id="chapter-reviewed-toggle" class="${insightActionButtonClass(reviewed)}">${reviewed ? "Mark not reviewed" : "Mark chapter reviewed"}</button>
       <div>
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Files</div>
+        <div class="flex items-center justify-between gap-3">
+          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Files</div>
+          <div class="text-[11px] text-review-muted">${files.length} in chapter</div>
+        </div>
         <div class="mt-2 space-y-1">
           ${visibleFiles.length === 0 ? `<div class="text-sm text-review-muted">No files linked.</div>` : visibleFiles.map((file) => {
             const status = file.gitDiff?.status ?? file.worktreeStatus;
@@ -1425,13 +1506,16 @@ function renderInsightForChapter(chapter) {
         </div>
       </div>
       <div>
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Draft comments</div>
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Local draft comments</div>
         <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments in this chapter.")}</div>
       </div>
       <div>
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">AI findings</div>
+        <div class="flex items-center justify-between gap-3">
+          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Findings</div>
+          <div class="text-[11px] text-review-muted">${chapterFindingCounts.open} open • ${chapterFindingCounts.drafted} drafted • ${chapterFindingCounts.dismissed} closed</div>
+        </div>
         <div class="mt-2 space-y-2">
-          ${findings.length === 0 ? `<div class="text-sm text-review-muted">No AI findings linked.</div>` : findings.map((finding) => `
+          ${findings.length === 0 ? `<div class="text-sm text-review-muted">No AI findings linked to this chapter.</div>` : findings.map((finding) => `
             <button data-finding-id="${escapeHtml(finding.id)}" class="block w-full rounded-md border border-review-border bg-[#010409] p-2 text-left hover:bg-[#161b22]">
               <div class="flex items-center justify-between gap-2 text-[11px]">
                 <span class="${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
@@ -1451,6 +1535,7 @@ function renderInsightForChapter(chapter) {
     renderTree();
   });
   bindInsightNav(chapter.id);
+  bindCommentSummaryLinks();
   insightContentEl.querySelectorAll("[data-file-id]").forEach((button) => {
     button.addEventListener("click", () => openFileFromAnalysis(button.getAttribute("data-file-id")));
   });
@@ -1477,11 +1562,34 @@ function chapterForFinding(finding) {
   return getReviewChapters().find((chapter) => (chapter.findingIds || []).includes(finding.id)) || null;
 }
 
+function openFindingLocation(location) {
+  const file = getFileById(location.fileId);
+  if (!file) return;
+  saveCurrentScrollPosition();
+  state.currentScope = "git-diff";
+  state.activeFileId = file.id;
+  if (location.side === "original" || location.side === "modified") {
+    state.activeDiffSide = location.side;
+    state.activeDiffLine = location.line ?? null;
+  }
+  renderAll({ restoreFileScroll: true });
+  ensureFileLoaded(file.id, state.currentScope);
+  if (location.side !== "file" && location.line != null) {
+    setTimeout(() => focusDiffLine(location.side, location.line, location.line), 50);
+  }
+}
+
+function openFirstFindingLocation(finding) {
+  const location = (finding.locations || []).find((item) => getFileById(item.fileId));
+  if (location) openFindingLocation(location);
+}
+
 function renderInsightForFinding(finding) {
-  insightPanelTitleEl.textContent = "AI finding context";
+  insightPanelTitleEl.textContent = "Finding detail";
   const status = state.findingStatuses[finding.id] || "new";
   const canCreateDraft = firstDraftableFindingLocation(finding) != null;
   const chapter = chapterForFinding(finding);
+  const isDrafted = status === "accepted-comment";
 
   insightContentEl.innerHTML = `
     <div class="space-y-4">
@@ -1490,7 +1598,7 @@ function renderInsightForFinding(finding) {
         ...(chapter ? [{ id: "chapter", label: chapter.title }] : []),
         { label: "Finding" },
       ])}
-      <div>
+      <div class="rounded-md border border-review-border bg-[#010409] p-3">
         <div class="mb-2 flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-wider">
           <span class="text-review-muted">${escapeHtml(humanizeToken(finding.kind))}</span>
           <span class="${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
@@ -1498,13 +1606,19 @@ function renderInsightForFinding(finding) {
         </div>
         <div class="text-base font-semibold leading-6 text-white">${escapeHtml(finding.title)}</div>
         <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(finding.explanation)}</div>
-        <div class="mt-2 text-xs ${findingStatusClass(status)}">${escapeHtml(findingStatusLabel(status))}</div>
+        <div class="mt-3 flex flex-wrap items-center gap-2">
+          <span class="rounded-md border border-review-border bg-review-panel px-2 py-1 text-xs ${findingStatusClass(status)}">${escapeHtml(findingStatusLabel(status))}</span>
+          ${chapter ? `<span class="rounded-md border border-review-border bg-review-panel px-2 py-1 text-xs text-review-muted">${escapeHtml(chapter.title)}</span>` : ""}
+        </div>
       </div>
       <div>
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Locations</div>
+        <div class="flex items-center justify-between gap-3">
+          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Locations</div>
+          ${(finding.locations || []).length > 0 ? `<button data-finding-action="open-location" class="cursor-pointer text-[11px] font-medium text-[#58a6ff] hover:text-[#79c0ff]">Open first</button>` : ""}
+        </div>
         <div class="mt-2 space-y-1">
-          ${(finding.locations || []).length === 0 ? `<div class="text-sm text-review-muted">No locations linked.</div>` : finding.locations.map((location) => `
-            <button data-file-id="${escapeHtml(location.fileId)}" class="block w-full rounded-md px-2 py-1.5 text-left text-xs text-review-text hover:bg-[#21262d]">
+          ${(finding.locations || []).length === 0 ? `<div class="text-sm text-review-muted">No locations linked.</div>` : finding.locations.map((location, index) => `
+            <button data-location-index="${index}" class="block w-full rounded-md px-2 py-1.5 text-left text-xs text-review-text hover:bg-[#21262d]">
               <span class="block truncate">${escapeHtml(location.path)}${location.line != null ? `:${escapeHtml(location.line)}` : ""}</span>
               <span class="text-review-muted">${escapeHtml(humanizeToken(location.side))}</span>
             </button>
@@ -1514,13 +1628,13 @@ function renderInsightForFinding(finding) {
       <div>
         <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Suggested comment</div>
         <div class="mt-2 whitespace-pre-wrap rounded-md border border-review-border bg-[#010409] p-3 text-xs leading-5 text-review-text">${escapeHtml(finding.suggestedComment || "No suggested comment.")}</div>
-        ${status === "accepted-comment" ? `<div class="mt-2 text-xs text-[#3fb950]">Draft comment created in the diff.</div>` : ""}
+        ${isDrafted ? `<div class="mt-2 text-xs text-[#3fb950]">A normal draft comment was created in the diff and will be published with the review.</div>` : ""}
       </div>
       <div class="flex flex-wrap gap-2">
-        ${status === "accepted-comment"
-          ? `<span class="rounded-md border border-[#2ea043]/40 bg-[#238636]/10 px-3 py-1.5 text-xs font-medium text-[#3fb950]">Draft comment created</span>`
+        ${isDrafted
+          ? `<span class="rounded-md border border-[#2ea043]/40 bg-[#238636]/10 px-3 py-1.5 text-xs font-medium text-[#3fb950]">Drafted on diff</span>`
           : canCreateDraft
-            ? `<button data-finding-action="create-draft" class="${insightActionButtonClass(false)}">Create draft comment</button>`
+            ? `<button data-finding-action="create-draft" class="${insightActionButtonClass(false)}">Draft on diff</button>`
             : `<span class="rounded-md border border-review-border bg-[#010409] px-3 py-1.5 text-xs text-review-muted">No commentable diff line</span>`}
         <button data-finding-status="${status === "dismissed" ? "new" : "dismissed"}" class="${insightActionButtonClass(status === "dismissed")}">${status === "dismissed" ? "Reopen" : "Dismiss"}</button>
       </div>
@@ -1528,9 +1642,14 @@ function renderInsightForFinding(finding) {
   `;
 
   bindInsightNav(chapter?.id || null);
-  insightContentEl.querySelectorAll("[data-file-id]").forEach((button) => {
-    button.addEventListener("click", () => openFileFromAnalysis(button.getAttribute("data-file-id")));
+  insightContentEl.querySelectorAll("[data-location-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const index = Number(button.getAttribute("data-location-index"));
+      const location = (finding.locations || [])[index];
+      if (location) openFindingLocation(location);
+    });
   });
+  insightContentEl.querySelector("[data-finding-action='open-location']")?.addEventListener("click", () => openFirstFindingLocation(finding));
   insightContentEl.querySelectorAll("[data-finding-status]").forEach((button) => {
     button.addEventListener("click", () => setFindingStatus(finding, button.getAttribute("data-finding-status")));
   });
@@ -1693,7 +1812,7 @@ function renderTree() {
     const findings = getReviewFindings();
     const newFindings = findings.filter((finding) => (state.findingStatuses[finding.id] || "new") === "new").length;
     renderFindings();
-    sidebarTitleEl.textContent = "AI findings";
+    sidebarTitleEl.textContent = "Findings";
     setSummary(
       `${findings.length} AI finding(s) • ${newFindings} new • ${comments} draft comment(s)${state.overallComment ? " • overall note" : ""}`,
       coverageDiffstatCounts(reviewData.analysis?.coverage),
@@ -1921,11 +2040,11 @@ function renderCommentDOM(comment, onDelete) {
   container.innerHTML = `
     <div class="mb-2 flex items-center justify-between gap-3">
       <div class="text-xs font-semibold text-review-text">${escapeHtml(title)}</div>
-      <span class="text-[11px] font-medium text-review-muted">Draft</span>
+      <span class="text-[11px] font-medium text-[#3fb950]">Autosaved draft</span>
     </div>
     <textarea data-comment-id="${escapeHtml(comment.id)}" class="scrollbar-thin min-h-[76px] w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="Leave a comment"></textarea>
     <div class="mt-2 flex items-center justify-between gap-3">
-      <div class="text-xs text-review-muted">Saved locally until you finish the review or publish to GitHub.</div>
+      <div class="text-xs text-review-muted">Autosaves locally. Publish to GitHub sends non-empty drafts.</div>
       <button data-action="delete" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Delete</button>
     </div>
   `;
@@ -2047,7 +2166,7 @@ function renderAiFindingZoneDOM(finding, location) {
     <div class="mb-2 flex items-center justify-between gap-3">
       <div class="flex min-w-0 items-center gap-2 text-xs font-semibold text-review-text">
         <span class="rounded border border-[#58a6ff]/30 bg-[#58a6ff]/10 px-1.5 py-0.5 text-[10px] text-[#79c0ff]">PI</span>
-        <span class="truncate">AI finding • ${escapeHtml(humanizeToken(finding.kind))}</span>
+        <span class="truncate">Review item • ${escapeHtml(humanizeToken(finding.kind))}</span>
       </div>
       <span class="shrink-0 text-[11px] ${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
     </div>
@@ -2058,7 +2177,7 @@ function renderAiFindingZoneDOM(finding, location) {
       <div class="flex shrink-0 items-center gap-2">
         <button data-action="open" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:bg-[#21262d]">Open</button>
         <button data-action="dismiss" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Dismiss</button>
-        <button data-action="accept" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Create draft comment</button>
+        <button data-action="accept" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Draft on diff</button>
       </div>
     </div>
   `;
@@ -2745,7 +2864,7 @@ function getKeyboardActions() {
     }),
     shortcutAction("focus-sidebar", "Focus review map or files", "1", focusSidebarPane, { match: key("1") }),
     shortcutAction("focus-diff", "Focus diff", "2", focusDiffPane, { match: key("2") }),
-    shortcutAction("focus-context", "Focus chapter context", "3", focusInsightPane, { match: key("3") }),
+    shortcutAction("focus-context", "Focus review assistant", "3", focusInsightPane, { match: key("3") }),
     shortcutAction("search-files", "Search files", "/", focusFileSearch, { match: key("/") }),
     shortcutAction("next-chapter", "Next chapter", "]", () => moveChapter(1), { match: key("]") }),
     shortcutAction("previous-chapter", "Previous chapter", "[", () => moveChapter(-1), { match: key("[") }),
