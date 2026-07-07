@@ -56,6 +56,7 @@ const analysisStatusEl = document.getElementById("analysis-status");
 const submitButton = document.getElementById("submit-button");
 const cancelButton = document.getElementById("cancel-button");
 const overallCommentButton = document.getElementById("overall-comment-button");
+const approvalPacketButton = document.getElementById("approval-packet-button");
 const fileCommentButton = document.getElementById("file-comment-button");
 const toggleReviewedButton = document.getElementById("toggle-reviewed-button");
 const toggleUnchangedButton = document.getElementById("toggle-unchanged-button");
@@ -1037,6 +1038,22 @@ function showOverallCommentModal() {
   });
 }
 
+function showApprovalPacketModal() {
+  const packet = reviewData.analysis?.approvalPacket;
+  showTextModal({
+    title: "Approval packet",
+    description: "Edit the review summary before finishing or publishing.",
+    initialValue: packet?.body || "",
+    saveLabel: "Save packet",
+    onSave: (value) => {
+      if (reviewData.analysis?.approvalPacket) {
+        reviewData.analysis.approvalPacket.body = value;
+      }
+      renderTree();
+    },
+  });
+}
+
 function showFileCommentModal() {
   const file = activeFile();
   if (!file) return;
@@ -1472,16 +1489,29 @@ function switchScope(scope) {
   if (file) ensureFileLoaded(file.id, state.currentScope);
 }
 
-submitButton.addEventListener("click", () => {
-  syncCommentBodiesFromDOM();
-  const payload = {
+function buildSubmitPayload() {
+  return {
     type: "submit",
     overallComment: state.overallComment.trim(),
     comments: state.comments
       .map((comment) => ({ ...comment, body: comment.body.trim() }))
       .filter((comment) => comment.body.length > 0),
+    acceptedFindings: Object.entries(state.acceptedFindingComments).map(([findingId, body]) => ({ findingId, body })),
+    findingStatuses: Object.entries(state.findingStatuses).map(([findingId, status]) => ({ findingId, status })),
+    approvalPacket: reviewData.analysis?.approvalPacket || {
+      summary: "",
+      reviewedChapters: [],
+      acceptedRisks: [],
+      unresolvedFindings: [],
+      suggestedVerdict: "comment",
+      body: "",
+    },
   };
-  window.glimpse.send(payload);
+}
+
+submitButton.addEventListener("click", () => {
+  syncCommentBodiesFromDOM();
+  window.glimpse.send(buildSubmitPayload());
   window.glimpse.close();
 });
 
@@ -1492,6 +1522,10 @@ cancelButton.addEventListener("click", () => {
 
 overallCommentButton.addEventListener("click", () => {
   showOverallCommentModal();
+});
+
+approvalPacketButton.addEventListener("click", () => {
+  showApprovalPacketModal();
 });
 
 fileCommentButton.addEventListener("click", () => {

@@ -49,10 +49,23 @@ export interface DiffReviewComment {
   body: string;
 }
 
+export interface AcceptedFindingComment {
+  findingId: string;
+  body: string;
+}
+
+export interface FindingStatusUpdate {
+  findingId: string;
+  status: ReviewFindingStatus;
+}
+
 export interface ReviewSubmitPayload {
   type: "submit";
   overallComment: string;
   comments: DiffReviewComment[];
+  acceptedFindings: AcceptedFindingComment[];
+  findingStatuses: FindingStatusUpdate[];
+  approvalPacket: ApprovalPacket;
 }
 
 export interface ReviewCancelPayload {
