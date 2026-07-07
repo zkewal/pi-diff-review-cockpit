@@ -186,6 +186,74 @@
   .diffstat-block-del {
     background: #f85149;
   }
+
+  @keyframes ai-panel-sheen {
+    0% { transform: translateX(-120%); opacity: 0; }
+    30% { opacity: 0.65; }
+    100% { transform: translateX(220%); opacity: 0; }
+  }
+
+  @keyframes ai-dot-pulse {
+    0%, 100% { transform: scale(0.72); opacity: 0.45; }
+    50% { transform: scale(1); opacity: 1; }
+  }
+
+  @keyframes ai-border-breathe {
+    0%, 100% { box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.08), 0 0 0 rgba(88, 166, 255, 0); }
+    50% { box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.28), 0 0 24px rgba(88, 166, 255, 0.08); }
+  }
+
+  .ai-review-card {
+    position: relative;
+    overflow: hidden;
+    border-color: rgba(88, 166, 255, 0.22);
+    background:
+      linear-gradient(180deg, rgba(88, 166, 255, 0.08), rgba(13, 17, 23, 0) 48%),
+      #010409;
+  }
+
+  .ai-review-card[data-running="true"] {
+    animation: ai-border-breathe 2.4s ease-in-out infinite;
+  }
+
+  .ai-review-card[data-running="true"]::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    width: 40%;
+    background: linear-gradient(90deg, transparent, rgba(210, 168, 255, 0.08), transparent);
+    animation: ai-panel-sheen 2.8s ease-in-out infinite;
+    pointer-events: none;
+  }
+
+  .ai-pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: #58a6ff;
+    animation: ai-dot-pulse 1.1s ease-in-out infinite;
+  }
+
+  .ai-pulse-dot:nth-child(2) {
+    animation-delay: 120ms;
+  }
+
+  .ai-pulse-dot:nth-child(3) {
+    animation-delay: 240ms;
+  }
+
+  .ai-finding-zone {
+    border-color: rgba(88, 166, 255, 0.28);
+    background: linear-gradient(180deg, rgba(88, 166, 255, 0.08), rgba(22, 27, 34, 0.96));
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .ai-review-card[data-running="true"],
+    .ai-review-card[data-running="true"]::before,
+    .ai-pulse-dot {
+      animation: none;
+    }
+  }
 </style>
 </head>
 <body class="h-full overflow-hidden bg-review-bg text-review-text antialiased">
@@ -200,7 +268,7 @@
     </div>
     <div class="flex items-center gap-2">
       <div id="summary" class="max-w-[24rem] truncate text-[11px] text-review-muted"></div>
-      <button id="run-ai-review-button" class="cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] hover:bg-[#8957e5]/25">Run AI review</button>
+      <button id="run-ai-review-button" class="cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] hover:bg-[#8957e5]/25">Run PI review</button>
       <button id="overall-comment-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d]">Overall note</button>
       <button id="approval-packet-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d]">Approval packet</button>
       <button id="cancel-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/30">Cancel</button>

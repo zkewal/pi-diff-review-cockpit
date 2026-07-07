@@ -15,14 +15,15 @@ import type {
 
 const MAX_PATCH_CHARS_PER_FILE = 24_000;
 const MAX_CHAPTER_PATCH_CHARS = 90_000;
+const DEFAULT_PARALLEL_CHAPTER_REVIEWS = 3;
 
-const SCOUT_SYSTEM_PROMPT = `You are a scout for a code review cockpit.
+const SCOUT_SYSTEM_PROMPT = `You are a PI review scout for a code review cockpit.
 
 Return strict JSON only: {"summary":"..."}.
 
-Summarize the highest-value review strategy from the provided PR metadata and chapter map. Do not invent bugs. Keep it concise.`;
+Summarize the highest-value parallel review strategy from the provided PR metadata and chapter map. Do not invent bugs. Keep it concise.`;
 
-const CHAPTER_REVIEW_SYSTEM_PROMPT = `You are a senior code review agent reviewing one chapter of a diff.
+const CHAPTER_REVIEW_SYSTEM_PROMPT = `You are a PI review subagent reviewing one chapter of a diff.
 
 Return strict JSON only. Do not wrap the response in Markdown. The JSON object must contain exactly these top-level keys:
 - "chapters": an array with exactly one chapter object
@@ -54,6 +55,8 @@ interface ChapterReviewResult {
 export interface RunAiReviewOptions {
   getFilePatch(file: ReviewFile): Promise<string>;
   onProgress(progress: AiReviewProgress): void;
+  onPartialResult?(result: { chapterId: string; analysis: ReviewAnalysis; progress: AiReviewProgress }): void;
+  maxParallelChapterReviews?: number;
 }
 
 function truncateText(value: string, maxChars: number): string {
@@ -91,6 +94,53 @@ function completeProgress(progress: AiReviewProgress, status: AiReviewProgress["
     phase: status === "done" || status === "failed" ? "done" : progress.phase,
     message,
   };
+}
+
+function parseJsonObject(text: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    if (parsed != null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  } catch {}
+
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(text.trim());
+  if (fenced?.[1]) {
+    const parsed = JSON.parse(fenced[1]) as unknown;
+    if (parsed != null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  }
+
+  throw new Error("AI review returned malformed JSON.");
+}
+
+export function normalizeChapterReviewJson(text: string, chapter: ReviewChapter): string {
+  const parsed = parseJsonObject(text);
+  const findings = Array.isArray(parsed.findings) ? parsed.findings : [];
+  const findingIds = findings
+    .map((finding) => {
+      if (finding == null || typeof finding !== "object" || Array.isArray(finding)) return null;
+      const id = (finding as { id?: unknown }).id;
+      return typeof id === "string" ? id : null;
+    })
+    .filter((id): id is string => id != null);
+
+  return JSON.stringify({
+    chapters: [{
+      id: chapter.id,
+      title: chapter.title,
+      summary: chapter.summary,
+      risk: chapter.risk,
+      fileIds: chapter.fileIds,
+      findingIds,
+    }],
+    findings,
+    approvalPacket: {
+      summary: `Review ${chapter.title}.`,
+      reviewedChapters: [chapter.id],
+      acceptedRisks: [],
+      unresolvedFindings: findingIds,
+      suggestedVerdict: "comment",
+      body: `PI subagent reviewed ${chapter.title}.`,
+    },
+  });
 }
 
 function buildScoutInput(dataset: ReviewDataset, analysis: ReviewAnalysis): string {
@@ -213,7 +263,7 @@ async function reviewChapter(ctx: ExtensionCommandContext, dataset: ReviewDatase
   const text = await completeTextJson(ctx, CHAPTER_REVIEW_SYSTEM_PROMPT, input);
   return {
     chapterId: chapter.id,
-    analysis: parseReviewAnalysisJson(text, datasetForChapter(dataset, chapter)),
+    analysis: parseReviewAnalysisJson(normalizeChapterReviewJson(text, chapter), datasetForChapter(dataset, chapter)),
   };
 }
 
@@ -251,15 +301,17 @@ function uniqueFindingId(baseId: string, usedIds: Set<string>): string {
   return id;
 }
 
-function mergeChapterResults(baseAnalysis: ReviewAnalysis, dataset: ReviewDataset, results: ChapterReviewResult[], scoutSummary: string): ReviewAnalysis {
+function mergeChapterResults(baseAnalysis: ReviewAnalysis, dataset: ReviewDataset, results: ChapterReviewResult[], scoutSummary: string, message?: string): ReviewAnalysis {
   const fileById = new Map(dataset.files.map((file) => [file.id, file] as const));
   const resultByChapterId = new Map(results.map((result) => [result.chapterId, result.analysis] as const));
   const usedFindingIds = new Set<string>();
   const findings: ReviewFinding[] = [];
+  const reviewedChapterIds: string[] = [];
 
   const chapters = baseAnalysis.chapters.map((chapter) => {
     const result = resultByChapterId.get(chapter.id);
     if (!result) return { ...chapter, findingIds: [] };
+    reviewedChapterIds.push(chapter.id);
 
     const findingIds: string[] = [];
     for (const finding of result.findings) {
@@ -294,7 +346,7 @@ function mergeChapterResults(baseAnalysis: ReviewAnalysis, dataset: ReviewDatase
   return {
     ...baseAnalysis,
     status: "ready",
-    message: `AI review complete: ${findings.length} finding(s) from ${results.length} chapter agent(s).`,
+    message: message ?? `AI review complete: ${findings.length} finding(s) from ${results.length} PI subagent(s).`,
     chapters,
     findings,
     approvalPacket: {
@@ -302,7 +354,7 @@ function mergeChapterResults(baseAnalysis: ReviewAnalysis, dataset: ReviewDatase
       summary: findings.length === 0
         ? `${baseAnalysis.approvalPacket.summary} AI review found no concrete issues in changed hunks.`
         : `${baseAnalysis.approvalPacket.summary} AI review produced ${findings.length} concrete finding(s).`,
-      reviewedChapters: chapters.map((chapter) => chapter.id),
+      reviewedChapters: reviewedChapterIds,
       unresolvedFindings,
       suggestedVerdict,
       body,
@@ -327,37 +379,56 @@ export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewD
   progress = {
     ...progress,
     phase: "chapter-review",
-    message: "Chapter agents are reviewing changed hunks.",
+    message: "PI subagents are reviewing changed hunks in parallel.",
     scoutSummary,
   };
   options.onProgress(progress);
 
   const results: ChapterReviewResult[] = [];
-  for (const chapter of analysis.chapters) {
-    progress = updateChapterProgress(progress, chapter.id, {
-      status: "running",
-      message: "Chapter agent reviewing changed hunks.",
-    });
-    options.onProgress(progress);
+  let nextChapterIndex = 0;
+  const runNextChapter = async (): Promise<void> => {
+    while (nextChapterIndex < analysis.chapters.length) {
+      const chapter = analysis.chapters[nextChapterIndex];
+      nextChapterIndex += 1;
+      if (!chapter) continue;
 
-    try {
-      const result = await reviewChapter(ctx, dataset, chapter, options);
-      results.push(result);
       progress = updateChapterProgress(progress, chapter.id, {
-        status: "done",
-        message: `Done. ${result.analysis.findings.length} finding(s).`,
-        findingCount: result.analysis.findings.length,
+        status: "running",
+        message: "PI subagent reviewing changed hunks.",
       });
       options.onProgress(progress);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      progress = updateChapterProgress(progress, chapter.id, {
-        status: "failed",
-        message,
-      });
-      options.onProgress(progress);
+
+      try {
+        const result = await reviewChapter(ctx, dataset, chapter, options);
+        results.push(result);
+        progress = updateChapterProgress(progress, chapter.id, {
+          status: "done",
+          message: `Done. ${result.analysis.findings.length} finding(s).`,
+          findingCount: result.analysis.findings.length,
+        });
+        options.onProgress(progress);
+        const findingCount = results.reduce((total, item) => total + item.analysis.findings.length, 0);
+        const partialAnalysis = mergeChapterResults(
+          analysis,
+          dataset,
+          results,
+          scoutSummary,
+          `AI review running: ${findingCount} finding(s) from ${results.length}/${analysis.chapters.length} PI subagent(s).`,
+        );
+        options.onPartialResult?.({ chapterId: chapter.id, analysis: partialAnalysis, progress });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        progress = updateChapterProgress(progress, chapter.id, {
+          status: "failed",
+          message,
+        });
+        options.onProgress(progress);
+      }
     }
-  }
+  };
+
+  const parallelism = Math.max(1, Math.min(options.maxParallelChapterReviews ?? DEFAULT_PARALLEL_CHAPTER_REVIEWS, analysis.chapters.length));
+  await Promise.all(Array.from({ length: parallelism }, () => runNextChapter()));
 
   const failedChapterCount = progress.chapters.filter((chapter) => chapter.status === "failed").length;
   if (analysis.chapters.length > 0 && failedChapterCount === analysis.chapters.length) {

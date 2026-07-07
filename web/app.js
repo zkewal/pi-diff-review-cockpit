@@ -1091,7 +1091,7 @@ function updateScopeButtons() {
 function updateAiReviewButton() {
   const running = state.aiReview.status === "running";
   runAiReviewButton.disabled = running;
-  runAiReviewButton.textContent = running ? "AI reviewing..." : state.aiReview.status === "done" ? "Rerun AI review" : "Run AI review";
+  runAiReviewButton.textContent = running ? "PI reviewing..." : state.aiReview.status === "done" ? "Rerun PI review" : "Run PI review";
   runAiReviewButton.className = running
     ? "cursor-default rounded-md border border-[#8957e5]/30 bg-[#8957e5]/10 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] opacity-70"
     : "cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] hover:bg-[#8957e5]/25";
@@ -1153,6 +1153,18 @@ function firstExistingFindingFileId(finding) {
     .find((fileId) => getFileById(fileId) != null) || null;
 }
 
+function firstDraftableFindingLocation(finding) {
+  for (const location of finding.locations || []) {
+    if (location.line == null || location.side === "file") continue;
+    const file = getFileById(location.fileId);
+    const comparison = file?.gitDiff;
+    if (!comparison) continue;
+    const range = clampRangeToCommentable(location.line, location.line, rangesForSide(comparison, location.side));
+    if (range) return location;
+  }
+  return null;
+}
+
 function firstLocationLabel(finding) {
   const location = (finding.locations || [])[0];
   if (!location) return "No location";
@@ -1167,16 +1179,20 @@ function insightActionButtonClass(active) {
 
 function aiReviewPanelHtml(chapterId = null) {
   const progress = state.aiReview.progress;
-  const title = chapterId ? "AI chapter review" : "AI review";
+  const title = chapterId ? "PI chapter review" : "PI review";
+  const running = progress?.status === "running";
   if (!progress) {
     return `
-      <div class="rounded-md border border-review-border bg-[#010409] p-3">
-        <div class="flex items-center justify-between gap-2">
-          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">${title}</div>
-          <span class="text-[11px] text-review-muted">Not run</span>
+      <div class="ai-review-card rounded-md border p-3" data-running="false">
+        <div class="relative flex items-center justify-between gap-2">
+          <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-review-muted">
+            <span class="rounded border border-[#58a6ff]/30 bg-[#58a6ff]/10 px-1.5 py-0.5 text-[#79c0ff]">PI</span>
+            <span>${title}</span>
+          </div>
+          <span class="text-[11px] text-review-muted">Idle</span>
         </div>
-        <div class="mt-2 text-sm text-review-text">Patch analysis not run.</div>
-        <div class="mt-2 text-xs text-review-muted">Per-chapter findings are pending.</div>
+        <div class="relative mt-2 text-sm text-review-text">Parallel patch review is ready.</div>
+        <div class="relative mt-2 text-xs text-review-muted">Run PI review to fan out chapter subagents and stream findings back into the diff.</div>
       </div>
     `;
   }
@@ -1186,16 +1202,32 @@ function aiReviewPanelHtml(chapterId = null) {
     : progress.chapters;
   const visibleChapters = chapters.slice(0, chapterId ? 1 : 8);
   const hiddenCount = Math.max(0, chapters.length - visibleChapters.length);
+  const completedCount = progress.chapters.filter((chapter) => chapter.status === "done").length;
+  const failedCount = progress.chapters.filter((chapter) => chapter.status === "failed").length;
+  const totalFindings = progress.chapters.reduce((total, chapter) => total + chapter.findingCount, 0);
+  const progressPercent = progress.chapters.length === 0 ? 0 : Math.round(((completedCount + failedCount) / progress.chapters.length) * 100);
 
   return `
-    <div class="rounded-md border border-review-border bg-[#010409] p-3">
-      <div class="flex items-center justify-between gap-2">
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">${title}</div>
+    <div class="ai-review-card rounded-md border p-3" data-running="${running ? "true" : "false"}">
+      <div class="relative flex items-center justify-between gap-2">
+        <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-review-muted">
+          <span class="rounded border border-[#58a6ff]/30 bg-[#58a6ff]/10 px-1.5 py-0.5 text-[#79c0ff]">PI</span>
+          <span>${title}</span>
+          ${running ? `<span class="flex items-center gap-1" aria-hidden="true"><span class="ai-pulse-dot"></span><span class="ai-pulse-dot"></span><span class="ai-pulse-dot"></span></span>` : ""}
+        </div>
         <span class="text-[11px] ${aiReviewStepClass(progress.status)}">${escapeHtml(humanizeToken(progress.status))}</span>
       </div>
-      <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(progress.message || state.aiReview.message)}</div>
-      ${progress.scoutSummary ? `<div class="mt-2 text-xs leading-5 text-review-muted">${escapeHtml(progress.scoutSummary)}</div>` : ""}
-      <div class="mt-3 space-y-1.5">
+      <div class="relative mt-2 text-sm leading-5 text-review-text">${escapeHtml(progress.message || state.aiReview.message)}</div>
+      <div class="relative mt-3 h-1.5 overflow-hidden rounded-full bg-[#161b22]">
+        <div class="h-full rounded-full bg-[#58a6ff]" style="width: ${progressPercent}%"></div>
+      </div>
+      <div class="relative mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-review-muted">
+        <span>${completedCount}/${progress.chapters.length} subagent(s)</span>
+        ${failedCount > 0 ? `<span class="text-[#f85149]">${failedCount} failed</span>` : ""}
+        <span>${totalFindings} finding(s)</span>
+      </div>
+      ${progress.scoutSummary ? `<div class="relative mt-2 text-xs leading-5 text-review-muted">${escapeHtml(progress.scoutSummary)}</div>` : ""}
+      <div class="relative mt-3 space-y-1.5">
         ${visibleChapters.map((chapter) => `
           <div class="rounded border border-review-border bg-review-panel px-2 py-1.5">
             <div class="flex items-center justify-between gap-2">
@@ -1382,6 +1414,7 @@ function renderInsightForFinding(finding) {
   insightPanelTitleEl.textContent = "AI finding context";
   const status = state.findingStatuses[finding.id] || "new";
   const acceptedComment = state.acceptedFindingComments[finding.id] || "";
+  const canCreateDraft = firstDraftableFindingLocation(finding) != null;
 
   insightContentEl.innerHTML = `
     <div class="space-y-4">
@@ -1412,7 +1445,8 @@ function renderInsightForFinding(finding) {
         ${acceptedComment ? `<div class="mt-2 text-xs text-[#3fb950]">Accepted comment saved in this review session.</div>` : ""}
       </div>
       <div class="flex flex-wrap gap-2">
-        <button data-finding-status="accepted-comment" class="${insightActionButtonClass(status === "accepted-comment")}">Accept comment</button>
+        ${canCreateDraft ? `<button data-finding-action="create-draft" class="${insightActionButtonClass(false)}">Create draft</button>` : ""}
+        <button data-finding-status="accepted-comment" class="${insightActionButtonClass(status === "accepted-comment")}">Accept to packet</button>
         <button data-finding-status="dismissed" class="${insightActionButtonClass(status === "dismissed")}">Dismiss</button>
         <button data-finding-status="accepted-risk" class="${insightActionButtonClass(status === "accepted-risk")}">Accept risk</button>
         <button data-finding-status="new" class="${insightActionButtonClass(status === "new")}">Reset</button>
@@ -1426,6 +1460,7 @@ function renderInsightForFinding(finding) {
   insightContentEl.querySelectorAll("[data-finding-status]").forEach((button) => {
     button.addEventListener("click", () => setFindingStatus(finding, button.getAttribute("data-finding-status")));
   });
+  insightContentEl.querySelector("[data-finding-action='create-draft']")?.addEventListener("click", () => createFirstDraftCommentFromFinding(finding));
 }
 
 function renderInsightPanel() {
@@ -1866,6 +1901,108 @@ function renderCommentDOM(comment, onDelete) {
   return container;
 }
 
+function getInlineAiFindingEntries(file) {
+  if (!file || state.currentScope !== "git-diff" || !activeFileShowsDiff()) return [];
+  const entries = [];
+  for (const finding of getReviewFindings()) {
+    const status = state.findingStatuses[finding.id] || "new";
+    if (status !== "new") continue;
+    for (const location of finding.locations || []) {
+      if (location.fileId !== file.id || location.line == null || location.side === "file") continue;
+      const ranges = rangesForSide(activeComparison(), location.side);
+      if (!clampRangeToCommentable(location.line, location.line, ranges)) continue;
+      entries.push({ finding, location });
+    }
+  }
+  return entries;
+}
+
+function createDraftCommentFromFinding(finding, location) {
+  const body = (finding.suggestedComment || "").trim();
+  if (!body) return;
+  const file = activeFile();
+  const comparison = activeComparison();
+  const commentRange = file && comparison && location.fileId === file.id && state.currentScope === "git-diff" && location.line != null
+    ? clampRangeToCommentable(location.line, location.line, rangesForSide(comparison, location.side))
+    : null;
+  if (!commentRange || location.side === "file") {
+    state.findingStatuses[finding.id] = "accepted-comment";
+    state.acceptedFindingComments[finding.id] = body;
+    state.activeInsight = { type: "finding", id: finding.id };
+    renderTree();
+    return;
+  }
+  const duplicate = state.comments.some((comment) =>
+    comment.fileId === location.fileId &&
+    comment.scope === state.currentScope &&
+    comment.side === location.side &&
+    comment.startLine === commentRange.startLine &&
+    comment.body.trim() === body
+  );
+  if (!duplicate) {
+    state.comments.push({
+      id: `ai:${finding.id}:${Date.now()}:${Math.random().toString(16).slice(2)}`,
+      fileId: location.fileId,
+      scope: state.currentScope,
+      commitSha: state.currentScope === "commit" ? state.selectedCommitSha : undefined,
+      side: location.side,
+      startLine: commentRange.startLine,
+      endLine: commentRange.endLine,
+      body,
+    });
+  }
+  state.findingStatuses[finding.id] = "accepted-comment";
+  state.acceptedFindingComments[finding.id] = body;
+  state.activeInsight = { type: "finding", id: finding.id };
+  updateCommentsUI();
+}
+
+function createFirstDraftCommentFromFinding(finding) {
+  const location = firstDraftableFindingLocation(finding);
+  if (!location) return;
+  const file = getFileById(location.fileId);
+  if (!file) return;
+  saveCurrentScrollPosition();
+  state.currentScope = "git-diff";
+  state.activeFileId = file.id;
+  state.activeDiffSide = location.side;
+  state.activeDiffLine = location.line;
+  createDraftCommentFromFinding(finding, location);
+  ensureFileLoaded(file.id, state.currentScope);
+  renderAll({ restoreFileScroll: true });
+}
+
+function renderAiFindingZoneDOM(finding, location) {
+  const container = document.createElement("div");
+  container.className = "view-zone-container ai-finding-zone";
+  container.innerHTML = `
+    <div class="mb-2 flex items-center justify-between gap-3">
+      <div class="flex min-w-0 items-center gap-2 text-xs font-semibold text-review-text">
+        <span class="rounded border border-[#58a6ff]/30 bg-[#58a6ff]/10 px-1.5 py-0.5 text-[10px] text-[#79c0ff]">PI</span>
+        <span class="truncate">AI finding • ${escapeHtml(humanizeToken(finding.kind))}</span>
+      </div>
+      <span class="shrink-0 text-[11px] ${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
+    </div>
+    <div class="text-sm font-medium leading-5 text-white">${escapeHtml(finding.title)}</div>
+    <div class="mt-1 line-clamp-2 text-xs leading-5 text-review-muted">${escapeHtml(finding.explanation)}</div>
+    <div class="mt-2 flex items-center justify-between gap-3">
+      <div class="min-w-0 truncate text-xs text-review-muted">${escapeHtml(finding.suggestedComment || "No suggested comment.")}</div>
+      <div class="flex shrink-0 items-center gap-2">
+        <button data-action="open" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:bg-[#21262d]">Open</button>
+        <button data-action="dismiss" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Dismiss</button>
+        <button data-action="accept" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Create draft</button>
+      </div>
+    </div>
+  `;
+  container.querySelector("[data-action='open']").addEventListener("click", () => {
+    state.activeInsight = { type: "finding", id: finding.id };
+    renderTree();
+  });
+  container.querySelector("[data-action='dismiss']").addEventListener("click", () => setFindingStatus(finding, "dismissed"));
+  container.querySelector("[data-action='accept']").addEventListener("click", () => createDraftCommentFromFinding(finding, location));
+  return container;
+}
+
 function canCommentOnSide(file, side) {
   if (!file) return false;
   const comparison = activeComparison();
@@ -1904,6 +2041,19 @@ function syncViewZones() {
       const id = accessor.addZone({
         afterLineNumber: item.startLine,
         heightInPx: Math.max(150, lineCount * 22 + 86),
+        domNode,
+      });
+      activeViewZones.push({ id, editor });
+    });
+  });
+
+  getInlineAiFindingEntries(file).forEach(({ finding, location }) => {
+    const editor = location.side === "original" ? originalEditor : modifiedEditor;
+    const domNode = renderAiFindingZoneDOM(finding, location);
+    editor.changeViewZones((accessor) => {
+      const id = accessor.addZone({
+        afterLineNumber: location.line,
+        heightInPx: 142,
         domNode,
       });
       activeViewZones.push({ id, editor });
@@ -2154,6 +2304,22 @@ window.__reviewReceive = function (message) {
       progress: message.progress,
     };
     renderTree();
+    return;
+  }
+
+  if (message.type === "ai-review-partial-result") {
+    if (message.requestId !== state.aiReview.requestId) return;
+    applyAiReviewAnalysis(message.analysis);
+    state.aiReview = {
+      requestId: message.requestId,
+      status: message.progress?.status || "running",
+      message: message.progress?.message || "PI subagent results are streaming.",
+      progress: message.progress,
+    };
+    renderTree();
+    syncViewZones();
+    updateDecorations();
+    renderFileComments();
     return;
   }
 
@@ -2500,7 +2666,7 @@ function getKeyboardActions() {
       keywords: "command palette",
       match: key("k", { metaOrCtrl: true }),
     }),
-    shortcutAction("run-ai-review", state.aiReview.status === "done" ? "Rerun AI review" : "Run AI review", "", runAiReviewFromUi, {
+    shortcutAction("run-ai-review", state.aiReview.status === "done" ? "Rerun PI review" : "Run PI review", "", runAiReviewFromUi, {
       keywords: "ai review scout chapter agents findings",
       enabled: () => state.aiReview.status !== "running",
     }),

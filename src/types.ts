@@ -185,6 +185,14 @@ export interface ReviewAiReviewResultMessage {
   progress: AiReviewProgress;
 }
 
+export interface ReviewAiReviewPartialResultMessage {
+  type: "ai-review-partial-result";
+  requestId: string;
+  chapterId: string;
+  analysis: ReviewAnalysis;
+  progress: AiReviewProgress;
+}
+
 export interface ReviewAiReviewErrorMessage {
   type: "ai-review-error";
   requestId: string;
@@ -192,7 +200,7 @@ export interface ReviewAiReviewErrorMessage {
   progress: AiReviewProgress;
 }
 
-export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewAiReviewProgressMessage | ReviewAiReviewResultMessage | ReviewAiReviewErrorMessage;
+export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewAiReviewProgressMessage | ReviewAiReviewPartialResultMessage | ReviewAiReviewResultMessage | ReviewAiReviewErrorMessage;
 
 export type ReviewFindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type ReviewFindingKind = "bug" | "security" | "migration-risk" | "api-contract" | "test-gap" | "performance" | "question" | "informational";

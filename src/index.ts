@@ -320,6 +320,8 @@ export default function (pi: ExtensionAPI) {
           resolve(value);
         };
 
+        const canUpdateAiReview = (): boolean => !settled && activeWindow === window;
+
         const handlePublishGitHubReview = async (message: ReviewPublishPayload): Promise<void> => {
           if (publishInFlight) {
             ctx.ui.notify("A GitHub review publish is already in progress.", "warning");
@@ -417,13 +419,30 @@ export default function (pi: ExtensionAPI) {
             const result = await runAiReview(ctx, dataset, analysis, {
               getFilePatch: loadFilePatch,
               onProgress: (progress) => {
+                if (!canUpdateAiReview()) return;
                 sendWindowMessage({
                   type: "ai-review-progress",
                   requestId: message.requestId,
                   progress,
                 });
               },
+              onPartialResult: (partial) => {
+                if (!canUpdateAiReview()) return;
+                analysis = partial.analysis;
+                queueSessionSave({
+                  ...(sessionSnapshot ?? {}),
+                  analysis,
+                });
+                sendWindowMessage({
+                  type: "ai-review-partial-result",
+                  requestId: message.requestId,
+                  chapterId: partial.chapterId,
+                  analysis: partial.analysis,
+                  progress: partial.progress,
+                });
+              },
             });
+            if (!canUpdateAiReview()) return;
             analysis = result.analysis;
             queueSessionSave({
               ...(sessionSnapshot ?? {}),
@@ -436,6 +455,7 @@ export default function (pi: ExtensionAPI) {
               progress: result.progress,
             });
           } catch (error) {
+            if (!canUpdateAiReview()) return;
             const messageText = error instanceof Error ? error.message : String(error);
             sendWindowMessage({
               type: "ai-review-error",
