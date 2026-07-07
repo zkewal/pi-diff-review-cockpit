@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
+import { createAiReviewFailedProgress, runAiReview } from "./ai-review.js";
 import { analyzeReviewDataset } from "./analysis.js";
 import { parseDiffReviewArgs } from "./command.js";
 import { loadReviewFileContents } from "./git.js";
@@ -14,11 +15,14 @@ import type {
   ReviewFileContents,
   ReviewHostMessage,
   ReviewPublishPayload,
+  ReviewRunAiReviewPayload,
   ReviewRequestFilePayload,
   ReviewSubmitPayload,
   ReviewWindowMessage,
 } from "./types.js";
 import { buildReviewHtml } from "./ui.js";
+
+const PATCH_COMMAND_TIMEOUT_MS = 120_000;
 
 function isSubmitPayload(value: ReviewWindowMessage): value is ReviewSubmitPayload {
   return value.type === "submit";
@@ -34,6 +38,10 @@ function isRequestFilePayload(value: ReviewWindowMessage): value is ReviewReques
 
 function isPublishPayload(value: ReviewWindowMessage): value is ReviewPublishPayload {
   return value.type === "publish-github-review";
+}
+
+function isRunAiReviewPayload(value: ReviewWindowMessage): value is ReviewRunAiReviewPayload {
+  return value.type === "run-ai-review";
 }
 
 type WaitingEditorResult = "escape" | "window-settled";
@@ -138,7 +146,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     ctx.ui.notify("Analyzing diff for review map and findings.", "info");
-    const analysis = await analyzeReviewDataset(ctx, dataset);
+    let analysis = await analyzeReviewDataset(ctx, dataset);
 
     const html = buildReviewHtml({ ...dataset, analysis });
     const window = open(html, {
@@ -174,6 +182,7 @@ export default function (pi: ExtensionAPI) {
       const terminalMessagePromise = new Promise<ReviewSubmitPayload | ReviewCancelPayload | null>((resolve, reject) => {
         let settled = false;
         let publishInFlight = false;
+        let aiReviewInFlight = false;
 
         const cleanup = (): void => {
           window.removeListener("message", onMessage);
@@ -272,8 +281,74 @@ export default function (pi: ExtensionAPI) {
           }
         };
 
+        const loadFilePatch = async (file: ReviewFile): Promise<string> => {
+          if (file.gitDiff == null) return "";
+          const paths = [...new Set([
+            file.gitDiff.oldPath,
+            file.gitDiff.newPath,
+            file.path,
+          ].filter((path): path is string => path != null && path.length > 0))];
+          if (paths.length === 0) return "";
+
+          const result = await pi.exec("git", ["diff", "--no-color", "--unified=80", "HEAD", "--", ...paths], {
+            cwd: workingRoot,
+            timeout: PATCH_COMMAND_TIMEOUT_MS,
+          });
+          if (result.code !== 0) {
+            return "";
+          }
+          return result.stdout;
+        };
+
+        const handleRunAiReview = async (message: ReviewRunAiReviewPayload): Promise<void> => {
+          if (aiReviewInFlight) {
+            sendWindowMessage({
+              type: "ai-review-error",
+              requestId: message.requestId,
+              message: "An AI review is already running.",
+              progress: createAiReviewFailedProgress(analysis, "An AI review is already running."),
+            });
+            return;
+          }
+
+          aiReviewInFlight = true;
+          try {
+            const result = await runAiReview(ctx, dataset, analysis, {
+              getFilePatch: loadFilePatch,
+              onProgress: (progress) => {
+                sendWindowMessage({
+                  type: "ai-review-progress",
+                  requestId: message.requestId,
+                  progress,
+                });
+              },
+            });
+            analysis = result.analysis;
+            sendWindowMessage({
+              type: "ai-review-result",
+              requestId: message.requestId,
+              analysis: result.analysis,
+              progress: result.progress,
+            });
+          } catch (error) {
+            const messageText = error instanceof Error ? error.message : String(error);
+            sendWindowMessage({
+              type: "ai-review-error",
+              requestId: message.requestId,
+              message: messageText,
+              progress: createAiReviewFailedProgress(analysis, messageText),
+            });
+          } finally {
+            aiReviewInFlight = false;
+          }
+        };
+
         const onMessage = (data: unknown): void => {
           const message = data as ReviewWindowMessage;
+          if (isRunAiReviewPayload(message)) {
+            void handleRunAiReview(message);
+            return;
+          }
           if (isPublishPayload(message)) {
             void handlePublishGitHubReview(message);
             return;

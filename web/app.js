@@ -30,6 +30,12 @@ const state = {
   activeDiffSide: "modified",
   activeDiffLine: null,
   pendingHunkFocus: null,
+  aiReview: {
+    requestId: null,
+    status: "idle",
+    message: "AI review has not run.",
+    progress: null,
+  },
 };
 
 const sidebarEl = document.getElementById("sidebar");
@@ -61,6 +67,7 @@ const analysisStatusEl = document.getElementById("analysis-status");
 const submitButton = document.getElementById("submit-button");
 const cancelButton = document.getElementById("cancel-button");
 const publishGitHubButton = document.getElementById("publish-github-button");
+const runAiReviewButton = document.getElementById("run-ai-review-button");
 const overallCommentButton = document.getElementById("overall-comment-button");
 const approvalPacketButton = document.getElementById("approval-packet-button");
 const fileCommentButton = document.getElementById("file-comment-button");
@@ -294,6 +301,15 @@ function findingStatusClass(status) {
     case "dismissed": return "text-review-muted";
     case "accepted-risk": return "text-[#d29922]";
     default: return "text-[#58a6ff]";
+  }
+}
+
+function aiReviewStepClass(status) {
+  switch (status) {
+    case "running": return "text-[#58a6ff]";
+    case "done": return "text-[#3fb950]";
+    case "failed": return "text-[#f85149]";
+    default: return "text-review-muted";
   }
 }
 
@@ -972,6 +988,15 @@ function updateScopeButtons() {
     : "mb-3 hidden w-full rounded-md border border-review-border bg-review-panel px-2 py-2 text-xs text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500";
 }
 
+function updateAiReviewButton() {
+  const running = state.aiReview.status === "running";
+  runAiReviewButton.disabled = running;
+  runAiReviewButton.textContent = running ? "AI reviewing..." : state.aiReview.status === "done" ? "Rerun AI review" : "Run AI review";
+  runAiReviewButton.className = running
+    ? "cursor-default rounded-md border border-[#8957e5]/30 bg-[#8957e5]/10 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] opacity-70"
+    : "cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] hover:bg-[#8957e5]/25";
+}
+
 function updateToggleButtons() {
   const file = activeFile();
   const reviewed = file ? isFileReviewed(file.id) : false;
@@ -983,8 +1008,10 @@ function updateToggleButtons() {
   toggleUnchangedButton.textContent = state.hideUnchanged ? "Show full file" : "Show changed areas only";
   toggleUnchangedButton.style.display = activeFileShowsDiff() ? "inline-flex" : "none";
   updateScopeButtons();
+  updateAiReviewButton();
   modeHintEl.textContent = scopeHint(state.currentScope);
-  submitButton.disabled = false;
+  submitButton.disabled = state.aiReview.status === "running";
+  publishGitHubButton.disabled = state.aiReview.status === "running";
 }
 
 function findPreferredScopeForFile(file) {
@@ -1038,6 +1065,55 @@ function insightActionButtonClass(active) {
     : "cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d]";
 }
 
+function aiReviewPanelHtml(chapterId = null) {
+  const progress = state.aiReview.progress;
+  const title = chapterId ? "AI chapter review" : "AI review";
+  if (!progress) {
+    return `
+      <div class="rounded-md border border-review-border bg-[#010409] p-3">
+        <div class="flex items-center justify-between gap-2">
+          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">${title}</div>
+          <span class="text-[11px] text-review-muted">Not run</span>
+        </div>
+        <div class="mt-2 text-sm text-review-text">Patch analysis not run.</div>
+        <div class="mt-2 text-xs text-review-muted">Per-chapter findings are pending.</div>
+      </div>
+    `;
+  }
+
+  const chapters = chapterId
+    ? progress.chapters.filter((chapter) => chapter.chapterId === chapterId)
+    : progress.chapters;
+  const visibleChapters = chapters.slice(0, chapterId ? 1 : 8);
+  const hiddenCount = Math.max(0, chapters.length - visibleChapters.length);
+
+  return `
+    <div class="rounded-md border border-review-border bg-[#010409] p-3">
+      <div class="flex items-center justify-between gap-2">
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">${title}</div>
+        <span class="text-[11px] ${aiReviewStepClass(progress.status)}">${escapeHtml(humanizeToken(progress.status))}</span>
+      </div>
+      <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(progress.message || state.aiReview.message)}</div>
+      ${progress.scoutSummary ? `<div class="mt-2 text-xs leading-5 text-review-muted">${escapeHtml(progress.scoutSummary)}</div>` : ""}
+      <div class="mt-3 space-y-1.5">
+        ${visibleChapters.map((chapter) => `
+          <div class="rounded border border-review-border bg-review-panel px-2 py-1.5">
+            <div class="flex items-center justify-between gap-2">
+              <span class="min-w-0 truncate text-xs font-medium text-review-text">${escapeHtml(chapter.title)}</span>
+              <span class="shrink-0 text-[11px] ${aiReviewStepClass(chapter.status)}">${escapeHtml(humanizeToken(chapter.status))}</span>
+            </div>
+            <div class="mt-0.5 flex items-center justify-between gap-2 text-[11px] text-review-muted">
+              <span class="min-w-0 truncate">${escapeHtml(chapter.message)}</span>
+              <span class="shrink-0">${chapter.findingCount} finding(s)</span>
+            </div>
+          </div>
+        `).join("")}
+        ${hiddenCount > 0 ? `<div class="px-2 text-xs text-review-muted">${hiddenCount} more chapter agent(s).</div>` : ""}
+      </div>
+    </div>
+  `;
+}
+
 function renderDefaultInsight() {
   insightPanelTitleEl.textContent = "Review context";
   const packet = reviewData.analysis?.approvalPacket;
@@ -1045,6 +1121,7 @@ function renderDefaultInsight() {
   if (!packet) {
     insightContentEl.innerHTML = `
       <div class="space-y-4">
+        ${aiReviewPanelHtml()}
         <div class="space-y-3 text-sm text-review-muted">
           <div>No analysis context available.</div>
           <div>Select a chapter or AI finding to inspect details.</div>
@@ -1060,6 +1137,7 @@ function renderDefaultInsight() {
 
   insightContentEl.innerHTML = `
     <div class="space-y-4">
+      ${aiReviewPanelHtml()}
       <div>
         <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Approval packet</div>
         <div class="mt-2 text-sm font-medium text-white">${escapeHtml(packet.summary)}</div>
@@ -1105,6 +1183,7 @@ function renderInsightForChapter(chapter) {
 
   insightContentEl.innerHTML = `
     <div class="space-y-4">
+      ${aiReviewPanelHtml(chapter.id)}
       <div>
         <div class="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider">
           <span class="${severityTextClass(chapter.risk)}">${escapeHtml(humanizeToken(chapter.risk))} risk</span>
@@ -1376,7 +1455,9 @@ function renderTree() {
   fileTreeEl.innerHTML = "";
   updateSidebarTabs();
   sourceLabelEl.textContent = reviewData.source?.label || "Review source";
-  analysisStatusEl.textContent = reviewData.analysis?.message || "";
+  analysisStatusEl.textContent = state.aiReview.status === "running"
+    ? state.aiReview.message
+    : reviewData.analysis?.message || "";
 
   const scopedFiles = getScopedFiles();
   const comments = getDraftComments().length;
@@ -1515,6 +1596,7 @@ function suggestedGitHubReviewEvent() {
 }
 
 function showPublishGitHubModal() {
+  if (state.aiReview.status === "running") return;
   const backdrop = document.createElement("div");
   backdrop.className = "review-modal-backdrop";
   backdrop.innerHTML = `
@@ -1590,7 +1672,7 @@ function showFileCommentModal() {
         endLine: null,
         body: value,
       });
-      submitButton.disabled = false;
+      submitButton.disabled = state.aiReview.status === "running";
       updateCommentsUI();
     },
   });
@@ -1865,7 +1947,7 @@ function updateCommentsUI() {
 
 function renderAll(options = {}) {
   renderTree();
-  submitButton.disabled = false;
+  submitButton.disabled = state.aiReview.status === "running";
   if (diffEditor && monacoApi) {
     mountFile(options);
     requestAnimationFrame(() => {
@@ -1957,6 +2039,44 @@ function createGlyphHoverActions(editor, side) {
 
 window.__reviewReceive = function (message) {
   if (!message || typeof message !== "object") return;
+
+  if (message.type === "ai-review-progress") {
+    if (message.requestId !== state.aiReview.requestId) return;
+    state.aiReview = {
+      requestId: message.requestId,
+      status: message.progress?.status || "running",
+      message: message.progress?.message || "AI review is running.",
+      progress: message.progress,
+    };
+    renderTree();
+    return;
+  }
+
+  if (message.type === "ai-review-result") {
+    if (message.requestId !== state.aiReview.requestId) return;
+    applyAiReviewAnalysis(message.analysis);
+    state.aiReview = {
+      requestId: message.requestId,
+      status: message.progress?.status || "done",
+      message: message.progress?.message || "AI review complete.",
+      progress: message.progress,
+    };
+    renderAll({ preserveScroll: true });
+    return;
+  }
+
+  if (message.type === "ai-review-error") {
+    if (message.requestId !== state.aiReview.requestId) return;
+    state.aiReview = {
+      requestId: message.requestId,
+      status: "failed",
+      message: message.message || "AI review failed.",
+      progress: message.progress || state.aiReview.progress,
+    };
+    renderTree();
+    return;
+  }
+
   const previousSelectedCommitSha = state.selectedCommitSha;
   if (message.scope === "commit" && message.commitSha) state.selectedCommitSha = message.commitSha;
   const key = cacheKey(message.scope, message.fileId);
@@ -2073,6 +2193,50 @@ function switchScope(scope) {
   if (file) ensureFileLoaded(file.id, state.currentScope);
 }
 
+function applyAiReviewAnalysis(analysis) {
+  const previousStatuses = state.findingStatuses;
+  const previousAcceptedComments = state.acceptedFindingComments;
+  reviewData.analysis = analysis;
+
+  const findingIds = new Set((analysis.findings || []).map((finding) => finding.id));
+  state.findingStatuses = Object.fromEntries((analysis.findings || []).map((finding) => [
+    finding.id,
+    previousStatuses[finding.id] || finding.status || "new",
+  ]));
+  state.acceptedFindingComments = Object.fromEntries(
+    Object.entries(previousAcceptedComments).filter(([findingId]) => findingIds.has(findingId)),
+  );
+
+  if (state.activeInsight.type === "finding" && !findingIds.has(state.activeInsight.id)) {
+    state.activeInsight = { type: "default", id: null };
+  }
+}
+
+function runAiReviewFromUi() {
+  if (state.aiReview.status === "running") return;
+  const requestId = `ai-review:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  state.aiReview = {
+    requestId,
+    status: "running",
+    message: "Starting AI review.",
+    progress: {
+      status: "running",
+      phase: "scout",
+      message: "Starting AI review.",
+      scoutSummary: "",
+      chapters: getReviewChapters().map((chapter) => ({
+        chapterId: chapter.id,
+        title: chapter.title,
+        status: "queued",
+        message: "Queued.",
+        findingCount: 0,
+      })),
+    },
+  };
+  renderTree();
+  window.glimpse.send({ type: "run-ai-review", requestId });
+}
+
 function buildSubmitPayload() {
   return {
     type: "submit",
@@ -2094,6 +2258,7 @@ function buildSubmitPayload() {
 }
 
 function finishReview() {
+  if (state.aiReview.status === "running") return;
   syncCommentBodiesFromDOM();
   window.glimpse.send(buildSubmitPayload());
   window.glimpse.close();
@@ -2226,6 +2391,10 @@ function getKeyboardActions() {
       keywords: "command palette",
       match: key("k", { metaOrCtrl: true }),
     }),
+    shortcutAction("run-ai-review", state.aiReview.status === "done" ? "Rerun AI review" : "Run AI review", "", runAiReviewFromUi, {
+      keywords: "ai review scout chapter agents findings",
+      enabled: () => state.aiReview.status !== "running",
+    }),
     shortcutAction("focus-sidebar", "Focus review map or files", "1", focusSidebarPane, { match: key("1") }),
     shortcutAction("focus-diff", "Focus diff", "2", focusDiffPane, { match: key("2") }),
     shortcutAction("focus-context", "Focus chapter context", "3", focusInsightPane, { match: key("3") }),
@@ -2251,11 +2420,12 @@ function getKeyboardActions() {
     shortcutAction("overall-note", "Edit overall note", "O", showOverallCommentModal, { match: key("o") }),
     shortcutAction("approval-packet", "Edit approval packet", "A", showApprovalPacketModal, { match: key("a") }),
     shortcutAction("publish-github", "Publish to GitHub", "P", showPublishGitHubModal, {
-      enabled: () => !publishGitHubButton.classList.contains("hidden"),
+      enabled: () => state.aiReview.status !== "running" && !publishGitHubButton.classList.contains("hidden"),
       match: key("p"),
     }),
     shortcutAction("finish-review", "Finish review", "", finishReview, {
       keywords: "submit complete done",
+      enabled: () => state.aiReview.status !== "running",
     }),
   ];
 }
@@ -2395,6 +2565,8 @@ cancelButton.addEventListener("click", cancelReview);
 publishGitHubButton.addEventListener("click", () => {
   showPublishGitHubModal();
 });
+
+runAiReviewButton.addEventListener("click", runAiReviewFromUi);
 
 overallCommentButton.addEventListener("click", () => {
   showOverallCommentModal();

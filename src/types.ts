@@ -96,7 +96,12 @@ export interface ReviewPublishPayload {
   submit: ReviewSubmitPayload;
 }
 
-export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewPublishPayload;
+export interface ReviewRunAiReviewPayload {
+  type: "run-ai-review";
+  requestId: string;
+}
+
+export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewPublishPayload | ReviewRunAiReviewPayload;
 
 export interface ReviewFileDataMessage {
   type: "file-data";
@@ -117,7 +122,46 @@ export interface ReviewFileErrorMessage {
   message: string;
 }
 
-export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage;
+export type AiReviewRunStatus = "idle" | "running" | "done" | "failed";
+export type AiReviewStepStatus = "queued" | "running" | "done" | "failed";
+
+export interface AiReviewChapterProgress {
+  chapterId: string;
+  title: string;
+  status: AiReviewStepStatus;
+  message: string;
+  findingCount: number;
+}
+
+export interface AiReviewProgress {
+  status: AiReviewRunStatus;
+  phase: "idle" | "scout" | "chapter-review" | "validation" | "done";
+  message: string;
+  scoutSummary: string;
+  chapters: AiReviewChapterProgress[];
+}
+
+export interface ReviewAiReviewProgressMessage {
+  type: "ai-review-progress";
+  requestId: string;
+  progress: AiReviewProgress;
+}
+
+export interface ReviewAiReviewResultMessage {
+  type: "ai-review-result";
+  requestId: string;
+  analysis: ReviewAnalysis;
+  progress: AiReviewProgress;
+}
+
+export interface ReviewAiReviewErrorMessage {
+  type: "ai-review-error";
+  requestId: string;
+  message: string;
+  progress: AiReviewProgress;
+}
+
+export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewAiReviewProgressMessage | ReviewAiReviewResultMessage | ReviewAiReviewErrorMessage;
 
 export type ReviewFindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type ReviewFindingKind = "bug" | "security" | "migration-risk" | "api-contract" | "test-gap" | "performance" | "question" | "informational";
