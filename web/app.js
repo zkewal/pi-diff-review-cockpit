@@ -50,6 +50,7 @@ const modeHintEl = document.getElementById("mode-hint");
 const fileCommentsContainer = document.getElementById("file-comments-container");
 const editorContainerEl = document.getElementById("editor-container");
 const insightPanelEl = document.getElementById("insight-panel");
+const insightPanelTitleEl = document.getElementById("insight-panel-title");
 const insightContentEl = document.getElementById("insight-content");
 const sourceLabelEl = document.getElementById("source-label");
 const analysisStatusEl = document.getElementById("analysis-status");
@@ -140,6 +141,18 @@ function statusBadgeClass(status) {
     case "renamed": return "text-[#d29922]";
     default: return "text-[#58a6ff]";
   }
+}
+
+function countLineRanges(ranges) {
+  return (ranges || []).reduce((total, range) => total + Math.max(0, range.end - range.start + 1), 0);
+}
+
+function changeStatsLabel(file) {
+  if (!file?.gitDiff) return "";
+  const added = countLineRanges(file.gitDiff.commentableModifiedLines);
+  const deleted = countLineRanges(file.gitDiff.commentableOriginalLines);
+  if (added === 0 && deleted === 0) return "";
+  return `+${added} -${deleted}`;
 }
 
 function humanizeToken(value) {
@@ -657,7 +670,7 @@ function openFileFromAnalysis(fileId) {
 }
 
 function firstExistingChapterFileId(chapter) {
-  return (chapter.fileIds || []).find((fileId) => getFileById(fileId) != null) || null;
+  return getChapterDisplayFiles(chapter)[0]?.id ?? null;
 }
 
 function firstExistingFindingFileId(finding) {
@@ -679,6 +692,7 @@ function insightActionButtonClass(active) {
 }
 
 function renderDefaultInsight() {
+  insightPanelTitleEl.textContent = "Review context";
   const packet = reviewData.analysis?.approvalPacket;
   if (!packet) {
     insightContentEl.innerHTML = `
@@ -705,9 +719,22 @@ function renderDefaultInsight() {
   `;
 }
 
+function getChapterFiles(chapter) {
+  return (chapter.fileIds || []).map(getFileById).filter(Boolean);
+}
+
+function getChapterDisplayFiles(chapter) {
+  const files = getChapterFiles(chapter);
+  const diffFiles = files.filter((file) => file.inGitDiff);
+  return diffFiles.length > 0 ? diffFiles : files;
+}
+
 function renderInsightForChapter(chapter) {
+  insightPanelTitleEl.textContent = "Chapter files";
   const reviewed = state.reviewedChapters[chapter.id] === true;
-  const files = (chapter.fileIds || []).map(getFileById).filter(Boolean);
+  const files = getChapterDisplayFiles(chapter);
+  const visibleFiles = files.slice(0, 60);
+  const hiddenFileCount = Math.max(0, files.length - visibleFiles.length);
   const findings = (chapter.findingIds || []).map(getReviewFinding).filter(Boolean);
 
   insightContentEl.innerHTML = `
@@ -725,9 +752,20 @@ function renderInsightForChapter(chapter) {
       <div>
         <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Files</div>
         <div class="mt-2 space-y-1">
-          ${files.length === 0 ? `<div class="text-sm text-review-muted">No files linked.</div>` : files.map((file) => `
-            <button data-file-id="${escapeHtml(file.id)}" class="block w-full truncate rounded-md px-2 py-1.5 text-left text-xs text-review-text hover:bg-[#21262d]">${escapeHtml(file.path)}</button>
-          `).join("")}
+          ${visibleFiles.length === 0 ? `<div class="text-sm text-review-muted">No files linked.</div>` : visibleFiles.map((file) => {
+            const status = file.gitDiff?.status ?? file.worktreeStatus;
+            const stats = changeStatsLabel(file);
+            return `
+              <button data-file-id="${escapeHtml(file.id)}" class="block w-full rounded-md px-2 py-1.5 text-left text-xs text-review-text hover:bg-[#21262d]">
+                <span class="flex min-w-0 items-center gap-2">
+                  ${status ? `<span class="shrink-0 font-medium ${statusBadgeClass(status)}">${escapeHtml(statusLabel(status).charAt(0))}</span>` : ""}
+                  <span class="min-w-0 flex-1 truncate">${escapeHtml(file.path)}</span>
+                  ${stats ? `<span class="shrink-0 text-[11px] text-review-muted">${escapeHtml(stats)}</span>` : ""}
+                </span>
+              </button>
+            `;
+          }).join("")}
+          ${hiddenFileCount > 0 ? `<div class="px-2 py-1 text-xs text-review-muted">${hiddenFileCount} more file(s) hidden. Use the Files tab to browse all files.</div>` : ""}
         </div>
       </div>
       <div>
@@ -779,6 +817,7 @@ function setFindingStatus(finding, status) {
 }
 
 function renderInsightForFinding(finding) {
+  insightPanelTitleEl.textContent = "Finding context";
   const status = state.findingStatuses[finding.id] || "new";
   const acceptedComment = state.acceptedFindingComments[finding.id] || "";
 

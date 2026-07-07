@@ -62,10 +62,20 @@ function inferChapterTitle(path: string): string {
   return "Miscellaneous changes";
 }
 
+function getAnalysisFiles(dataset: ReviewDataset) {
+  const fileById = new Map(dataset.files.map((file) => [file.id, file] as const));
+  const selectedFiles = dataset.analysisFileIds
+    .map((fileId) => fileById.get(fileId))
+    .filter((file): file is ReviewDataset["files"][number] => file != null);
+
+  return selectedFiles.length > 0 ? selectedFiles : dataset.files;
+}
+
 export function createFallbackAnalysis(dataset: ReviewDataset, message: string): ReviewAnalysis {
   const chaptersByTitle = new Map<string, ReviewChapter>();
+  const analysisFiles = getAnalysisFiles(dataset);
 
-  for (const file of dataset.files) {
+  for (const file of analysisFiles) {
     const title = inferChapterTitle(file.path);
     const existing = chaptersByTitle.get(title);
     if (existing) {
@@ -85,7 +95,7 @@ export function createFallbackAnalysis(dataset: ReviewDataset, message: string):
 
   const chapterTitles = [...chaptersByTitle.values()].map((chapter) => chapter.title);
   const approvalPacket: ApprovalPacket = {
-    summary: `${dataset.source.label} contains ${dataset.files.length} reviewable file(s).`,
+    summary: `${dataset.source.label} contains ${analysisFiles.length} reviewable change file(s).`,
     reviewedChapters: [],
     acceptedRisks: [],
     unresolvedFindings: [],
@@ -105,7 +115,7 @@ export function createFallbackAnalysis(dataset: ReviewDataset, message: string):
 function buildAnalysisInput(dataset: ReviewDataset): string {
   return JSON.stringify({
     source: dataset.source,
-    files: dataset.files.map((file) => ({
+    files: getAnalysisFiles(dataset).map((file) => ({
       id: file.id,
       path: file.path,
       status: file.gitDiff?.status ?? file.worktreeStatus,
@@ -251,7 +261,8 @@ function requireUniqueIds(values: readonly { id: string }[], field: "chapters" |
 }
 
 function validateAnalysisRelationships(analysis: ReviewAnalysis, dataset: ReviewDataset): void {
-  const fileById = new Map(dataset.files.map((file) => [file.id, file] as const));
+  const analysisFiles = getAnalysisFiles(dataset);
+  const fileById = new Map(analysisFiles.map((file) => [file.id, file] as const));
   requireUniqueIds(analysis.chapters, "chapters");
   requireUniqueIds(analysis.findings, "findings");
 
@@ -277,9 +288,9 @@ function validateAnalysisRelationships(analysis: ReviewAnalysis, dataset: Review
     }
   }
 
-  for (const [fileIndex, file] of dataset.files.entries()) {
+  for (const [fileIndex, file] of analysisFiles.entries()) {
     if (!coveredFileIds.has(file.id)) {
-      throw new Error(`AI analysis JSON omits dataset.files[${fileIndex}].id from chapters.`);
+      throw new Error(`AI analysis JSON omits analysis file ${fileIndex} from chapters.`);
     }
   }
 
@@ -364,12 +375,11 @@ export async function analyzeReviewDataset(ctx: ExtensionCommandContext, dataset
       .trim();
 
     if (response.stopReason !== "stop" || text.length === 0) {
-      return createFallbackAnalysis(dataset, `AI analysis did not complete cleanly: ${response.stopReason}.`);
+      return createFallbackAnalysis(dataset, "AI analysis did not complete cleanly, so deterministic fallback analysis was used.");
     }
 
     return parseReviewAnalysisJson(text, dataset);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return createFallbackAnalysis(dataset, `AI analysis failed: ${message}`);
+    return createFallbackAnalysis(dataset, "AI analysis could not produce a complete review map, so deterministic fallback analysis was used.");
   }
 }

@@ -172,6 +172,7 @@ export interface ReviewWindowData {
   repoRoot: string;
   workingRoot: string;
   files: ReviewFile[];
+  analysisFileIds: string[];
   commits: ReviewCommit[];
   source: ReviewSourceMetadata;
   analysis: ReviewAnalysis;

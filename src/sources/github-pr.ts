@@ -256,6 +256,7 @@ export async function buildGitHubPrReviewDataset(pi: ExtensionAPI, ctx: Extensio
     repoRoot,
     workingRoot: worktreePath,
     files: data.files,
+    analysisFileIds: data.files.filter((file) => file.inGitDiff).map((file) => file.id),
     commits: data.commits,
     source: {
       kind: "github-pr",

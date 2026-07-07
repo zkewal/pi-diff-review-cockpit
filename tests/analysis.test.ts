@@ -3,11 +3,12 @@ import test from "node:test";
 import { createFallbackAnalysis, parseReviewAnalysisJson } from "../src/analysis.js";
 import type { ReviewDataset } from "../src/sources/types.js";
 
-function dataset(paths: string[]): ReviewDataset {
+function dataset(paths: string[], analysisFileIds = paths): ReviewDataset {
   return {
     repoRoot: "/repo",
     workingRoot: "/repo",
     commits: [],
+    analysisFileIds,
     source: {
       kind: "local-working-tree",
       label: "Local diff",
@@ -98,6 +99,26 @@ test("fallback approval packet mentions source label", () => {
   assert.match(analysis.approvalPacket.body, /Reviewed Local diff/);
 });
 
+test("fallback review map only groups focused analysis files", () => {
+  const reviewDataset = dataset([
+    "src/app/api/qa_api.py",
+    ".agent/rules/agent-orchestration-ho.md",
+    "src/app/services/qa/store.py",
+  ], [
+    "src/app/api/qa_api.py",
+    "src/app/services/qa/store.py",
+  ]);
+
+  const analysis = createFallbackAnalysis(reviewDataset, "fallback");
+
+  assert.deepEqual(analysis.chapters.map((chapter) => chapter.title), [
+    "API surface",
+    "Service behavior",
+  ]);
+  assert.equal(analysis.chapters.some((chapter) => chapter.fileIds.includes(".agent/rules/agent-orchestration-ho.md")), false);
+  assert.match(analysis.approvalPacket.summary, /2 reviewable change file\(s\)/);
+});
+
 test("parser rejects malformed nested analysis JSON", () => {
   assert.throws(
     () => parseReviewAnalysisJson(JSON.stringify({
@@ -154,7 +175,18 @@ test("parser rejects dataset files omitted from chapter coverage", () => {
       "src/app/api/qa_api.py",
       "src/app/services/qa/store.py",
     ])),
-    /dataset\.files\[1\]\.id/,
+    /analysis file 1/,
+  );
+});
+
+test("parser does not require non-focused repo files in chapter coverage", () => {
+  const modelAnalysis = validModelAnalysis();
+
+  assert.doesNotThrow(
+    () => parseReviewAnalysisJson(JSON.stringify(modelAnalysis), dataset([
+      "src/app/api/qa_api.py",
+      ".agent/rules/agent-orchestration-ho.md",
+    ], ["src/app/api/qa_api.py"])),
   );
 });
 
