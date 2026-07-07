@@ -2,6 +2,7 @@ const reviewData = JSON.parse(document.getElementById("diff-review-data").textCo
 
 const state = {
   activeFileId: null,
+  activeSidebarTab: "review-map",
   currentScope: reviewData.files.some((file) => file.inGitDiff)
     ? "git-diff"
     : reviewData.files.some((file) => file.inLastCommit)
@@ -15,9 +16,13 @@ const state = {
   wrapLines: true,
   collapsedDirs: {},
   reviewedFiles: {},
+  reviewedChapters: {},
+  findingStatuses: Object.fromEntries((reviewData.analysis?.findings || []).map((finding) => [finding.id, finding.status || "new"])),
+  acceptedFindingComments: {},
   scrollPositions: {},
   sidebarCollapsed: false,
   fileFilter: "",
+  activeInsight: { type: "default", id: null },
   selectedCommitSha: reviewData.commits?.[0]?.sha || null,
   fileContents: {},
   fileErrors: {},
@@ -28,6 +33,9 @@ const sidebarEl = document.getElementById("sidebar");
 const sidebarTitleEl = document.getElementById("sidebar-title");
 const sidebarSearchInputEl = document.getElementById("sidebar-search-input");
 const toggleSidebarButton = document.getElementById("toggle-sidebar-button");
+const tabReviewMapButton = document.getElementById("tab-review-map-button");
+const tabFilesButton = document.getElementById("tab-files-button");
+const tabFindingsButton = document.getElementById("tab-findings-button");
 const scopeDiffButton = document.getElementById("scope-diff-button");
 const scopeLastCommitButton = document.getElementById("scope-last-commit-button");
 const scopeCommitButton = document.getElementById("scope-commit-button");
@@ -41,6 +49,10 @@ const currentFileLabelEl = document.getElementById("current-file-label");
 const modeHintEl = document.getElementById("mode-hint");
 const fileCommentsContainer = document.getElementById("file-comments-container");
 const editorContainerEl = document.getElementById("editor-container");
+const insightPanelEl = document.getElementById("insight-panel");
+const insightContentEl = document.getElementById("insight-content");
+const sourceLabelEl = document.getElementById("source-label");
+const analysisStatusEl = document.getElementById("analysis-status");
 const submitButton = document.getElementById("submit-button");
 const cancelButton = document.getElementById("cancel-button");
 const overallCommentButton = document.getElementById("overall-comment-button");
@@ -123,6 +135,66 @@ function statusBadgeClass(status) {
     case "renamed": return "text-[#d29922]";
     default: return "text-[#58a6ff]";
   }
+}
+
+function humanizeToken(value) {
+  return String(value || "")
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function severityTextClass(severity) {
+  switch (severity) {
+    case "critical":
+    case "high":
+      return "text-[#f85149]";
+    case "medium":
+      return "text-[#d29922]";
+    case "low":
+      return "text-[#58a6ff]";
+    default:
+      return "text-review-muted";
+  }
+}
+
+function findingStatusLabel(status) {
+  switch (status) {
+    case "accepted-comment": return "Comment accepted";
+    case "dismissed": return "Dismissed";
+    case "accepted-risk": return "Risk accepted";
+    default: return "New";
+  }
+}
+
+function findingStatusClass(status) {
+  switch (status) {
+    case "accepted-comment": return "text-[#3fb950]";
+    case "dismissed": return "text-review-muted";
+    case "accepted-risk": return "text-[#d29922]";
+    default: return "text-[#58a6ff]";
+  }
+}
+
+function getReviewChapters() {
+  return reviewData.analysis?.chapters || [];
+}
+
+function getReviewFindings() {
+  return reviewData.analysis?.findings || [];
+}
+
+function getReviewFinding(findingId) {
+  return getReviewFindings().find((finding) => finding.id === findingId) || null;
+}
+
+function getReviewChapter(chapterId) {
+  return getReviewChapters().find((chapter) => chapter.id === chapterId) || null;
+}
+
+function getFileById(fileId) {
+  return reviewData.files.find((file) => file.id === fileId) || null;
 }
 
 function isFileReviewed(fileId) {
@@ -490,6 +562,19 @@ function updateSidebarLayout() {
   toggleSidebarButton.textContent = collapsed ? "Show sidebar" : "Hide sidebar";
 }
 
+function setSidebarTab(tab) {
+  state.activeSidebarTab = tab;
+  renderAll({ restoreFileScroll: false });
+}
+
+function updateSidebarTabs() {
+  const activeClasses = "rounded bg-[#238636]/15 px-2 py-1 text-[11px] font-medium text-[#3fb950]";
+  const inactiveClasses = "rounded px-2 py-1 text-[11px] font-medium text-review-muted hover:bg-[#21262d] hover:text-review-text";
+  tabReviewMapButton.className = state.activeSidebarTab === "review-map" ? activeClasses : inactiveClasses;
+  tabFilesButton.className = state.activeSidebarTab === "files" ? activeClasses : inactiveClasses;
+  tabFindingsButton.className = state.activeSidebarTab === "findings" ? activeClasses : inactiveClasses;
+}
+
 function updateScopeButtons() {
   const counts = {
     diff: reviewData.files.filter((file) => file.inGitDiff).length,
@@ -537,6 +622,306 @@ function updateToggleButtons() {
   submitButton.disabled = false;
 }
 
+function findPreferredScopeForFile(file) {
+  if (getScopedFiles().some((scopedFile) => scopedFile.id === file.id)) {
+    return { scope: state.currentScope, commitSha: state.selectedCommitSha };
+  }
+  if (file.inGitDiff) return { scope: "git-diff", commitSha: state.selectedCommitSha };
+  if (file.inLastCommit) return { scope: "last-commit", commitSha: state.selectedCommitSha };
+  if (file.hasWorkingTreeFile) return { scope: "all-files", commitSha: state.selectedCommitSha };
+
+  const commitSha = Object.keys(file.commitComparisons || {})[0];
+  if (commitSha) return { scope: "commit", commitSha };
+  return { scope: state.currentScope, commitSha: state.selectedCommitSha };
+}
+
+function openFileFromAnalysis(fileId) {
+  const file = getFileById(fileId);
+  if (!file) return;
+
+  saveCurrentScrollPosition();
+  const preferred = findPreferredScopeForFile(file);
+  state.currentScope = preferred.scope;
+  if (preferred.scope === "commit" && preferred.commitSha) {
+    state.selectedCommitSha = preferred.commitSha;
+    commitSelectEl.value = preferred.commitSha;
+  }
+  state.activeFileId = file.id;
+  renderAll({ restoreFileScroll: true });
+  ensureFileLoaded(file.id, state.currentScope);
+}
+
+function firstExistingChapterFileId(chapter) {
+  return (chapter.fileIds || []).find((fileId) => getFileById(fileId) != null) || null;
+}
+
+function firstExistingFindingFileId(finding) {
+  return (finding.locations || [])
+    .map((location) => location.fileId)
+    .find((fileId) => getFileById(fileId) != null) || null;
+}
+
+function firstLocationLabel(finding) {
+  const location = (finding.locations || [])[0];
+  if (!location) return "No location";
+  return `${location.path}${location.line != null ? `:${location.line}` : ""}`;
+}
+
+function insightActionButtonClass(active) {
+  return active
+    ? "cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-3 py-1.5 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25"
+    : "cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d]";
+}
+
+function renderDefaultInsight() {
+  const packet = reviewData.analysis?.approvalPacket;
+  if (!packet) {
+    insightContentEl.innerHTML = `
+      <div class="space-y-3 text-sm text-review-muted">
+        <div>No analysis context available.</div>
+        <div>Select a chapter or finding to inspect details.</div>
+      </div>
+    `;
+    return;
+  }
+
+  insightContentEl.innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Approval packet</div>
+        <div class="mt-2 text-sm font-medium text-white">${escapeHtml(packet.summary)}</div>
+        <div class="mt-2 text-[11px] text-review-muted">Suggested verdict: <span class="font-medium text-review-text">${escapeHtml(humanizeToken(packet.suggestedVerdict))}</span></div>
+      </div>
+      ${packet.body ? `
+        <pre class="scrollbar-thin max-h-[360px] overflow-auto whitespace-pre-wrap rounded-md border border-review-border bg-[#010409] p-3 text-xs leading-5 text-review-text">${escapeHtml(packet.body)}</pre>
+      ` : ""}
+      <div class="text-xs text-review-muted">Select a chapter or finding to inspect details.</div>
+    </div>
+  `;
+}
+
+function renderInsightForChapter(chapter) {
+  const reviewed = state.reviewedChapters[chapter.id] === true;
+  const files = (chapter.fileIds || []).map(getFileById).filter(Boolean);
+  const findings = (chapter.findingIds || []).map(getReviewFinding).filter(Boolean);
+
+  insightContentEl.innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <div class="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider">
+          <span class="${severityTextClass(chapter.risk)}">${escapeHtml(humanizeToken(chapter.risk))} risk</span>
+          <span class="text-review-muted">•</span>
+          <span class="${reviewed ? "text-[#3fb950]" : "text-review-muted"}">${reviewed ? "Reviewed" : "Not reviewed"}</span>
+        </div>
+        <div class="text-base font-semibold leading-6 text-white">${escapeHtml(chapter.title)}</div>
+        <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(chapter.summary)}</div>
+      </div>
+      <button id="chapter-reviewed-toggle" class="${insightActionButtonClass(reviewed)}">${reviewed ? "Mark not reviewed" : "Mark chapter reviewed"}</button>
+      <div>
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Files</div>
+        <div class="mt-2 space-y-1">
+          ${files.length === 0 ? `<div class="text-sm text-review-muted">No files linked.</div>` : files.map((file) => `
+            <button data-file-id="${escapeHtml(file.id)}" class="block w-full truncate rounded-md px-2 py-1.5 text-left text-xs text-review-text hover:bg-[#21262d]">${escapeHtml(file.path)}</button>
+          `).join("")}
+        </div>
+      </div>
+      <div>
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Findings</div>
+        <div class="mt-2 space-y-2">
+          ${findings.length === 0 ? `<div class="text-sm text-review-muted">No findings linked.</div>` : findings.map((finding) => `
+            <button data-finding-id="${escapeHtml(finding.id)}" class="block w-full rounded-md border border-review-border bg-[#010409] p-2 text-left hover:bg-[#161b22]">
+              <div class="flex items-center justify-between gap-2 text-[11px]">
+                <span class="${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
+                <span class="${findingStatusClass(state.findingStatuses[finding.id] || "new")}">${escapeHtml(findingStatusLabel(state.findingStatuses[finding.id] || "new"))}</span>
+              </div>
+              <div class="mt-1 text-xs font-medium text-review-text">${escapeHtml(finding.title)}</div>
+            </button>
+          `).join("")}
+        </div>
+      </div>
+    </div>
+  `;
+
+  insightContentEl.querySelector("#chapter-reviewed-toggle")?.addEventListener("click", () => {
+    state.reviewedChapters[chapter.id] = !reviewed;
+    state.activeInsight = { type: "chapter", id: chapter.id };
+    renderTree();
+  });
+  insightContentEl.querySelectorAll("[data-file-id]").forEach((button) => {
+    button.addEventListener("click", () => openFileFromAnalysis(button.getAttribute("data-file-id")));
+  });
+  insightContentEl.querySelectorAll("[data-finding-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const finding = getReviewFinding(button.getAttribute("data-finding-id"));
+      if (!finding) return;
+      state.activeInsight = { type: "finding", id: finding.id };
+      const fileId = firstExistingFindingFileId(finding);
+      if (fileId) openFileFromAnalysis(fileId);
+      else renderTree();
+    });
+  });
+}
+
+function setFindingStatus(finding, status) {
+  state.findingStatuses[finding.id] = status;
+  if (status === "accepted-comment") {
+    state.acceptedFindingComments[finding.id] = finding.suggestedComment;
+  } else {
+    delete state.acceptedFindingComments[finding.id];
+  }
+  state.activeInsight = { type: "finding", id: finding.id };
+  renderTree();
+}
+
+function renderInsightForFinding(finding) {
+  const status = state.findingStatuses[finding.id] || "new";
+  const acceptedComment = state.acceptedFindingComments[finding.id] || "";
+
+  insightContentEl.innerHTML = `
+    <div class="space-y-4">
+      <div>
+        <div class="mb-2 flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-wider">
+          <span class="text-review-muted">${escapeHtml(humanizeToken(finding.kind))}</span>
+          <span class="${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
+          <span class="text-review-muted">Confidence ${escapeHtml(humanizeToken(finding.confidence))}</span>
+        </div>
+        <div class="text-base font-semibold leading-6 text-white">${escapeHtml(finding.title)}</div>
+        <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(finding.explanation)}</div>
+        <div class="mt-2 text-xs ${findingStatusClass(status)}">${escapeHtml(findingStatusLabel(status))}</div>
+      </div>
+      <div>
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Locations</div>
+        <div class="mt-2 space-y-1">
+          ${(finding.locations || []).length === 0 ? `<div class="text-sm text-review-muted">No locations linked.</div>` : finding.locations.map((location) => `
+            <button data-file-id="${escapeHtml(location.fileId)}" class="block w-full rounded-md px-2 py-1.5 text-left text-xs text-review-text hover:bg-[#21262d]">
+              <span class="block truncate">${escapeHtml(location.path)}${location.line != null ? `:${escapeHtml(location.line)}` : ""}</span>
+              <span class="text-review-muted">${escapeHtml(humanizeToken(location.side))}</span>
+            </button>
+          `).join("")}
+        </div>
+      </div>
+      <div>
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Suggested comment</div>
+        <div class="mt-2 whitespace-pre-wrap rounded-md border border-review-border bg-[#010409] p-3 text-xs leading-5 text-review-text">${escapeHtml(finding.suggestedComment || "No suggested comment.")}</div>
+        ${acceptedComment ? `<div class="mt-2 text-xs text-[#3fb950]">Accepted comment saved in this review session.</div>` : ""}
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <button data-finding-status="accepted-comment" class="${insightActionButtonClass(status === "accepted-comment")}">Accept comment</button>
+        <button data-finding-status="dismissed" class="${insightActionButtonClass(status === "dismissed")}">Dismiss</button>
+        <button data-finding-status="accepted-risk" class="${insightActionButtonClass(status === "accepted-risk")}">Accept risk</button>
+        <button data-finding-status="new" class="${insightActionButtonClass(status === "new")}">Reset</button>
+      </div>
+    </div>
+  `;
+
+  insightContentEl.querySelectorAll("[data-file-id]").forEach((button) => {
+    button.addEventListener("click", () => openFileFromAnalysis(button.getAttribute("data-file-id")));
+  });
+  insightContentEl.querySelectorAll("[data-finding-status]").forEach((button) => {
+    button.addEventListener("click", () => setFindingStatus(finding, button.getAttribute("data-finding-status")));
+  });
+}
+
+function renderInsightPanel() {
+  insightPanelEl.dataset.activeInsight = state.activeInsight.type;
+  if (state.activeInsight.type === "chapter") {
+    const chapter = getReviewChapter(state.activeInsight.id);
+    if (chapter) {
+      renderInsightForChapter(chapter);
+      return;
+    }
+  }
+  if (state.activeInsight.type === "finding") {
+    const finding = getReviewFinding(state.activeInsight.id);
+    if (finding) {
+      renderInsightForFinding(finding);
+      return;
+    }
+  }
+  renderDefaultInsight();
+}
+
+function renderReviewMap() {
+  const chapters = getReviewChapters();
+  if (chapters.length === 0) {
+    fileTreeEl.innerHTML = `
+      <div class="px-3 py-4 text-sm text-review-muted">
+        No review map available.
+      </div>
+    `;
+    return;
+  }
+
+  chapters.forEach((chapter, index) => {
+    const reviewed = state.reviewedChapters[chapter.id] === true;
+    const active = state.activeInsight.type === "chapter" && state.activeInsight.id === chapter.id;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = [
+      "mb-2 block w-full rounded-md border p-3 text-left",
+      active ? "border-[#2ea043]/40 bg-[#238636]/10" : "border-review-border bg-[#010409] hover:bg-[#161b22]",
+    ].join(" ");
+    button.innerHTML = `
+      <div class="mb-2 flex items-center justify-between gap-2 text-[11px] font-medium">
+        <span class="text-review-muted">Chapter ${index + 1}</span>
+        <span class="${reviewed ? "text-[#3fb950]" : severityTextClass(chapter.risk)}">${reviewed ? "Reviewed" : `${escapeHtml(humanizeToken(chapter.risk))} risk`}</span>
+      </div>
+      <div class="text-sm font-semibold leading-5 text-white">${escapeHtml(chapter.title)}</div>
+      <div class="mt-1 line-clamp-3 text-xs leading-5 text-review-muted">${escapeHtml(chapter.summary)}</div>
+      <div class="mt-2 flex items-center gap-3 text-[11px] text-review-muted">
+        <span>${(chapter.fileIds || []).length} file(s)</span>
+        <span>${(chapter.findingIds || []).length} finding(s)</span>
+      </div>
+    `;
+    button.addEventListener("click", () => {
+      state.activeInsight = { type: "chapter", id: chapter.id };
+      const fileId = firstExistingChapterFileId(chapter);
+      if (fileId) openFileFromAnalysis(fileId);
+      else renderTree();
+    });
+    fileTreeEl.appendChild(button);
+  });
+}
+
+function renderFindings() {
+  const findings = getReviewFindings();
+  if (findings.length === 0) {
+    fileTreeEl.innerHTML = `
+      <div class="px-3 py-4 text-sm text-review-muted">
+        No AI findings for this diff.
+      </div>
+    `;
+    return;
+  }
+
+  findings.forEach((finding) => {
+    const status = state.findingStatuses[finding.id] || "new";
+    const active = state.activeInsight.type === "finding" && state.activeInsight.id === finding.id;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = [
+      "mb-2 block w-full rounded-md border p-3 text-left",
+      active ? "border-[#2ea043]/40 bg-[#238636]/10" : "border-review-border bg-[#010409] hover:bg-[#161b22]",
+    ].join(" ");
+    button.innerHTML = `
+      <div class="mb-2 flex items-center justify-between gap-2 text-[11px] font-medium">
+        <span class="${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.kind))} • ${escapeHtml(humanizeToken(finding.severity))}</span>
+        <span class="${findingStatusClass(status)}">${escapeHtml(findingStatusLabel(status))}</span>
+      </div>
+      <div class="text-sm font-semibold leading-5 text-white">${escapeHtml(finding.title)}</div>
+      <div class="mt-1 line-clamp-3 text-xs leading-5 text-review-muted">${escapeHtml(finding.explanation)}</div>
+      <div class="mt-2 truncate text-[11px] text-review-muted">${escapeHtml(firstLocationLabel(finding))}</div>
+    `;
+    button.addEventListener("click", () => {
+      state.activeInsight = { type: "finding", id: finding.id };
+      const fileId = firstExistingFindingFileId(finding);
+      if (fileId) openFileFromAnalysis(fileId);
+      else renderTree();
+    });
+    fileTreeEl.appendChild(button);
+  });
+}
+
 function applyEditorOptions() {
   if (!diffEditor) return;
   diffEditor.updateOptions({
@@ -556,9 +941,38 @@ function applyEditorOptions() {
 function renderTree() {
   ensureActiveFileForScope();
   fileTreeEl.innerHTML = "";
-  const scopedFiles = getScopedFiles();
-  const visibleFiles = getFilteredFiles();
+  updateSidebarTabs();
+  sourceLabelEl.textContent = reviewData.source?.label || "Review source";
+  analysisStatusEl.textContent = reviewData.analysis?.message || "";
 
+  const scopedFiles = getScopedFiles();
+  const comments = state.comments.length;
+
+  if (state.activeSidebarTab === "review-map") {
+    const chapters = getReviewChapters();
+    const findings = getReviewFindings();
+    renderReviewMap();
+    sidebarTitleEl.textContent = "Review map";
+    summaryEl.textContent = `${chapters.length} chapter(s) • ${findings.length} finding(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}`;
+    updateToggleButtons();
+    updateSidebarLayout();
+    renderInsightPanel();
+    return;
+  }
+
+  if (state.activeSidebarTab === "findings") {
+    const findings = getReviewFindings();
+    const newFindings = findings.filter((finding) => (state.findingStatuses[finding.id] || "new") === "new").length;
+    renderFindings();
+    sidebarTitleEl.textContent = "Findings";
+    summaryEl.textContent = `${findings.length} finding(s) • ${newFindings} new • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}`;
+    updateToggleButtons();
+    updateSidebarLayout();
+    renderInsightPanel();
+    return;
+  }
+
+  const visibleFiles = getFilteredFiles();
   if (visibleFiles.length === 0) {
     const message = state.fileFilter.trim()
       ? `No files match <span class="text-review-text">${escapeHtml(state.fileFilter.trim())}</span>.`
@@ -575,11 +989,11 @@ function renderTree() {
   }
 
   sidebarTitleEl.textContent = scopeLabel(state.currentScope);
-  const comments = state.comments.length;
   const filteredSuffix = state.fileFilter.trim() ? ` • ${visibleFiles.length} shown` : "";
   summaryEl.textContent = `${scopedFiles.length} file(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}${filteredSuffix}`;
   updateToggleButtons();
   updateSidebarLayout();
+  renderInsightPanel();
 }
 
 function showTextModal(options) {
@@ -1107,6 +1521,12 @@ toggleReviewedButton.addEventListener("click", () => {
   state.reviewedFiles[file.id] = !isFileReviewed(file.id);
   renderTree();
 });
+
+tabReviewMapButton.addEventListener("click", () => setSidebarTab("review-map"));
+
+tabFilesButton.addEventListener("click", () => setSidebarTab("files"));
+
+tabFindingsButton.addEventListener("click", () => setSidebarTab("findings"));
 
 scopeDiffButton.addEventListener("click", () => {
   switchScope("git-diff");
