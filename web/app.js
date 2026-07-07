@@ -1,29 +1,89 @@
 const reviewData = JSON.parse(document.getElementById("diff-review-data").textContent || "{}");
+const restoredSession = reviewData.session?.snapshot || {};
+const restoredFindingIds = new Set((reviewData.analysis?.findings || []).map((finding) => finding.id));
+
+function isPlainObject(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value);
+}
+
+function objectOrEmpty(value) {
+  return isPlainObject(value) ? value : {};
+}
+
+function booleanMapOrEmpty(value) {
+  return Object.fromEntries(Object.entries(objectOrEmpty(value)).filter((entry) => typeof entry[1] === "boolean"));
+}
+
+function commentsOrEmpty(value) {
+  return Array.isArray(value) ? value.filter((comment) => isPlainObject(comment) && typeof comment.id === "string") : [];
+}
+
+function activeInsightOrDefault(value) {
+  if (!isPlainObject(value)) return { type: "default", id: null };
+  if (!["default", "chapter", "finding"].includes(value.type)) return { type: "default", id: null };
+  return {
+    type: value.type,
+    id: typeof value.id === "string" ? value.id : null,
+  };
+}
+
+function restoredFindingStatuses() {
+  const savedStatuses = objectOrEmpty(restoredSession.findingStatuses);
+  return Object.fromEntries((reviewData.analysis?.findings || []).map((finding) => [
+    finding.id,
+    typeof savedStatuses[finding.id] === "string" ? savedStatuses[finding.id] : finding.status || "new",
+  ]));
+}
+
+function restoredAcceptedFindingComments() {
+  return Object.fromEntries(
+    Object.entries(objectOrEmpty(restoredSession.acceptedFindingComments))
+      .filter(([findingId, body]) => restoredFindingIds.has(findingId) && typeof body === "string"),
+  );
+}
+
+function defaultScope() {
+  if (reviewData.files.some((file) => file.inGitDiff)) return "git-diff";
+  if (reviewData.files.some((file) => file.inLastCommit)) return "last-commit";
+  if (reviewData.commits?.length > 0) return "commit";
+  return "all-files";
+}
+
+function hasFilesForScope(scope, commitSha) {
+  switch (scope) {
+    case "git-diff": return reviewData.files.some((file) => file.inGitDiff);
+    case "last-commit": return reviewData.files.some((file) => file.inLastCommit);
+    case "commit": return !!commitSha && reviewData.files.some((file) => file.commitComparisons?.[commitSha]);
+    case "all-files": return reviewData.files.some((file) => file.hasWorkingTreeFile);
+    default: return false;
+  }
+}
+
+const restoredCommitSha = typeof restoredSession.selectedCommitSha === "string" && reviewData.commits?.some((commit) => commit.sha === restoredSession.selectedCommitSha)
+  ? restoredSession.selectedCommitSha
+  : reviewData.commits?.[0]?.sha || null;
+const restoredScope = typeof restoredSession.currentScope === "string" && hasFilesForScope(restoredSession.currentScope, restoredCommitSha)
+  ? restoredSession.currentScope
+  : defaultScope();
 
 const state = {
-  activeFileId: null,
-  activeSidebarTab: "review-map",
-  currentScope: reviewData.files.some((file) => file.inGitDiff)
-    ? "git-diff"
-    : reviewData.files.some((file) => file.inLastCommit)
-      ? "last-commit"
-      : reviewData.commits?.length > 0
-        ? "commit"
-        : "all-files",
-  comments: [],
-  overallComment: "",
-  hideUnchanged: false,
-  wrapLines: true,
+  activeFileId: typeof restoredSession.activeFileId === "string" ? restoredSession.activeFileId : null,
+  activeSidebarTab: ["review-map", "files", "findings"].includes(restoredSession.activeSidebarTab) ? restoredSession.activeSidebarTab : "review-map",
+  currentScope: restoredScope,
+  comments: commentsOrEmpty(restoredSession.comments),
+  overallComment: typeof restoredSession.overallComment === "string" ? restoredSession.overallComment : "",
+  hideUnchanged: typeof restoredSession.hideUnchanged === "boolean" ? restoredSession.hideUnchanged : false,
+  wrapLines: typeof restoredSession.wrapLines === "boolean" ? restoredSession.wrapLines : true,
   collapsedDirs: {},
-  reviewedFiles: {},
-  reviewedChapters: {},
-  findingStatuses: Object.fromEntries((reviewData.analysis?.findings || []).map((finding) => [finding.id, finding.status || "new"])),
-  acceptedFindingComments: {},
+  reviewedFiles: booleanMapOrEmpty(restoredSession.reviewedFiles),
+  reviewedChapters: booleanMapOrEmpty(restoredSession.reviewedChapters),
+  findingStatuses: restoredFindingStatuses(),
+  acceptedFindingComments: restoredAcceptedFindingComments(),
   scrollPositions: {},
-  sidebarCollapsed: false,
+  sidebarCollapsed: typeof restoredSession.sidebarCollapsed === "boolean" ? restoredSession.sidebarCollapsed : false,
   fileFilter: "",
-  activeInsight: { type: "default", id: null },
-  selectedCommitSha: reviewData.commits?.[0]?.sha || null,
+  activeInsight: activeInsightOrDefault(restoredSession.activeInsight),
+  selectedCommitSha: restoredCommitSha,
   fileContents: {},
   fileErrors: {},
   pendingRequestIds: {},
@@ -92,6 +152,7 @@ let modifiedKeyboardDecorations = [];
 let activeViewZones = [];
 let editorResizeObserver = null;
 let requestSequence = 0;
+let sessionSaveTimer = null;
 
 function escapeHtml(value) {
   return String(value)
@@ -99,6 +160,45 @@ function escapeHtml(value) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/\"/g, "&quot;");
+}
+
+function buildSessionSnapshot() {
+  return {
+    analysis: reviewData.analysis,
+    overallComment: state.overallComment,
+    comments: state.comments,
+    acceptedFindingComments: state.acceptedFindingComments,
+    findingStatuses: state.findingStatuses,
+    reviewedFiles: state.reviewedFiles,
+    reviewedChapters: state.reviewedChapters,
+    activeFileId: state.activeFileId,
+    activeSidebarTab: state.activeSidebarTab,
+    currentScope: state.currentScope,
+    selectedCommitSha: state.selectedCommitSha,
+    activeInsight: state.activeInsight,
+    hideUnchanged: state.hideUnchanged,
+    wrapLines: state.wrapLines,
+    sidebarCollapsed: state.sidebarCollapsed,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function saveSessionNow() {
+  if (!window.glimpse?.send) return;
+  syncCommentBodiesFromDOM();
+  window.glimpse.send({
+    type: "save-session",
+    snapshot: buildSessionSnapshot(),
+  });
+}
+
+function scheduleSessionSave() {
+  if (!window.glimpse?.send) return;
+  if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
+  sessionSaveTimer = setTimeout(() => {
+    sessionSaveTimer = null;
+    saveSessionNow();
+  }, 500);
 }
 
 function inferLanguage(path) {
@@ -1452,12 +1552,15 @@ function applyEditorOptions() {
 
 function renderTree() {
   ensureActiveFileForScope();
+  scheduleSessionSave();
   fileTreeEl.innerHTML = "";
   updateSidebarTabs();
   sourceLabelEl.textContent = reviewData.source?.label || "Review source";
   analysisStatusEl.textContent = state.aiReview.status === "running"
     ? state.aiReview.message
-    : reviewData.analysis?.message || "";
+    : state.aiReview.status === "done" || state.aiReview.status === "failed"
+      ? state.aiReview.message
+      : reviewData.session?.message || reviewData.analysis?.message || "";
 
   const scopedFiles = getScopedFiles();
   const comments = getDraftComments().length;
@@ -1732,10 +1835,12 @@ function renderCommentDOM(comment, onDelete) {
     if (comment.side !== "file") {
       setTimeout(() => focusDiffLine(comment.side, comment.startLine, comment.endLine ?? comment.startLine), 0);
     }
+    scheduleSessionSave();
   };
   textarea.value = comment.body || "";
   textarea.addEventListener("input", () => {
     comment.body = textarea.value;
+    scheduleSessionSave();
   });
   textarea.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -2260,11 +2365,13 @@ function buildSubmitPayload() {
 function finishReview() {
   if (state.aiReview.status === "running") return;
   syncCommentBodiesFromDOM();
+  saveSessionNow();
   window.glimpse.send(buildSubmitPayload());
   window.glimpse.close();
 }
 
 function cancelReview() {
+  saveSessionNow();
   window.glimpse.send({ type: "cancel" });
   window.glimpse.close();
 }
@@ -2274,6 +2381,7 @@ function toggleChangedAreasOnly() {
   state.hideUnchanged = !state.hideUnchanged;
   applyEditorOptions();
   updateToggleButtons();
+  scheduleSessionSave();
   requestAnimationFrame(layoutEditor);
 }
 
@@ -2281,6 +2389,7 @@ function toggleWrapLines() {
   state.wrapLines = !state.wrapLines;
   applyEditorOptions();
   updateToggleButtons();
+  scheduleSessionSave();
   requestAnimationFrame(() => {
     layoutEditor();
     setTimeout(layoutEditor, 50);
@@ -2611,6 +2720,7 @@ scopeAllButton.addEventListener("click", () => {
 toggleSidebarButton.addEventListener("click", () => {
   state.sidebarCollapsed = !state.sidebarCollapsed;
   updateSidebarLayout();
+  scheduleSessionSave();
   requestAnimationFrame(() => {
     layoutEditor();
     setTimeout(layoutEditor, 50);

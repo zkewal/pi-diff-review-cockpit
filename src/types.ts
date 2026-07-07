@@ -101,7 +101,38 @@ export interface ReviewRunAiReviewPayload {
   requestId: string;
 }
 
-export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewPublishPayload | ReviewRunAiReviewPayload;
+export type ReviewSessionRestoreStatus = "new" | "restored" | "stale" | "refreshed";
+
+export interface ReviewActiveInsightState {
+  type: "default" | "chapter" | "finding";
+  id: string | null;
+}
+
+export interface ReviewSessionSnapshot {
+  analysis?: ReviewAnalysis;
+  overallComment?: string;
+  comments?: DiffReviewComment[];
+  acceptedFindingComments?: Record<string, string>;
+  findingStatuses?: Record<string, ReviewFindingStatus>;
+  reviewedFiles?: Record<string, boolean>;
+  reviewedChapters?: Record<string, boolean>;
+  activeFileId?: string | null;
+  activeSidebarTab?: "review-map" | "files" | "findings";
+  currentScope?: ReviewScope;
+  selectedCommitSha?: string | null;
+  activeInsight?: ReviewActiveInsightState;
+  hideUnchanged?: boolean;
+  wrapLines?: boolean;
+  sidebarCollapsed?: boolean;
+  updatedAt?: string;
+}
+
+export interface ReviewSaveSessionPayload {
+  type: "save-session";
+  snapshot: ReviewSessionSnapshot;
+}
+
+export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewPublishPayload | ReviewRunAiReviewPayload | ReviewSaveSessionPayload;
 
 export interface ReviewFileDataMessage {
   type: "file-data";
@@ -239,4 +270,11 @@ export interface ReviewWindowData {
   commits: ReviewCommit[];
   source: ReviewSourceMetadata;
   analysis: ReviewAnalysis;
+  session?: {
+    status: ReviewSessionRestoreStatus;
+    message: string;
+    storagePath: string;
+    updatedAt: string | null;
+    snapshot: ReviewSessionSnapshot | null;
+  };
 }

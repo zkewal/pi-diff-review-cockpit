@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
@@ -9,14 +11,25 @@ import { buildGitHubReviewPayload, countSkippedGitHubReviewComments, publishGitH
 import { composeReviewPrompt } from "./prompt.js";
 import { buildGitHubPrReviewDataset } from "./sources/github-pr.js";
 import { buildLocalReviewDataset } from "./sources/local.js";
+import {
+  buildReviewDiffFingerprint,
+  buildReviewSessionRecord,
+  getReviewSessionDescriptor,
+  loadReviewSession,
+  resolveReviewSession,
+  saveReviewSession,
+} from "./session-store.js";
 import type {
   ReviewCancelPayload,
   ReviewFile,
   ReviewFileContents,
   ReviewHostMessage,
+  ReviewAnalysis,
   ReviewPublishPayload,
   ReviewRunAiReviewPayload,
   ReviewRequestFilePayload,
+  ReviewSaveSessionPayload,
+  ReviewSessionSnapshot,
   ReviewSubmitPayload,
   ReviewWindowMessage,
 } from "./types.js";
@@ -42,6 +55,10 @@ function isPublishPayload(value: ReviewWindowMessage): value is ReviewPublishPay
 
 function isRunAiReviewPayload(value: ReviewWindowMessage): value is ReviewRunAiReviewPayload {
   return value.type === "run-ai-review";
+}
+
+function isSaveSessionPayload(value: ReviewWindowMessage): value is ReviewSaveSessionPayload {
+  return value.type === "save-session";
 }
 
 type WaitingEditorResult = "escape" | "window-settled";
@@ -145,10 +162,113 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    ctx.ui.notify("Analyzing diff for review map and findings.", "info");
-    let analysis = await analyzeReviewDataset(ctx, dataset);
+    const loadFilePatch = async (file: ReviewFile): Promise<string> => {
+      const comparison = file.gitDiff ?? file.lastCommit ?? Object.values(file.commitComparisons)[0] ?? null;
+      if (comparison == null) return "";
+      const paths = [...new Set([
+        comparison.oldPath,
+        comparison.newPath,
+        file.path,
+      ].filter((path): path is string => path != null && path.length > 0))];
+      if (paths.length === 0) return "";
 
-    const html = buildReviewHtml({ ...dataset, analysis });
+      const args = file.gitDiff != null
+        ? ["diff", "--no-color", "--unified=80", "HEAD", "--", ...paths]
+        : file.lastCommit != null
+          ? ["diff", "--no-color", "--unified=80", "HEAD^", "HEAD", "--", ...paths]
+          : ["diff", "--no-color", "--unified=80", "HEAD", "--", ...paths];
+      const result = await pi.exec("git", args, {
+        cwd: workingRoot,
+        timeout: PATCH_COMMAND_TIMEOUT_MS,
+      });
+      if (result.code === 0 && result.stdout.length > 0) {
+        return result.stdout;
+      }
+
+      if (comparison.status === "added" && comparison.oldPath == null && comparison.newPath != null) {
+        try {
+          return await readFile(join(workingRoot, comparison.newPath), "utf8");
+        } catch {
+          return "";
+        }
+      }
+
+      return "";
+    };
+
+    ctx.ui.notify("Preparing review session.", "info");
+    const sessionDescriptor = await getReviewSessionDescriptor(pi, dataset);
+    const fingerprint = await buildReviewDiffFingerprint(pi, dataset, loadFilePatch);
+    const storedSession = await loadReviewSession(sessionDescriptor.storagePath);
+    const sessionResolution = resolveReviewSession({
+      stored: storedSession,
+      sourceKey: sessionDescriptor.sourceKey,
+      currentFingerprint: fingerprint,
+      dataset,
+    });
+
+    let analysis: ReviewAnalysis;
+    if (sessionResolution.analysis == null) {
+      ctx.ui.notify("Analyzing diff for review map and findings.", "info");
+      analysis = await analyzeReviewDataset(ctx, dataset);
+    } else {
+      ctx.ui.notify("Restored cached review map.", "info");
+      analysis = sessionResolution.analysis;
+    }
+
+    let sessionSnapshot: ReviewSessionSnapshot | null = sessionResolution.snapshot;
+    let saveChain: Promise<void> = Promise.resolve();
+    const queueSessionSave = (snapshot: ReviewSessionSnapshot): void => {
+      sessionSnapshot = snapshot;
+      const analysisToSave = snapshot.analysis?.approvalPacket
+        ? {
+            ...analysis,
+            approvalPacket: snapshot.analysis.approvalPacket,
+          }
+        : analysis;
+      saveChain = saveChain
+        .catch(() => undefined)
+        .then(() => saveReviewSession(sessionDescriptor.storagePath, buildReviewSessionRecord({
+          sourceKey: sessionDescriptor.sourceKey,
+          fingerprint,
+          analysis: analysisToSave,
+          snapshot,
+        })));
+    };
+    const flushSessionSave = async (): Promise<void> => {
+      try {
+        await saveChain;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`Could not save review session: ${message}`, "warning");
+      }
+    };
+    const snapshotFromSubmit = (message: ReviewSubmitPayload): ReviewSessionSnapshot => ({
+      ...(sessionSnapshot ?? {}),
+      analysis,
+      overallComment: message.overallComment,
+      comments: message.comments,
+      acceptedFindingComments: Object.fromEntries(message.acceptedFindings.map((finding) => [finding.findingId, finding.body])),
+      findingStatuses: Object.fromEntries(message.findingStatuses.map((finding) => [finding.findingId, finding.status])),
+    });
+
+    queueSessionSave({
+      ...(sessionSnapshot ?? {}),
+      analysis,
+    });
+    await flushSessionSave();
+
+    const html = buildReviewHtml({
+      ...dataset,
+      analysis,
+      session: {
+        status: sessionResolution.status,
+        message: sessionResolution.message,
+        storagePath: sessionDescriptor.storagePath,
+        updatedAt: sessionResolution.updatedAt,
+        snapshot: sessionSnapshot,
+      },
+    });
     const window = open(html, {
       width: 1680,
       height: 1020,
@@ -281,25 +401,6 @@ export default function (pi: ExtensionAPI) {
           }
         };
 
-        const loadFilePatch = async (file: ReviewFile): Promise<string> => {
-          if (file.gitDiff == null) return "";
-          const paths = [...new Set([
-            file.gitDiff.oldPath,
-            file.gitDiff.newPath,
-            file.path,
-          ].filter((path): path is string => path != null && path.length > 0))];
-          if (paths.length === 0) return "";
-
-          const result = await pi.exec("git", ["diff", "--no-color", "--unified=80", "HEAD", "--", ...paths], {
-            cwd: workingRoot,
-            timeout: PATCH_COMMAND_TIMEOUT_MS,
-          });
-          if (result.code !== 0) {
-            return "";
-          }
-          return result.stdout;
-        };
-
         const handleRunAiReview = async (message: ReviewRunAiReviewPayload): Promise<void> => {
           if (aiReviewInFlight) {
             sendWindowMessage({
@@ -324,6 +425,10 @@ export default function (pi: ExtensionAPI) {
               },
             });
             analysis = result.analysis;
+            queueSessionSave({
+              ...(sessionSnapshot ?? {}),
+              analysis,
+            });
             sendWindowMessage({
               type: "ai-review-result",
               requestId: message.requestId,
@@ -345,11 +450,16 @@ export default function (pi: ExtensionAPI) {
 
         const onMessage = (data: unknown): void => {
           const message = data as ReviewWindowMessage;
+          if (isSaveSessionPayload(message)) {
+            queueSessionSave(message.snapshot);
+            return;
+          }
           if (isRunAiReviewPayload(message)) {
             void handleRunAiReview(message);
             return;
           }
           if (isPublishPayload(message)) {
+            queueSessionSave(snapshotFromSubmit(message.submit));
             void handlePublishGitHubReview(message);
             return;
           }
@@ -394,6 +504,10 @@ export default function (pi: ExtensionAPI) {
 
       waitingUI.dismiss();
       await waitingUI.promise;
+      if (message?.type === "submit") {
+        queueSessionSave(snapshotFromSubmit(message));
+      }
+      await flushSessionSave();
       closeActiveWindow();
 
       if (message == null || message.type === "cancel") {
