@@ -4,6 +4,7 @@ import { open, type GlimpseWindow } from "glimpseui";
 import { analyzeReviewDataset } from "./analysis.js";
 import { parseDiffReviewArgs } from "./command.js";
 import { loadReviewFileContents } from "./git.js";
+import { buildGitHubReviewPayload, countSkippedGitHubReviewComments, publishGitHubReview } from "./github-publish.js";
 import { composeReviewPrompt } from "./prompt.js";
 import { buildGitHubPrReviewDataset } from "./sources/github-pr.js";
 import { buildLocalReviewDataset } from "./sources/local.js";
@@ -12,6 +13,7 @@ import type {
   ReviewFile,
   ReviewFileContents,
   ReviewHostMessage,
+  ReviewPublishPayload,
   ReviewRequestFilePayload,
   ReviewSubmitPayload,
   ReviewWindowMessage,
@@ -28,6 +30,10 @@ function isCancelPayload(value: ReviewWindowMessage): value is ReviewCancelPaylo
 
 function isRequestFilePayload(value: ReviewWindowMessage): value is ReviewRequestFilePayload {
   return value.type === "request-file";
+}
+
+function isPublishPayload(value: ReviewWindowMessage): value is ReviewPublishPayload {
+  return value.type === "publish-github-review";
 }
 
 type WaitingEditorResult = "escape" | "window-settled";
@@ -167,6 +173,7 @@ export default function (pi: ExtensionAPI) {
     try {
       const terminalMessagePromise = new Promise<ReviewSubmitPayload | ReviewCancelPayload | null>((resolve, reject) => {
         let settled = false;
+        let publishInFlight = false;
 
         const cleanup = (): void => {
           window.removeListener("message", onMessage);
@@ -182,6 +189,49 @@ export default function (pi: ExtensionAPI) {
           settled = true;
           cleanup();
           resolve(value);
+        };
+
+        const handlePublishGitHubReview = async (message: ReviewPublishPayload): Promise<void> => {
+          if (publishInFlight) {
+            ctx.ui.notify("A GitHub review publish is already in progress.", "warning");
+            return;
+          }
+          if (!dataset.source.github) {
+            ctx.ui.notify("This review source cannot publish GitHub reviews.", "error");
+            return;
+          }
+
+          publishInFlight = true;
+          try {
+            const filePathById = new Map(files.map((file) => [file.id, file.gitDiff?.newPath ?? file.gitDiff?.oldPath ?? file.path]));
+            const commentableLinesByFileId = new Map(files.map((file) => [
+              file.id,
+              {
+                original: file.gitDiff?.commentableOriginalLines ?? [],
+                modified: file.gitDiff?.commentableModifiedLines ?? [],
+              },
+            ]));
+            const buildOptions = {
+              event: message.event,
+              body: message.body,
+              submit: message.submit,
+              filePathById,
+              commentableLinesByFileId,
+            };
+            const skippedCount = countSkippedGitHubReviewComments(buildOptions);
+            const payload = buildGitHubReviewPayload(buildOptions);
+
+            await publishGitHubReview(pi, dataset.workingRoot, dataset.source.github, payload);
+            ctx.ui.notify("Published GitHub review.", "info");
+            if (skippedCount > 0) {
+              ctx.ui.notify(`Skipped ${skippedCount} unsupported manual comment(s) that are not GitHub PR diff coordinates.`, "warning");
+            }
+          } catch (error) {
+            const messageText = error instanceof Error ? error.message : String(error);
+            ctx.ui.notify(`GitHub publish failed: ${messageText}`, "error");
+          } finally {
+            publishInFlight = false;
+          }
         };
 
         const handleRequestFile = async (message: ReviewRequestFilePayload): Promise<void> => {
@@ -224,6 +274,10 @@ export default function (pi: ExtensionAPI) {
 
         const onMessage = (data: unknown): void => {
           const message = data as ReviewWindowMessage;
+          if (isPublishPayload(message)) {
+            void handlePublishGitHubReview(message);
+            return;
+          }
           if (isRequestFilePayload(message)) {
             void handleRequestFile(message);
             return;

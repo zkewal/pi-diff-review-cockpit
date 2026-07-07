@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { ChangeStatus, ReviewFile, ReviewFileComparison, ReviewFileContents, ReviewScope } from "./types.js";
+import type { ChangeStatus, ReviewFile, ReviewFileComparison, ReviewFileContents, ReviewLineRange, ReviewScope } from "./types.js";
 
 interface ChangedPath {
   status: ChangeStatus;
@@ -18,6 +18,11 @@ interface ReviewFileSeed {
   gitDiff: ReviewFileComparison | null;
   lastCommit: ReviewFileComparison | null;
   commitComparisons: Record<string, ReviewFileComparison>;
+}
+
+interface CommentableLineRanges {
+  original: ReviewLineRange[];
+  modified: ReviewLineRange[];
 }
 
 async function runGit(pi: ExtensionAPI, repoRoot: string, args: string[]): Promise<string> {
@@ -118,6 +123,80 @@ function parseTrackedPaths(output: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+function parseDiffPath(value: string, prefix: "a/" | "b/"): string | null {
+  const path = value.trimEnd();
+  if (path === "/dev/null") return null;
+  return path.startsWith(prefix) ? path.slice(prefix.length) : path;
+}
+
+function addCommentableRange(ranges: ReviewLineRange[], start: number, count: number): void {
+  if (count <= 0) return;
+  ranges.push({ start, end: start + count - 1 });
+}
+
+function parseHunkHeader(line: string): { oldStart: number; oldCount: number; newStart: number; newCount: number } | null {
+  const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+  if (match == null) return null;
+
+  return {
+    oldStart: Number.parseInt(match[1] ?? "0", 10),
+    oldCount: Number.parseInt(match[2] ?? "1", 10),
+    newStart: Number.parseInt(match[3] ?? "0", 10),
+    newCount: Number.parseInt(match[4] ?? "1", 10),
+  };
+}
+
+function parseCommentableLineRanges(output: string): Map<string, CommentableLineRanges> {
+  const rangesByPath = new Map<string, CommentableLineRanges>();
+  let current: {
+    oldPath: string | null;
+    newPath: string | null;
+    ranges: CommentableLineRanges;
+  } | null = null;
+
+  const finishCurrentFile = (): void => {
+    if (current == null) return;
+
+    const paths = uniquePaths([current.newPath, current.oldPath].filter((path): path is string => path != null));
+    for (const path of paths) {
+      rangesByPath.set(path, current.ranges);
+    }
+  };
+
+  for (const line of output.split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      finishCurrentFile();
+      current = {
+        oldPath: null,
+        newPath: null,
+        ranges: { original: [], modified: [] },
+      };
+      continue;
+    }
+
+    if (current == null) continue;
+
+    if (line.startsWith("--- ")) {
+      current.oldPath = parseDiffPath(line.slice(4), "a/");
+      continue;
+    }
+
+    if (line.startsWith("+++ ")) {
+      current.newPath = parseDiffPath(line.slice(4), "b/");
+      continue;
+    }
+
+    const hunk = parseHunkHeader(line);
+    if (hunk == null) continue;
+
+    addCommentableRange(current.ranges.original, hunk.oldStart, hunk.oldCount);
+    addCommentableRange(current.ranges.modified, hunk.newStart, hunk.newCount);
+  }
+
+  finishCurrentFile();
+  return rangesByPath;
+}
+
 function mergeChangedPaths(tracked: ChangedPath[], untracked: ChangedPath[]): ChangedPath[] {
   const seen = new Set(tracked.map((change) => `${change.status}:${change.oldPath ?? ""}:${change.newPath ?? ""}`));
   const merged = [...tracked];
@@ -143,7 +222,7 @@ function toDisplayPath(change: ChangedPath): string {
   return change.newPath ?? change.oldPath ?? "(unknown)";
 }
 
-function toComparison(change: ChangedPath): ReviewFileComparison {
+function toComparison(change: ChangedPath, commentableLines?: CommentableLineRanges): ReviewFileComparison {
   return {
     status: change.status,
     oldPath: change.oldPath,
@@ -151,6 +230,12 @@ function toComparison(change: ChangedPath): ReviewFileComparison {
     displayPath: toDisplayPath(change),
     hasOriginal: change.oldPath != null,
     hasModified: change.newPath != null,
+    ...(commentableLines == null
+      ? {}
+      : {
+          commentableOriginalLines: commentableLines.original,
+          commentableModifiedLines: commentableLines.modified,
+        }),
   };
 }
 
@@ -277,6 +362,9 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
   const trackedDiffOutput = repositoryHasHead
     ? await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--name-status", "HEAD", "--"])
     : "";
+  const commentableDiffOutput = repositoryHasHead
+    ? await runGitAllowFailure(pi, repoRoot, ["diff", "--find-renames", "-M", "--unified=0", "--no-color", "HEAD", "--"])
+    : "";
   const untrackedOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--others", "--exclude-standard"]);
   const trackedFilesOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--cached"]);
   const deletedFilesOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--deleted"]);
@@ -294,6 +382,7 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
 
   const worktreeChanges = mergeChangedPaths(parseNameStatus(trackedDiffOutput), parseUntrackedPaths(untrackedOutput))
     .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? ""));
+  const commentableLinesByPath = parseCommentableLineRanges(commentableDiffOutput);
   const deletedPaths = new Set(parseTrackedPaths(deletedFilesOutput));
   const currentPaths = uniquePaths([...parseTrackedPaths(trackedFilesOutput), ...parseTrackedPaths(untrackedOutput)])
     .filter((path) => !deletedPaths.has(path))
@@ -331,7 +420,7 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
     seed.worktreeStatus = change.status;
     seed.hasWorkingTreeFile = change.newPath != null;
     seed.inGitDiff = true;
-    seed.gitDiff = toComparison(change);
+    seed.gitDiff = toComparison(change, commentableLinesByPath.get(change.newPath ?? change.oldPath ?? ""));
   }
 
   for (const change of lastCommitChanges) {

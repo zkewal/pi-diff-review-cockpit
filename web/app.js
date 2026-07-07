@@ -55,6 +55,7 @@ const sourceLabelEl = document.getElementById("source-label");
 const analysisStatusEl = document.getElementById("analysis-status");
 const submitButton = document.getElementById("submit-button");
 const cancelButton = document.getElementById("cancel-button");
+const publishGitHubButton = document.getElementById("publish-github-button");
 const overallCommentButton = document.getElementById("overall-comment-button");
 const approvalPacketButton = document.getElementById("approval-packet-button");
 const fileCommentButton = document.getElementById("file-comment-button");
@@ -64,6 +65,9 @@ const toggleWrapButton = document.getElementById("toggle-wrap-button");
 
 repoRootEl.textContent = reviewData.repoRoot || "";
 windowTitleEl.textContent = "Review";
+if (reviewData.source?.canPublishGitHubReview) {
+  publishGitHubButton.classList.remove("hidden");
+}
 
 let monacoApi = null;
 let diffEditor = null;
@@ -1054,6 +1058,57 @@ function showApprovalPacketModal() {
   });
 }
 
+function suggestedGitHubReviewEvent() {
+  const verdict = reviewData.analysis?.approvalPacket?.suggestedVerdict;
+  if (verdict === "request-changes") return "REQUEST_CHANGES";
+  if (verdict === "approve") return "APPROVE";
+  return "COMMENT";
+}
+
+function showPublishGitHubModal() {
+  const backdrop = document.createElement("div");
+  backdrop.className = "review-modal-backdrop";
+  backdrop.innerHTML = `
+    <div class="review-modal-card">
+      <div class="mb-2 text-base font-semibold text-white">Publish to GitHub</div>
+      <div class="mb-4 text-sm text-review-muted">Choose the review verdict and body to post.</div>
+      <label class="mb-2 block text-xs font-medium uppercase tracking-wider text-review-muted" for="github-review-event">Verdict</label>
+      <select id="github-review-event" class="mb-4 w-full rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+        <option value="COMMENT">Comment</option>
+        <option value="REQUEST_CHANGES">Request changes</option>
+        <option value="APPROVE">Approve</option>
+      </select>
+      <label class="mb-2 block text-xs font-medium uppercase tracking-wider text-review-muted" for="github-review-body">Review body</label>
+      <textarea id="github-review-body" class="scrollbar-thin min-h-48 w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">${escapeHtml(reviewData.analysis?.approvalPacket?.body || "")}</textarea>
+      <div class="mt-4 flex justify-end gap-2">
+        <button id="github-publish-cancel" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-4 py-2 text-sm font-medium text-review-text hover:bg-[#21262d]">Cancel</button>
+        <button id="github-publish-submit" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb] px-4 py-2 text-sm font-medium text-white hover:bg-[#388bfd]">Publish</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  const eventSelect = backdrop.querySelector("#github-review-event");
+  const textarea = backdrop.querySelector("#github-review-body");
+  const close = () => backdrop.remove();
+
+  eventSelect.value = suggestedGitHubReviewEvent();
+  backdrop.querySelector("#github-publish-cancel").addEventListener("click", close);
+  backdrop.querySelector("#github-publish-submit").addEventListener("click", () => {
+    syncCommentBodiesFromDOM();
+    window.glimpse.send({
+      type: "publish-github-review",
+      event: eventSelect.value,
+      body: textarea.value.trim(),
+      submit: buildSubmitPayload(),
+    });
+    close();
+  });
+  backdrop.addEventListener("click", (event) => {
+    if (event.target === backdrop) close();
+  });
+  textarea.focus();
+}
+
 function showFileCommentModal() {
   const file = activeFile();
   if (!file) return;
@@ -1518,6 +1573,10 @@ submitButton.addEventListener("click", () => {
 cancelButton.addEventListener("click", () => {
   window.glimpse.send({ type: "cancel" });
   window.glimpse.close();
+});
+
+publishGitHubButton.addEventListener("click", () => {
+  showPublishGitHubModal();
 });
 
 overallCommentButton.addEventListener("click", () => {

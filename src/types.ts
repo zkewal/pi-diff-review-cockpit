@@ -4,6 +4,11 @@ export type ReviewScope = "git-diff" | "last-commit" | "commit" | "all-files";
 
 export type ChangeStatus = "modified" | "added" | "deleted" | "renamed";
 
+export interface ReviewLineRange {
+  start: number;
+  end: number;
+}
+
 export interface ReviewFileComparison {
   status: ChangeStatus;
   oldPath: string | null;
@@ -11,6 +16,8 @@ export interface ReviewFileComparison {
   displayPath: string;
   hasOriginal: boolean;
   hasModified: boolean;
+  commentableOriginalLines?: ReviewLineRange[];
+  commentableModifiedLines?: ReviewLineRange[];
 }
 
 export interface ReviewCommit {
@@ -80,7 +87,16 @@ export interface ReviewRequestFilePayload {
   commitSha?: string;
 }
 
-export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload;
+export type GitHubReviewEvent = "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
+
+export interface ReviewPublishPayload {
+  type: "publish-github-review";
+  event: GitHubReviewEvent;
+  body: string;
+  submit: ReviewSubmitPayload;
+}
+
+export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewPublishPayload;
 
 export interface ReviewFileDataMessage {
   type: "file-data";
