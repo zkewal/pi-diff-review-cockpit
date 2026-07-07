@@ -1,3 +1,5 @@
+import type { ReviewSourceMetadata } from "./sources/types.js";
+
 export type ReviewScope = "git-diff" | "last-commit" | "commit" | "all-files";
 
 export type ChangeStatus = "modified" | "added" | "deleted" | "renamed";
@@ -88,8 +90,60 @@ export interface ReviewFileErrorMessage {
 
 export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage;
 
+export type ReviewFindingSeverity = "critical" | "high" | "medium" | "low" | "info";
+export type ReviewFindingKind = "bug" | "security" | "migration-risk" | "api-contract" | "test-gap" | "performance" | "question" | "informational";
+export type ReviewFindingStatus = "new" | "accepted-comment" | "dismissed" | "accepted-risk";
+
+export interface ReviewLocation {
+  fileId: string;
+  path: string;
+  side: CommentSide;
+  line: number | null;
+}
+
+export interface ReviewChapter {
+  id: string;
+  title: string;
+  summary: string;
+  risk: ReviewFindingSeverity;
+  fileIds: string[];
+  findingIds: string[];
+}
+
+export interface ReviewFinding {
+  id: string;
+  kind: ReviewFindingKind;
+  severity: ReviewFindingSeverity;
+  confidence: ReviewFindingSeverity;
+  title: string;
+  explanation: string;
+  suggestedComment: string;
+  locations: ReviewLocation[];
+  status: ReviewFindingStatus;
+}
+
+export interface ApprovalPacket {
+  summary: string;
+  reviewedChapters: string[];
+  acceptedRisks: string[];
+  unresolvedFindings: string[];
+  suggestedVerdict: "comment" | "request-changes" | "approve";
+  body: string;
+}
+
+export interface ReviewAnalysis {
+  status: "ready" | "fallback" | "failed";
+  message: string;
+  chapters: ReviewChapter[];
+  findings: ReviewFinding[];
+  approvalPacket: ApprovalPacket;
+}
+
 export interface ReviewWindowData {
   repoRoot: string;
+  workingRoot: string;
   files: ReviewFile[];
   commits: ReviewCommit[];
+  source: ReviewSourceMetadata;
+  analysis: ReviewAnalysis;
 }

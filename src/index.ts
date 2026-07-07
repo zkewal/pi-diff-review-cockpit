@@ -1,8 +1,10 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
-import { getReviewWindowData, loadReviewFileContents } from "./git.js";
+import { createFallbackAnalysis } from "./analysis.js";
+import { loadReviewFileContents } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
+import { buildLocalReviewDataset } from "./sources/local.js";
 import type {
   ReviewCancelPayload,
   ReviewFile,
@@ -117,13 +119,15 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const { repoRoot, files, commits } = await getReviewWindowData(pi, ctx.cwd);
+    const dataset = await buildLocalReviewDataset(pi, ctx);
+    const { repoRoot, files, commits } = dataset;
+    const analysis = createFallbackAnalysis(dataset, "AI analysis has not run yet.");
     if (files.length === 0) {
       ctx.ui.notify("No reviewable files found.", "info");
       return;
     }
 
-    const html = buildReviewHtml({ repoRoot, files, commits });
+    const html = buildReviewHtml({ ...dataset, analysis });
     const window = open(html, {
       width: 1680,
       height: 1020,
