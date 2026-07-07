@@ -147,12 +147,95 @@ function countLineRanges(ranges) {
   return (ranges || []).reduce((total, range) => total + Math.max(0, range.end - range.start + 1), 0);
 }
 
-function changeStatsLabel(file) {
-  if (!file?.gitDiff) return "";
-  const added = countLineRanges(file.gitDiff.commentableModifiedLines);
-  const deleted = countLineRanges(file.gitDiff.commentableOriginalLines);
-  if (added === 0 && deleted === 0) return "";
-  return `+${added} -${deleted}`;
+function diffstatCountsFromComparison(comparison) {
+  if (!comparison) return null;
+  return {
+    added: countLineRanges(comparison.commentableModifiedLines),
+    deleted: countLineRanges(comparison.commentableOriginalLines),
+  };
+}
+
+function addDiffstatCounts(left, right) {
+  return {
+    added: (left?.added || 0) + (right?.added || 0),
+    deleted: (left?.deleted || 0) + (right?.deleted || 0),
+  };
+}
+
+function fileDiffstatCounts(file, scope = state.currentScope) {
+  return diffstatCountsFromComparison(getScopeComparison(file, scope));
+}
+
+function scopedDiffstatCounts(files, scope = state.currentScope) {
+  return files.reduce((total, file) => addDiffstatCounts(total, fileDiffstatCounts(file, scope)), { added: 0, deleted: 0 });
+}
+
+function chapterDiffstatCounts(chapter) {
+  return {
+    added: chapterRangeLineCount(chapter, "modified"),
+    deleted: chapterRangeLineCount(chapter, "original"),
+  };
+}
+
+function coverageDiffstatCounts(coverage) {
+  if (!coverage) return null;
+  return {
+    added: coverage.modifiedLineCount || 0,
+    deleted: coverage.originalLineCount || 0,
+  };
+}
+
+function diffstatHtml(counts, options = {}) {
+  if (!counts) return "";
+  const added = Math.max(0, Number(counts.added || 0));
+  const deleted = Math.max(0, Number(counts.deleted || 0));
+  if (!options.showZero && added === 0 && deleted === 0) return "";
+
+  const blockCount = options.blocks || 5;
+  const total = added + deleted;
+  let addBlocks = 0;
+  let delBlocks = 0;
+
+  if (total > 0) {
+    addBlocks = added > 0 ? Math.max(1, Math.round((added / total) * blockCount)) : 0;
+    delBlocks = deleted > 0 ? Math.max(1, Math.round((deleted / total) * blockCount)) : 0;
+
+    while (addBlocks + delBlocks > blockCount) {
+      if (addBlocks >= delBlocks && addBlocks > 1) {
+        addBlocks -= 1;
+      } else if (delBlocks > 1) {
+        delBlocks -= 1;
+      } else {
+        break;
+      }
+    }
+  }
+
+  const neutralBlocks = Math.max(0, blockCount - addBlocks - delBlocks);
+  const blocks = [
+    ...Array.from({ length: addBlocks }, () => "diffstat-block diffstat-block-add"),
+    ...Array.from({ length: delBlocks }, () => "diffstat-block diffstat-block-del"),
+    ...Array.from({ length: neutralBlocks }, () => "diffstat-block"),
+  ];
+  const label = `${added} additions, ${deleted} deletions`;
+  const compactClass = options.compact ? " diffstat-compact" : "";
+
+  return `
+    <span class="diffstat${compactClass}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">
+      <span class="diffstat-counts">
+        <span class="diffstat-add">+${added}</span>
+        <span class="diffstat-del">-${deleted}</span>
+      </span>
+      <span class="diffstat-bars" aria-hidden="true">
+        ${blocks.map((className) => `<span class="${className}"></span>`).join("")}
+      </span>
+    </span>
+  `;
+}
+
+function setSummary(summary, counts = null) {
+  const stats = diffstatHtml(counts, { compact: true });
+  summaryEl.innerHTML = `${stats ? `${stats}<span class="mx-1 text-review-muted">•</span>` : ""}<span>${escapeHtml(summary)}</span>`;
 }
 
 function chapterRangeLineCount(chapter, side) {
@@ -161,16 +244,9 @@ function chapterRangeLineCount(chapter, side) {
     .reduce((total, range) => total + Math.max(0, range.endLine - range.startLine + 1), 0);
 }
 
-function chapterCoverageLabel(chapter) {
-  const added = chapterRangeLineCount(chapter, "modified");
-  const deleted = chapterRangeLineCount(chapter, "original");
-  if (added === 0 && deleted === 0) return "No changed lines";
-  return `+${added} -${deleted}`;
-}
-
 function coverageSummaryLabel(coverage) {
   if (!coverage) return "";
-  const base = `${coverage.fileCount} changed file(s) • +${coverage.modifiedLineCount} -${coverage.originalLineCount} mapped`;
+  const base = `${coverage.fileCount} changed file(s)`;
   if (coverage.unmappedFileCount === 0) return `${base} • 100% covered`;
   return `${base} • ${coverage.unmappedFileCount} file(s) in Unmapped diff`;
 }
@@ -533,6 +609,7 @@ function renderTreeNode(node, depth) {
     const loading = requestState.requestId != null && requestState.contents == null;
     const errored = requestState.error != null;
     const status = getActiveStatus(file);
+    const stats = diffstatHtml(fileDiffstatCounts(file), { compact: true });
     const button = document.createElement("button");
     button.type = "button";
     button.className = [
@@ -546,6 +623,7 @@ function renderTreeNode(node, depth) {
         <span class="truncate">${escapeHtml(child.name)}</span>
       </span>
       <span class="flex shrink-0 items-center gap-1.5">
+        ${stats}
         ${count > 0 ? `<span class="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[#1f2937] px-1 text-[10px] font-medium text-[#c9d1d9]">${count}</span>` : ""}
         ${status ? `<span class="font-medium ${statusBadgeClass(status)}">${escapeHtml(statusLabel(status).charAt(0))}</span>` : ""}
       </span>
@@ -566,6 +644,7 @@ function renderSearchResults(files) {
     const loading = requestState.requestId != null && requestState.contents == null;
     const errored = requestState.error != null;
     const status = getActiveStatus(file);
+    const stats = diffstatHtml(fileDiffstatCounts(file), { compact: true });
     const button = document.createElement("button");
     button.type = "button";
     button.className = [
@@ -581,6 +660,7 @@ function renderSearchResults(files) {
         <span class="mt-0.5 block truncate pl-[14px] text-[11px] ${file.id === state.activeFileId ? "text-[#c9d1d9]" : "text-review-muted"}">${escapeHtml(parentPath || path)}</span>
       </span>
       <span class="flex shrink-0 items-center gap-1.5">
+        ${stats}
         ${count > 0 ? `<span class="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[#1f2937] px-1 text-[10px] font-medium text-[#c9d1d9]">${count}</span>` : ""}
         ${status ? `<span class="font-medium ${statusBadgeClass(status)}">${escapeHtml(statusLabel(status).charAt(0))}</span>` : ""}
       </span>
@@ -729,7 +809,12 @@ function renderDefaultInsight() {
       <div>
         <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Approval packet</div>
         <div class="mt-2 text-sm font-medium text-white">${escapeHtml(packet.summary)}</div>
-        ${reviewData.analysis?.coverage ? `<div class="mt-2 text-xs text-review-muted">${escapeHtml(coverageSummaryLabel(reviewData.analysis.coverage))}</div>` : ""}
+        ${reviewData.analysis?.coverage ? `
+          <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-review-muted">
+            ${diffstatHtml(coverageDiffstatCounts(reviewData.analysis.coverage), { showZero: true })}
+            <span>${escapeHtml(coverageSummaryLabel(reviewData.analysis.coverage))}</span>
+          </div>
+        ` : ""}
         <div class="mt-2 text-[11px] text-review-muted">Suggested verdict: <span class="font-medium text-review-text">${escapeHtml(humanizeToken(packet.suggestedVerdict))}</span></div>
       </div>
       ${packet.body ? `
@@ -768,7 +853,10 @@ function renderInsightForChapter(chapter) {
         </div>
         <div class="text-base font-semibold leading-6 text-white">${escapeHtml(chapter.title)}</div>
         <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(chapter.summary)}</div>
-        <div class="mt-2 text-xs text-review-muted">${escapeHtml(chapterCoverageLabel(chapter))}</div>
+        <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-review-muted">
+          ${diffstatHtml(chapterDiffstatCounts(chapter), { showZero: true })}
+          <span>${(chapter.fileIds || []).length} file(s)</span>
+        </div>
       </div>
       <button id="chapter-reviewed-toggle" class="${insightActionButtonClass(reviewed)}">${reviewed ? "Mark not reviewed" : "Mark chapter reviewed"}</button>
       <div>
@@ -776,13 +864,13 @@ function renderInsightForChapter(chapter) {
         <div class="mt-2 space-y-1">
           ${visibleFiles.length === 0 ? `<div class="text-sm text-review-muted">No files linked.</div>` : visibleFiles.map((file) => {
             const status = file.gitDiff?.status ?? file.worktreeStatus;
-            const stats = changeStatsLabel(file);
+            const stats = diffstatHtml(diffstatCountsFromComparison(file.gitDiff), { compact: true });
             return `
               <button data-file-id="${escapeHtml(file.id)}" class="block w-full rounded-md px-2 py-1.5 text-left text-xs text-review-text hover:bg-[#21262d]">
                 <span class="flex min-w-0 items-center gap-2">
                   ${status ? `<span class="shrink-0 font-medium ${statusBadgeClass(status)}">${escapeHtml(statusLabel(status).charAt(0))}</span>` : ""}
                   <span class="min-w-0 flex-1 truncate">${escapeHtml(file.path)}</span>
-                  ${stats ? `<span class="shrink-0 text-[11px] text-review-muted">${escapeHtml(stats)}</span>` : ""}
+                  ${stats}
                 </span>
               </button>
             `;
@@ -921,6 +1009,7 @@ function renderReviewMap() {
   chapters.forEach((chapter, index) => {
     const reviewed = state.reviewedChapters[chapter.id] === true;
     const active = state.activeInsight.type === "chapter" && state.activeInsight.id === chapter.id;
+    const stats = diffstatHtml(chapterDiffstatCounts(chapter), { compact: true, showZero: true });
     const button = document.createElement("button");
     button.type = "button";
     button.className = [
@@ -934,9 +1023,9 @@ function renderReviewMap() {
       </div>
       <div class="text-sm font-semibold leading-5 text-white">${escapeHtml(chapter.title)}</div>
       <div class="mt-1 line-clamp-3 text-xs leading-5 text-review-muted">${escapeHtml(chapter.summary)}</div>
-      <div class="mt-2 flex items-center gap-3 text-[11px] text-review-muted">
+      <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-review-muted">
         <span>${(chapter.fileIds || []).length} file(s)</span>
-        <span>${escapeHtml(chapterCoverageLabel(chapter))}</span>
+        ${stats}
         <span>${(chapter.findingIds || []).length} finding(s)</span>
       </div>
     `;
@@ -1020,7 +1109,10 @@ function renderTree() {
     const findings = getReviewFindings();
     renderReviewMap();
     sidebarTitleEl.textContent = "Review map";
-    summaryEl.textContent = `${chapters.length} chapter(s) • ${findings.length} finding(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}`;
+    setSummary(
+      `${chapters.length} chapter(s) • ${findings.length} finding(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}`,
+      coverageDiffstatCounts(reviewData.analysis?.coverage),
+    );
     updateToggleButtons();
     updateSidebarLayout();
     renderInsightPanel();
@@ -1032,7 +1124,10 @@ function renderTree() {
     const newFindings = findings.filter((finding) => (state.findingStatuses[finding.id] || "new") === "new").length;
     renderFindings();
     sidebarTitleEl.textContent = "Findings";
-    summaryEl.textContent = `${findings.length} finding(s) • ${newFindings} new • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}`;
+    setSummary(
+      `${findings.length} finding(s) • ${newFindings} new • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}`,
+      coverageDiffstatCounts(reviewData.analysis?.coverage),
+    );
     updateToggleButtons();
     updateSidebarLayout();
     renderInsightPanel();
@@ -1057,7 +1152,10 @@ function renderTree() {
 
   sidebarTitleEl.textContent = scopeLabel(state.currentScope);
   const filteredSuffix = state.fileFilter.trim() ? ` • ${visibleFiles.length} shown` : "";
-  summaryEl.textContent = `${scopedFiles.length} file(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}${filteredSuffix}`;
+  setSummary(
+    `${scopedFiles.length} file(s) • ${comments} comment(s)${state.overallComment ? " • overall note" : ""}${filteredSuffix}`,
+    state.currentScope === "all-files" ? null : scopedDiffstatCounts(scopedFiles, state.currentScope),
+  );
   updateToggleButtons();
   updateSidebarLayout();
   renderInsightPanel();
@@ -1378,7 +1476,12 @@ function mountFile(options = {}) {
   const contents = getMountedContents(file, state.currentScope);
 
   clearViewZones();
-  currentFileLabelEl.textContent = getScopeDisplayPath(file, state.currentScope);
+  currentFileLabelEl.innerHTML = `
+    <span class="flex min-w-0 items-center gap-2">
+      <span class="min-w-0 truncate">${escapeHtml(getScopeDisplayPath(file, state.currentScope))}</span>
+      ${diffstatHtml(fileDiffstatCounts(file), { compact: true })}
+    </span>
+  `;
 
   if (originalModel) originalModel.dispose();
   if (modifiedModel) modifiedModel.dispose();

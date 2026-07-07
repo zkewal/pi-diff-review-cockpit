@@ -121,6 +121,65 @@
     height: 16px !important;
     box-shadow: 0 0 0 1px rgba(240, 246, 252, 0.08);
   }
+
+  .diffstat {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    gap: 6px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .diffstat-compact {
+    gap: 4px;
+  }
+
+  .diffstat-counts {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-weight: 600;
+  }
+
+  .diffstat-add {
+    color: #3fb950;
+  }
+
+  .diffstat-del {
+    color: #f85149;
+  }
+
+  .diffstat-bars {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .diffstat-compact .diffstat-bars {
+    gap: 1.5px;
+  }
+
+  .diffstat-block {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    background: #30363d;
+    box-shadow: inset 0 0 0 1px rgba(240, 246, 252, 0.03);
+  }
+
+  .diffstat-compact .diffstat-block {
+    width: 7px;
+    height: 7px;
+  }
+
+  .diffstat-block-add {
+    background: #2ea043;
+  }
+
+  .diffstat-block-del {
+    background: #f85149;
+  }
 </style>
 </head>
 <body class="h-full overflow-hidden bg-review-bg text-review-text antialiased">
