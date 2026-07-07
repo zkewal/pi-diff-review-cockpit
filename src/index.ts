@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
-import { createFallbackAnalysis } from "./analysis.js";
+import { analyzeReviewDataset } from "./analysis.js";
 import { parseDiffReviewArgs } from "./command.js";
 import { loadReviewFileContents } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
@@ -126,11 +126,13 @@ export default function (pi: ExtensionAPI) {
       ? await buildGitHubPrReviewDataset(pi, ctx, command.url)
       : await buildLocalReviewDataset(pi, ctx);
     const { workingRoot, files } = dataset;
-    const analysis = createFallbackAnalysis(dataset, "AI analysis has not run yet.");
     if (files.length === 0) {
       ctx.ui.notify("No reviewable files found.", "info");
       return;
     }
+
+    ctx.ui.notify("Analyzing diff for review map and findings.", "info");
+    const analysis = await analyzeReviewDataset(ctx, dataset);
 
     const html = buildReviewHtml({ ...dataset, analysis });
     const window = open(html, {

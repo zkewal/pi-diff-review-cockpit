@@ -1,0 +1,251 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createFallbackAnalysis, parseReviewAnalysisJson } from "../src/analysis.js";
+import type { ReviewDataset } from "../src/sources/types.js";
+
+function dataset(paths: string[]): ReviewDataset {
+  return {
+    repoRoot: "/repo",
+    workingRoot: "/repo",
+    commits: [],
+    source: {
+      kind: "local-working-tree",
+      label: "Local diff",
+      repoRoot: "/repo",
+      workingRoot: "/repo",
+      baseRevision: "HEAD",
+      headRevision: null,
+      canPublishGitHubReview: false,
+    },
+    files: paths.map((path) => ({
+      id: path,
+      path,
+      worktreeStatus: "modified",
+      hasWorkingTreeFile: true,
+      inGitDiff: true,
+      inLastCommit: false,
+      gitDiff: {
+        status: "modified",
+        oldPath: path,
+        newPath: path,
+        displayPath: path,
+        hasOriginal: true,
+        hasModified: true,
+      },
+      lastCommit: null,
+      commitComparisons: {},
+    })),
+  };
+}
+
+function validModelAnalysis() {
+  return {
+    chapters: [{
+      id: "api-surface",
+      title: "API surface",
+      summary: "Review API behavior before approval.",
+      risk: "medium",
+      fileIds: ["src/app/api/qa_api.py"],
+      findingIds: ["missing-validation"],
+    }],
+    findings: [{
+      id: "missing-validation",
+      kind: "bug",
+      severity: "medium",
+      confidence: "high",
+      title: "Validate request payload",
+      explanation: "Invalid request payloads can reach the service layer.",
+      suggestedComment: "Should this validate the request payload before calling the service?",
+      locations: [{
+        fileId: "src/app/api/qa_api.py",
+        path: "src/app/api/qa_api.py",
+        side: "modified",
+        line: 12,
+      }],
+      status: "new",
+    }],
+    approvalPacket: {
+      summary: "Review the API changes.",
+      reviewedChapters: ["api-surface"],
+      acceptedRisks: [],
+      unresolvedFindings: ["missing-validation"],
+      suggestedVerdict: "comment",
+      body: "Please review the API behavior.",
+    },
+  };
+}
+
+test("fallback groups migrations, services, api, and tests", () => {
+  const analysis = createFallbackAnalysis(dataset([
+    "migrations/versions/abc.py",
+    "src/app/api/qa_api.py",
+    "src/app/services/qa/store.py",
+    "tests/app/api/test_qa_api.py",
+  ]), "fallback");
+
+  assert.equal(analysis.status, "fallback");
+  assert.deepEqual(analysis.chapters.map((chapter) => chapter.title), [
+    "Schema and migrations",
+    "API surface",
+    "Service behavior",
+    "Tests",
+  ]);
+});
+
+test("fallback approval packet mentions source label", () => {
+  const analysis = createFallbackAnalysis(dataset(["src/app/api/qa_api.py"]), "fallback");
+
+  assert.match(analysis.approvalPacket.body, /Reviewed Local diff/);
+});
+
+test("parser rejects malformed nested analysis JSON", () => {
+  assert.throws(
+    () => parseReviewAnalysisJson(JSON.stringify({
+      chapters: [{ id: "unsafe-chapter" }],
+      findings: [],
+      approvalPacket: { body: "Looks ready." },
+    })),
+    /chapters\[0\]\.title/,
+  );
+});
+
+test("parser normalizes model supplied finding statuses to new", () => {
+  const modelAnalysis = validModelAnalysis();
+  modelAnalysis.findings[0].status = "dismissed";
+
+  const analysis = parseReviewAnalysisJson(JSON.stringify(modelAnalysis));
+
+  assert.equal(analysis.findings[0].status, "new");
+});
+
+test("parser rejects duplicate chapter ids when a dataset is supplied", () => {
+  const modelAnalysis = validModelAnalysis();
+  modelAnalysis.chapters.push({
+    ...modelAnalysis.chapters[0],
+    title: "Duplicate API surface",
+    fileIds: [],
+    findingIds: [],
+  });
+
+  assert.throws(
+    () => parseReviewAnalysisJson(JSON.stringify(modelAnalysis), dataset(["src/app/api/qa_api.py"])),
+    /chapters\[1\]\.id/,
+  );
+});
+
+test("parser rejects duplicate finding ids when a dataset is supplied", () => {
+  const modelAnalysis = validModelAnalysis();
+  modelAnalysis.findings.push({
+    ...modelAnalysis.findings[0],
+    title: "Duplicate validation finding",
+  });
+
+  assert.throws(
+    () => parseReviewAnalysisJson(JSON.stringify(modelAnalysis), dataset(["src/app/api/qa_api.py"])),
+    /findings\[1\]\.id/,
+  );
+});
+
+test("parser rejects dataset files omitted from chapter coverage", () => {
+  const modelAnalysis = validModelAnalysis();
+
+  assert.throws(
+    () => parseReviewAnalysisJson(JSON.stringify(modelAnalysis), dataset([
+      "src/app/api/qa_api.py",
+      "src/app/services/qa/store.py",
+    ])),
+    /dataset\.files\[1\]\.id/,
+  );
+});
+
+test("parser rejects duplicate chapter file coverage", () => {
+  const modelAnalysis = validModelAnalysis();
+  modelAnalysis.chapters.push({
+    id: "api-follow-up",
+    title: "API follow-up",
+    summary: "Review API edge cases before approval.",
+    risk: "medium",
+    fileIds: ["src/app/api/qa_api.py"],
+    findingIds: [],
+  });
+
+  assert.throws(
+    () => parseReviewAnalysisJson(JSON.stringify(modelAnalysis), dataset(["src/app/api/qa_api.py"])),
+    /chapters\[1\]\.fileIds\[0\]/,
+  );
+});
+
+test("parser rejects invented dataset relationships when a dataset is supplied", () => {
+  const reviewDataset = dataset(["src/app/api/qa_api.py"]);
+  const cases: Array<{
+    name: string;
+    mutate: (modelAnalysis: ReturnType<typeof validModelAnalysis>) => void;
+    message: RegExp;
+  }> = [
+    {
+      name: "chapter file id",
+      mutate: (modelAnalysis) => {
+        modelAnalysis.chapters[0].fileIds = ["src/app/api/qa_api.py", "src/app/api/invented.py"];
+      },
+      message: /chapters\[0\]\.fileIds\[1\]/,
+    },
+    {
+      name: "finding location file id",
+      mutate: (modelAnalysis) => {
+        modelAnalysis.findings[0].locations[0].fileId = "src/app/api/invented.py";
+      },
+      message: /findings\[0\]\.locations\[0\]\.fileId/,
+    },
+    {
+      name: "finding location path",
+      mutate: (modelAnalysis) => {
+        modelAnalysis.findings[0].locations[0].path = "src/app/api/invented.py";
+      },
+      message: /findings\[0\]\.locations\[0\]\.path/,
+    },
+    {
+      name: "chapter finding id",
+      mutate: (modelAnalysis) => {
+        modelAnalysis.chapters[0].findingIds = ["missing-validation", "invented-finding"];
+      },
+      message: /chapters\[0\]\.findingIds\[1\]/,
+    },
+    {
+      name: "approval unresolved finding id",
+      mutate: (modelAnalysis) => {
+        modelAnalysis.approvalPacket.unresolvedFindings = ["missing-validation", "invented-finding"];
+      },
+      message: /approvalPacket\.unresolvedFindings\[1\]/,
+    },
+    {
+      name: "approval reviewed chapter id",
+      mutate: (modelAnalysis) => {
+        modelAnalysis.approvalPacket.reviewedChapters = ["api-surface", "invented-chapter"];
+      },
+      message: /approvalPacket\.reviewedChapters\[1\]/,
+    },
+  ];
+
+  for (const { name, mutate, message } of cases) {
+    const modelAnalysis = validModelAnalysis();
+    mutate(modelAnalysis);
+
+    assert.throws(
+      () => parseReviewAnalysisJson(JSON.stringify(modelAnalysis), reviewDataset),
+      message,
+      name,
+    );
+  }
+});
+
+test("parser rejects non-positive and fractional finding location lines", () => {
+  for (const line of [0, -1, 12.5]) {
+    const modelAnalysis = validModelAnalysis();
+    modelAnalysis.findings[0].locations[0].line = line;
+
+    assert.throws(
+      () => parseReviewAnalysisJson(JSON.stringify(modelAnalysis)),
+      /findings\[0\]\.locations\[0\]\.line/,
+    );
+  }
+});
