@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
 import { createFallbackAnalysis } from "./analysis.js";
+import { parseDiffReviewArgs } from "./command.js";
 import { loadReviewFileContents } from "./git.js";
 import { composeReviewPrompt } from "./prompt.js";
 import { buildLocalReviewDataset } from "./sources/local.js";
@@ -113,9 +114,15 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  async function reviewRepository(ctx: ExtensionCommandContext): Promise<void> {
+  async function reviewRepository(args: string[], ctx: ExtensionCommandContext): Promise<void> {
     if (activeWindow != null) {
       ctx.ui.notify("A review window is already open.", "warning");
+      return;
+    }
+
+    const command = parseDiffReviewArgs(args);
+    if (command.mode !== "local") {
+      ctx.ui.notify("GitHub PR review is not implemented in this build yet.", "warning");
       return;
     }
 
@@ -278,8 +285,8 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerCommand("diff-review", {
     description: "Open a native review window with git diff, last commit, and all files scopes",
-    handler: async (_args, ctx) => {
-      await reviewRepository(ctx);
+    handler: async (args, ctx) => {
+      await reviewRepository(args.trim() === "" ? [] : args.trim().split(/\s+/), ctx);
     },
   });
 
