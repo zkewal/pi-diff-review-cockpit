@@ -389,9 +389,9 @@ function severityTextClass(severity) {
 
 function findingStatusLabel(status) {
   switch (status) {
-    case "accepted-comment": return "Comment accepted";
+    case "accepted-comment": return "Drafted";
     case "dismissed": return "Dismissed";
-    case "accepted-risk": return "Risk accepted";
+    case "accepted-risk": return "Accepted risk";
     default: return "New";
   }
 }
@@ -1178,6 +1178,31 @@ function insightActionButtonClass(active) {
     : "cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d]";
 }
 
+function insightNavHtml(items) {
+  return `
+    <div class="flex flex-wrap items-center gap-1.5 text-xs text-review-muted">
+      ${items.map((item, index) => `
+        ${index > 0 ? `<span class="text-review-muted">/</span>` : ""}
+        ${item.id ? `
+          <button data-insight-nav="${escapeHtml(item.id)}" class="cursor-pointer rounded px-1.5 py-1 text-review-muted hover:bg-[#21262d] hover:text-review-text">${escapeHtml(item.label)}</button>
+        ` : `<span class="px-1.5 py-1 text-review-text">${escapeHtml(item.label)}</span>`}
+      `).join("")}
+    </div>
+  `;
+}
+
+function bindInsightNav(chapterId = null) {
+  insightContentEl.querySelector("[data-insight-nav='overview']")?.addEventListener("click", () => {
+    state.activeInsight = { type: "default", id: null };
+    renderTree();
+  });
+  insightContentEl.querySelector("[data-insight-nav='chapter']")?.addEventListener("click", () => {
+    if (!chapterId) return;
+    state.activeInsight = { type: "chapter", id: chapterId };
+    renderTree();
+  });
+}
+
 function aiReviewConfigHtml(config) {
   if (!config) return "";
   const phaseLabels = {
@@ -1355,6 +1380,7 @@ function renderInsightForChapter(chapter) {
 
   insightContentEl.innerHTML = `
     <div class="space-y-4">
+      ${insightNavHtml([{ id: "overview", label: "PI review" }, { label: chapter.title }])}
       ${aiReviewPanelHtml(chapter.id)}
       <div>
         <div class="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider">
@@ -1424,6 +1450,7 @@ function renderInsightForChapter(chapter) {
     state.activeInsight = { type: "chapter", id: chapter.id };
     renderTree();
   });
+  bindInsightNav(chapter.id);
   insightContentEl.querySelectorAll("[data-file-id]").forEach((button) => {
     button.addEventListener("click", () => openFileFromAnalysis(button.getAttribute("data-file-id")));
   });
@@ -1441,23 +1468,28 @@ function renderInsightForChapter(chapter) {
 
 function setFindingStatus(finding, status) {
   state.findingStatuses[finding.id] = status;
-  if (status === "accepted-comment") {
-    state.acceptedFindingComments[finding.id] = finding.suggestedComment;
-  } else {
-    delete state.acceptedFindingComments[finding.id];
-  }
+  delete state.acceptedFindingComments[finding.id];
   state.activeInsight = { type: "finding", id: finding.id };
   renderTree();
+}
+
+function chapterForFinding(finding) {
+  return getReviewChapters().find((chapter) => (chapter.findingIds || []).includes(finding.id)) || null;
 }
 
 function renderInsightForFinding(finding) {
   insightPanelTitleEl.textContent = "AI finding context";
   const status = state.findingStatuses[finding.id] || "new";
-  const acceptedComment = state.acceptedFindingComments[finding.id] || "";
   const canCreateDraft = firstDraftableFindingLocation(finding) != null;
+  const chapter = chapterForFinding(finding);
 
   insightContentEl.innerHTML = `
     <div class="space-y-4">
+      ${insightNavHtml([
+        { id: "overview", label: "PI review" },
+        ...(chapter ? [{ id: "chapter", label: chapter.title }] : []),
+        { label: "Finding" },
+      ])}
       <div>
         <div class="mb-2 flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-wider">
           <span class="text-review-muted">${escapeHtml(humanizeToken(finding.kind))}</span>
@@ -1482,18 +1514,20 @@ function renderInsightForFinding(finding) {
       <div>
         <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Suggested comment</div>
         <div class="mt-2 whitespace-pre-wrap rounded-md border border-review-border bg-[#010409] p-3 text-xs leading-5 text-review-text">${escapeHtml(finding.suggestedComment || "No suggested comment.")}</div>
-        ${acceptedComment ? `<div class="mt-2 text-xs text-[#3fb950]">Accepted comment saved in this review session.</div>` : ""}
+        ${status === "accepted-comment" ? `<div class="mt-2 text-xs text-[#3fb950]">Draft comment created in the diff.</div>` : ""}
       </div>
       <div class="flex flex-wrap gap-2">
-        ${canCreateDraft ? `<button data-finding-action="create-draft" class="${insightActionButtonClass(false)}">Create draft</button>` : ""}
-        <button data-finding-status="accepted-comment" class="${insightActionButtonClass(status === "accepted-comment")}">Accept to packet</button>
-        <button data-finding-status="dismissed" class="${insightActionButtonClass(status === "dismissed")}">Dismiss</button>
-        <button data-finding-status="accepted-risk" class="${insightActionButtonClass(status === "accepted-risk")}">Accept risk</button>
-        <button data-finding-status="new" class="${insightActionButtonClass(status === "new")}">Reset</button>
+        ${status === "accepted-comment"
+          ? `<span class="rounded-md border border-[#2ea043]/40 bg-[#238636]/10 px-3 py-1.5 text-xs font-medium text-[#3fb950]">Draft comment created</span>`
+          : canCreateDraft
+            ? `<button data-finding-action="create-draft" class="${insightActionButtonClass(false)}">Create draft comment</button>`
+            : `<span class="rounded-md border border-review-border bg-[#010409] px-3 py-1.5 text-xs text-review-muted">No commentable diff line</span>`}
+        <button data-finding-status="${status === "dismissed" ? "new" : "dismissed"}" class="${insightActionButtonClass(status === "dismissed")}">${status === "dismissed" ? "Reopen" : "Dismiss"}</button>
       </div>
     </div>
   `;
 
+  bindInsightNav(chapter?.id || null);
   insightContentEl.querySelectorAll("[data-file-id]").forEach((button) => {
     button.addEventListener("click", () => openFileFromAnalysis(button.getAttribute("data-file-id")));
   });
@@ -1892,10 +1926,7 @@ function renderCommentDOM(comment, onDelete) {
     <textarea data-comment-id="${escapeHtml(comment.id)}" class="scrollbar-thin min-h-[76px] w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="Leave a comment"></textarea>
     <div class="mt-2 flex items-center justify-between gap-3">
       <div class="text-xs text-review-muted">Saved locally until you finish the review or publish to GitHub.</div>
-      <div class="flex shrink-0 items-center gap-2">
-        <button data-action="delete" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Delete</button>
-        <button data-action="save" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Save draft</button>
-      </div>
+      <button data-action="delete" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Delete</button>
     </div>
   `;
   const textarea = container.querySelector("textarea");
@@ -1936,7 +1967,6 @@ function renderCommentDOM(comment, onDelete) {
     }
   });
   container.querySelector("[data-action='delete']").addEventListener("click", onDelete);
-  container.querySelector("[data-action='save']").addEventListener("click", saveDraft);
   if (!comment.body) setTimeout(() => textarea.focus(), 50);
   return container;
 }
@@ -1966,8 +1996,6 @@ function createDraftCommentFromFinding(finding, location) {
     ? clampRangeToCommentable(location.line, location.line, rangesForSide(comparison, location.side))
     : null;
   if (!commentRange || location.side === "file") {
-    state.findingStatuses[finding.id] = "accepted-comment";
-    state.acceptedFindingComments[finding.id] = body;
     state.activeInsight = { type: "finding", id: finding.id };
     renderTree();
     return;
@@ -1992,7 +2020,7 @@ function createDraftCommentFromFinding(finding, location) {
     });
   }
   state.findingStatuses[finding.id] = "accepted-comment";
-  state.acceptedFindingComments[finding.id] = body;
+  delete state.acceptedFindingComments[finding.id];
   state.activeInsight = { type: "finding", id: finding.id };
   updateCommentsUI();
 }
@@ -2030,7 +2058,7 @@ function renderAiFindingZoneDOM(finding, location) {
       <div class="flex shrink-0 items-center gap-2">
         <button data-action="open" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:bg-[#21262d]">Open</button>
         <button data-action="dismiss" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Dismiss</button>
-        <button data-action="accept" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Create draft</button>
+        <button data-action="accept" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Create draft comment</button>
       </div>
     </div>
   `;
