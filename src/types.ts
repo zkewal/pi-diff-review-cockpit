@@ -130,12 +130,21 @@ export interface ReviewLocation {
   line: number | null;
 }
 
+export interface ReviewChapterRange {
+  fileId: string;
+  path: string;
+  side: Exclude<CommentSide, "file">;
+  startLine: number;
+  endLine: number;
+}
+
 export interface ReviewChapter {
   id: string;
   title: string;
   summary: string;
   risk: ReviewFindingSeverity;
   fileIds: string[];
+  ranges: ReviewChapterRange[];
   findingIds: string[];
 }
 
@@ -165,7 +174,17 @@ export interface ReviewAnalysis {
   message: string;
   chapters: ReviewChapter[];
   findings: ReviewFinding[];
+  coverage: ReviewCoverageSummary;
   approvalPacket: ApprovalPacket;
+}
+
+export interface ReviewCoverageSummary {
+  fileCount: number;
+  originalLineCount: number;
+  modifiedLineCount: number;
+  unmappedFileCount: number;
+  unmappedOriginalLineCount: number;
+  unmappedModifiedLineCount: number;
 }
 
 export interface ReviewWindowData {

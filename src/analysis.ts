@@ -6,6 +6,8 @@ import type {
   CommentSide,
   ReviewAnalysis,
   ReviewChapter,
+  ReviewChapterRange,
+  ReviewCoverageSummary,
   ReviewFinding,
   ReviewFindingKind,
   ReviewFindingSeverity,
@@ -27,6 +29,8 @@ Group files into chapters in the order a reviewer should read them. Prefer domai
 - risk: one of "critical", "high", "medium", "low", "info"
 - fileIds: array of file ids from the input only
 - findingIds: array of finding ids from your findings
+
+Every input file should appear in exactly one chapter. If a file does not fit a specific domain-oriented chapter, put it in a miscellaneous chapter. The review tool will add a final deterministic "Unmapped diff" chapter for any omitted changed files so no changed hunks are lost.
 
 Separate high-confidence bugs from informational explanations. Only create findings for concrete, actionable review concerns. Do not invent files, file ids, paths, or line numbers. When you are unsure about the exact line, set line to null. Each finding must have:
 - id: stable kebab-case string
@@ -71,6 +75,124 @@ function getAnalysisFiles(dataset: ReviewDataset) {
   return selectedFiles.length > 0 ? selectedFiles : dataset.files;
 }
 
+function countLineRanges(ranges: readonly { start: number; end: number }[] | undefined): number {
+  return (ranges ?? []).reduce((total, range) => total + Math.max(0, range.end - range.start + 1), 0);
+}
+
+function getFileCoverageRanges(file: ReviewDataset["files"][number]): ReviewChapterRange[] {
+  const comparison = file.gitDiff;
+  if (comparison == null) return [];
+  const path = comparison.newPath ?? comparison.oldPath ?? file.path;
+  const originalRanges = (comparison.commentableOriginalLines ?? []).map((range) => ({
+    fileId: file.id,
+    path,
+    side: "original" as const,
+    startLine: range.start,
+    endLine: range.end,
+  }));
+  const modifiedRanges = (comparison.commentableModifiedLines ?? []).map((range) => ({
+    fileId: file.id,
+    path,
+    side: "modified" as const,
+    startLine: range.start,
+    endLine: range.end,
+  }));
+  return [...originalRanges, ...modifiedRanges];
+}
+
+function getFileRangeCounts(file: ReviewDataset["files"][number]): { original: number; modified: number } {
+  return {
+    original: countLineRanges(file.gitDiff?.commentableOriginalLines),
+    modified: countLineRanges(file.gitDiff?.commentableModifiedLines),
+  };
+}
+
+function getChapterRanges(chapter: ReviewChapter, fileById: Map<string, ReviewDataset["files"][number]>): ReviewChapterRange[] {
+  return chapter.fileIds.flatMap((fileId) => {
+    const file = fileById.get(fileId);
+    return file == null ? [] : getFileCoverageRanges(file);
+  });
+}
+
+function emptyCoverageSummary(): ReviewCoverageSummary {
+  return {
+    fileCount: 0,
+    originalLineCount: 0,
+    modifiedLineCount: 0,
+    unmappedFileCount: 0,
+    unmappedOriginalLineCount: 0,
+    unmappedModifiedLineCount: 0,
+  };
+}
+
+function uniqueChapterId(baseId: string, chapters: readonly ReviewChapter[]): string {
+  const existingIds = new Set(chapters.map((chapter) => chapter.id));
+  if (!existingIds.has(baseId)) return baseId;
+
+  let index = 2;
+  while (existingIds.has(`${baseId}-${index}`)) {
+    index += 1;
+  }
+  return `${baseId}-${index}`;
+}
+
+function completeDiffCoverage(analysis: ReviewAnalysis, dataset: ReviewDataset): ReviewAnalysis {
+  const analysisFiles = getAnalysisFiles(dataset);
+  const fileById = new Map(analysisFiles.map((file) => [file.id, file] as const));
+  const coveredFileIds = new Set(analysis.chapters.flatMap((chapter) => chapter.fileIds));
+  const unmappedFiles = analysisFiles.filter((file) => !coveredFileIds.has(file.id));
+  const chapters = analysis.chapters.map((chapter) => ({
+    ...chapter,
+    ranges: getChapterRanges(chapter, fileById),
+  }));
+
+  let approvalPacket = analysis.approvalPacket;
+  if (unmappedFiles.length > 0) {
+    const unmappedChapterId = uniqueChapterId("unmapped-diff", chapters);
+    const unmappedChapter: ReviewChapter = {
+      id: unmappedChapterId,
+      title: "Unmapped diff",
+      summary: "Review changed areas that were not assigned to a more specific chapter.",
+      risk: "medium",
+      fileIds: unmappedFiles.map((file) => file.id),
+      ranges: unmappedFiles.flatMap(getFileCoverageRanges),
+      findingIds: [],
+    };
+    chapters.push(unmappedChapter);
+    approvalPacket = {
+      ...approvalPacket,
+      reviewedChapters: [...new Set([...approvalPacket.reviewedChapters, unmappedChapterId])],
+    };
+  }
+
+  const totals = analysisFiles.reduce((counts, file) => {
+    const fileCounts = getFileRangeCounts(file);
+    counts.original += fileCounts.original;
+    counts.modified += fileCounts.modified;
+    return counts;
+  }, { original: 0, modified: 0 });
+  const unmappedTotals = unmappedFiles.reduce((counts, file) => {
+    const fileCounts = getFileRangeCounts(file);
+    counts.original += fileCounts.original;
+    counts.modified += fileCounts.modified;
+    return counts;
+  }, { original: 0, modified: 0 });
+
+  return {
+    ...analysis,
+    chapters,
+    approvalPacket,
+    coverage: {
+      fileCount: analysisFiles.length,
+      originalLineCount: totals.original,
+      modifiedLineCount: totals.modified,
+      unmappedFileCount: unmappedFiles.length,
+      unmappedOriginalLineCount: unmappedTotals.original,
+      unmappedModifiedLineCount: unmappedTotals.modified,
+    },
+  };
+}
+
 export function createFallbackAnalysis(dataset: ReviewDataset, message: string): ReviewAnalysis {
   const chaptersByTitle = new Map<string, ReviewChapter>();
   const analysisFiles = getAnalysisFiles(dataset);
@@ -89,6 +211,7 @@ export function createFallbackAnalysis(dataset: ReviewDataset, message: string):
       summary: `Review ${title.toLowerCase()} before marking this source complete.`,
       risk: title === "Schema and migrations" ? "high" : "medium",
       fileIds: [file.id],
+      ranges: [],
       findingIds: [],
     });
   }
@@ -103,13 +226,14 @@ export function createFallbackAnalysis(dataset: ReviewDataset, message: string):
     body: [`Reviewed ${dataset.source.label}.`, "", "Chapters:", ...chapterTitles.map((title) => `- ${title}`)].join("\n"),
   };
 
-  return {
+  return completeDiffCoverage({
     status: "fallback",
     message,
     chapters: [...chaptersByTitle.values()],
     findings: [],
+    coverage: emptyCoverageSummary(),
     approvalPacket,
-  };
+  }, dataset);
 }
 
 function buildAnalysisInput(dataset: ReviewDataset): string {
@@ -182,6 +306,7 @@ function normalizeChapter(value: unknown, index: number): ReviewChapter {
     summary: requireString(chapter.summary, `chapters[${index}].summary`),
     risk: requireOneOf(chapter.risk, REVIEW_FINDING_SEVERITIES, `chapters[${index}].risk`),
     fileIds: requireStringArray(chapter.fileIds, `chapters[${index}].fileIds`),
+    ranges: [],
     findingIds: requireStringArray(chapter.findingIds, `chapters[${index}].findingIds`),
   };
 }
@@ -288,12 +413,6 @@ function validateAnalysisRelationships(analysis: ReviewAnalysis, dataset: Review
     }
   }
 
-  for (const [fileIndex, file] of analysisFiles.entries()) {
-    if (!coveredFileIds.has(file.id)) {
-      throw new Error(`AI analysis JSON omits analysis file ${fileIndex} from chapters.`);
-    }
-  }
-
   for (const [findingIndex, finding] of analysis.findings.entries()) {
     for (const [locationIndex, location] of finding.locations.entries()) {
       const file = fileById.get(location.fileId);
@@ -333,11 +452,13 @@ export function parseReviewAnalysisJson(text: string, dataset?: ReviewDataset): 
     message: "AI analysis ready.",
     chapters: parsed.chapters.map(normalizeChapter),
     findings: parsed.findings.map(normalizeFinding),
+    coverage: emptyCoverageSummary(),
     approvalPacket: normalizeApprovalPacket(parsed.approvalPacket),
   };
 
   if (dataset) {
     validateAnalysisRelationships(analysis, dataset);
+    return completeDiffCoverage(analysis, dataset);
   }
 
   return analysis;

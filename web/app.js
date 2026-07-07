@@ -155,6 +155,26 @@ function changeStatsLabel(file) {
   return `+${added} -${deleted}`;
 }
 
+function chapterRangeLineCount(chapter, side) {
+  return (chapter.ranges || [])
+    .filter((range) => range.side === side)
+    .reduce((total, range) => total + Math.max(0, range.endLine - range.startLine + 1), 0);
+}
+
+function chapterCoverageLabel(chapter) {
+  const added = chapterRangeLineCount(chapter, "modified");
+  const deleted = chapterRangeLineCount(chapter, "original");
+  if (added === 0 && deleted === 0) return "No changed lines";
+  return `+${added} -${deleted}`;
+}
+
+function coverageSummaryLabel(coverage) {
+  if (!coverage) return "";
+  const base = `${coverage.fileCount} changed file(s) • +${coverage.modifiedLineCount} -${coverage.originalLineCount} mapped`;
+  if (coverage.unmappedFileCount === 0) return `${base} • 100% covered`;
+  return `${base} • ${coverage.unmappedFileCount} file(s) in Unmapped diff`;
+}
+
 function humanizeToken(value) {
   return String(value || "")
     .split("-")
@@ -709,6 +729,7 @@ function renderDefaultInsight() {
       <div>
         <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Approval packet</div>
         <div class="mt-2 text-sm font-medium text-white">${escapeHtml(packet.summary)}</div>
+        ${reviewData.analysis?.coverage ? `<div class="mt-2 text-xs text-review-muted">${escapeHtml(coverageSummaryLabel(reviewData.analysis.coverage))}</div>` : ""}
         <div class="mt-2 text-[11px] text-review-muted">Suggested verdict: <span class="font-medium text-review-text">${escapeHtml(humanizeToken(packet.suggestedVerdict))}</span></div>
       </div>
       ${packet.body ? `
@@ -747,6 +768,7 @@ function renderInsightForChapter(chapter) {
         </div>
         <div class="text-base font-semibold leading-6 text-white">${escapeHtml(chapter.title)}</div>
         <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(chapter.summary)}</div>
+        <div class="mt-2 text-xs text-review-muted">${escapeHtml(chapterCoverageLabel(chapter))}</div>
       </div>
       <button id="chapter-reviewed-toggle" class="${insightActionButtonClass(reviewed)}">${reviewed ? "Mark not reviewed" : "Mark chapter reviewed"}</button>
       <div>
@@ -914,6 +936,7 @@ function renderReviewMap() {
       <div class="mt-1 line-clamp-3 text-xs leading-5 text-review-muted">${escapeHtml(chapter.summary)}</div>
       <div class="mt-2 flex items-center gap-3 text-[11px] text-review-muted">
         <span>${(chapter.fileIds || []).length} file(s)</span>
+        <span>${escapeHtml(chapterCoverageLabel(chapter))}</span>
         <span>${(chapter.findingIds || []).length} finding(s)</span>
       </div>
     `;

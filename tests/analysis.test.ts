@@ -32,6 +32,8 @@ function dataset(paths: string[], analysisFileIds = paths): ReviewDataset {
         displayPath: path,
         hasOriginal: true,
         hasModified: true,
+        commentableOriginalLines: [{ start: 1, end: 1 }],
+        commentableModifiedLines: [{ start: 1, end: 2 }],
       },
       lastCommit: null,
       commitComparisons: {},
@@ -116,6 +118,25 @@ test("fallback review map only groups focused analysis files", () => {
     "Service behavior",
   ]);
   assert.equal(analysis.chapters.some((chapter) => chapter.fileIds.includes(".agent/rules/agent-orchestration-ho.md")), false);
+  assert.deepEqual(analysis.chapters[0]?.ranges, [
+    {
+      fileId: "src/app/api/qa_api.py",
+      path: "src/app/api/qa_api.py",
+      side: "original",
+      startLine: 1,
+      endLine: 1,
+    },
+    {
+      fileId: "src/app/api/qa_api.py",
+      path: "src/app/api/qa_api.py",
+      side: "modified",
+      startLine: 1,
+      endLine: 2,
+    },
+  ]);
+  assert.equal(analysis.coverage.fileCount, 2);
+  assert.equal(analysis.coverage.originalLineCount, 2);
+  assert.equal(analysis.coverage.modifiedLineCount, 4);
   assert.match(analysis.approvalPacket.summary, /2 reviewable change file\(s\)/);
 });
 
@@ -167,16 +188,38 @@ test("parser rejects duplicate finding ids when a dataset is supplied", () => {
   );
 });
 
-test("parser rejects dataset files omitted from chapter coverage", () => {
+test("parser appends unmapped diff chapter for omitted focused files", () => {
   const modelAnalysis = validModelAnalysis();
 
-  assert.throws(
-    () => parseReviewAnalysisJson(JSON.stringify(modelAnalysis), dataset([
-      "src/app/api/qa_api.py",
-      "src/app/services/qa/store.py",
-    ])),
-    /analysis file 1/,
-  );
+  const analysis = parseReviewAnalysisJson(JSON.stringify(modelAnalysis), dataset([
+    "src/app/api/qa_api.py",
+    "src/app/services/qa/store.py",
+  ]));
+  const unmappedChapter = analysis.chapters.at(-1);
+
+  assert.equal(unmappedChapter?.id, "unmapped-diff");
+  assert.equal(unmappedChapter?.title, "Unmapped diff");
+  assert.deepEqual(unmappedChapter?.fileIds, ["src/app/services/qa/store.py"]);
+  assert.deepEqual(unmappedChapter?.ranges, [
+    {
+      fileId: "src/app/services/qa/store.py",
+      path: "src/app/services/qa/store.py",
+      side: "original",
+      startLine: 1,
+      endLine: 1,
+    },
+    {
+      fileId: "src/app/services/qa/store.py",
+      path: "src/app/services/qa/store.py",
+      side: "modified",
+      startLine: 1,
+      endLine: 2,
+    },
+  ]);
+  assert.equal(analysis.coverage.fileCount, 2);
+  assert.equal(analysis.coverage.unmappedFileCount, 1);
+  assert.equal(analysis.coverage.unmappedOriginalLineCount, 1);
+  assert.equal(analysis.coverage.unmappedModifiedLineCount, 2);
 });
 
 test("parser does not require non-focused repo files in chapter coverage", () => {
