@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
@@ -66,6 +66,14 @@ type WaitingEditorResult = "escape" | "window-settled";
 
 function escapeForInlineScript(value: string): string {
   return value.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+}
+
+function reviewWindowTitle(dataset: { repoRoot: string; source: { github?: { owner: string; repo: string; number: number } } }): string {
+  const github = dataset.source.github;
+  if (github != null) {
+    return `Review PR #${github.number} · ${github.owner}/${github.repo}`;
+  }
+  return `Diff review · ${basename(dataset.repoRoot) || "repository"}`;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -275,7 +283,7 @@ export default function (pi: ExtensionAPI) {
     const window = open(html, {
       width: 1680,
       height: 1020,
-      title: "pi review",
+      title: reviewWindowTitle(dataset),
     });
     activeWindow = window;
 

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>pi review</title>
+<title>Diff review</title>
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 <style type="text/tailwindcss">
   @theme {
@@ -49,12 +49,12 @@
   }
 
   .review-modal-card {
-    width: min(760px, 92vw);
-    background: #161b22;
+    width: min(720px, 92vw);
+    background: #0d1117;
     border: 1px solid #30363d;
     border-radius: 12px;
     box-shadow: 0 16px 64px rgba(0, 0, 0, 0.5);
-    padding: 24px;
+    padding: 20px;
   }
 
   #editor-container {
@@ -258,22 +258,22 @@
 </head>
 <body class="h-full overflow-hidden bg-review-bg text-review-text antialiased">
 <div id="root-layout" class="flex h-full w-full flex-col">
-  <div class="flex items-center justify-between gap-4 border-b border-review-border bg-[#010409] px-4 py-3">
+  <div class="flex min-h-12 items-center justify-between gap-3 border-b border-review-border bg-[#010409] px-3 py-2">
     <div class="min-w-0 flex items-center gap-3">
-      <button id="toggle-sidebar-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d]">Hide sidebar</button>
+      <button id="toggle-sidebar-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Sidebar</button>
       <div class="min-w-0">
-        <div id="window-title" class="text-[15px] font-semibold text-white">Review</div>
+        <div id="window-title" class="truncate text-sm font-semibold text-white">Diff review</div>
         <div id="repo-root" class="truncate text-[11px] text-review-muted"></div>
       </div>
     </div>
-    <div class="flex items-center gap-2">
-      <div id="summary" class="max-w-[24rem] truncate text-[11px] text-review-muted"></div>
-      <button id="run-ai-review-button" class="cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] hover:bg-[#8957e5]/25">Run PI review</button>
-      <button id="overall-comment-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d]">Overall note</button>
-      <button id="approval-packet-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d]">Approval packet</button>
-      <button id="cancel-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/30">Cancel</button>
-      <button id="publish-github-button" class="hidden cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#388bfd]">Publish to GitHub</button>
-      <button id="submit-button" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#238636] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#2ea043] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-[#238636]">Finish review</button>
+    <div class="flex min-w-0 items-center gap-2">
+      <div id="summary" class="hidden max-w-[26rem] truncate text-[11px] text-review-muted xl:block"></div>
+      <button id="run-ai-review-button" class="cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-2.5 py-1 text-[11px] font-medium text-[#d2a8ff] hover:bg-[#8957e5]/25">Run PI review</button>
+      <button id="overall-comment-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Note</button>
+      <button id="approval-packet-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Packet</button>
+      <button id="cancel-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/30">Cancel</button>
+      <button id="publish-github-button" class="hidden cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[#388bfd]">Publish</button>
+      <button id="submit-button" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#238636] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[#2ea043] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-[#238636]">Finish</button>
     </div>
   </div>
 
@@ -282,7 +282,7 @@
     <div class="border-b border-review-border px-4 py-3">
       <div class="mb-2 flex items-center justify-between gap-2">
         <div id="sidebar-title" class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Files</div>
-        <div class="text-[10px] text-review-muted">Fuzzy filter</div>
+        <div class="text-[10px] text-review-muted">Filter</div>
       </div>
       <div class="mb-3 grid grid-cols-3 gap-1 rounded-md border border-review-border bg-[#010409] p-1">
         <button id="tab-review-map-button" class="rounded px-2 py-1 text-[11px] font-medium text-review-text">Map</button>
@@ -296,7 +296,7 @@
         <button id="scope-all-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">All files</button>
       </div>
       <select id="commit-select" class="mb-3 hidden w-full rounded-md border border-review-border bg-review-panel px-2 py-2 text-xs text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"></select>
-      <input id="sidebar-search-input" type="text" spellcheck="false" autocomplete="off" placeholder="Search files" class="w-full rounded-md border border-review-border bg-review-panel px-3 py-2 text-sm text-review-text outline-none placeholder:text-review-muted focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+      <input id="sidebar-search-input" type="text" spellcheck="false" autocomplete="off" placeholder="Search" class="w-full rounded-md border border-review-border bg-review-panel px-3 py-2 text-sm text-review-text outline-none placeholder:text-review-muted focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
     </div>
     <div id="file-tree" class="scrollbar-thin min-h-0 flex-1 overflow-auto px-2 pb-2"></div>
   </aside>
@@ -317,7 +317,7 @@
     <div id="file-comments-container" class="hidden border-b border-review-border bg-[#0d1117] px-4 py-0"></div>
     <div id="editor-container" class="min-h-0 min-w-0 flex-1"></div>
     </main>
-    <aside id="insight-panel" tabindex="-1" class="flex min-h-0 w-[360px] shrink-0 flex-col border-l border-review-border bg-[#0d1117]">
+    <aside id="insight-panel" tabindex="-1" class="flex min-h-0 w-[340px] shrink-0 flex-col border-l border-review-border bg-[#0d1117]">
       <div class="border-b border-review-border px-4 py-3">
         <div id="insight-panel-title" class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review assistant</div>
         <div id="source-label" class="mt-1 truncate text-sm font-medium text-white"></div>

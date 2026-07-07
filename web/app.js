@@ -136,8 +136,32 @@ const toggleReviewedButton = document.getElementById("toggle-reviewed-button");
 const toggleUnchangedButton = document.getElementById("toggle-unchanged-button");
 const toggleWrapButton = document.getElementById("toggle-wrap-button");
 
-repoRootEl.textContent = reviewData.repoRoot || "";
-windowTitleEl.textContent = "Review";
+function shortPathName(path) {
+  const parts = String(path || "").split("/").filter(Boolean);
+  return parts[parts.length - 1] || "repository";
+}
+
+function workflowTitleParts() {
+  const github = reviewData.source?.github;
+  if (github) {
+    return {
+      title: `PR #${github.number} review`,
+      subtitle: `${github.owner}/${github.repo} · ${github.title}`,
+      documentTitle: `Review PR #${github.number} · ${github.owner}/${github.repo}`,
+    };
+  }
+  const repoName = shortPathName(reviewData.repoRoot);
+  return {
+    title: `${scopeLabel(defaultScope())} review`,
+    subtitle: `${repoName} · ${reviewData.repoRoot || ""}`,
+    documentTitle: `Diff review · ${repoName}`,
+  };
+}
+
+const workflowTitle = workflowTitleParts();
+repoRootEl.textContent = workflowTitle.subtitle;
+windowTitleEl.textContent = workflowTitle.title;
+document.title = workflowTitle.documentTitle;
 if (reviewData.source?.canPublishGitHubReview) {
   publishGitHubButton.classList.remove("hidden");
 }
@@ -233,13 +257,13 @@ function scopeLabel(scope) {
 function scopeHint(scope) {
   switch (scope) {
     case "git-diff":
-      return "Review working tree changes against HEAD. Hover or click line numbers in the gutter to add an inline comment.";
+      return "Review changed hunks. Click line numbers to draft comments.";
     case "last-commit":
-      return "Review the last commit against its parent. Hover or click line numbers in the gutter to add an inline comment.";
+      return "Review the last commit against its parent.";
     case "commit":
-      return "Review the selected past commit against its parent. Use the commit dropdown in the sidebar to move through history.";
+      return "Review the selected commit against its parent.";
     default:
-      return "Review the current working tree snapshot. Hover or click line numbers in the gutter to add a code review comment.";
+      return "Review the current working tree snapshot.";
   }
 }
 
@@ -1082,7 +1106,7 @@ function updateSidebarLayout() {
   sidebarEl.style.flexBasis = collapsed ? "0px" : "280px";
   sidebarEl.style.borderRightWidth = collapsed ? "0px" : "1px";
   sidebarEl.style.pointerEvents = collapsed ? "none" : "auto";
-  toggleSidebarButton.textContent = collapsed ? "Show sidebar" : "Hide sidebar";
+  toggleSidebarButton.textContent = collapsed ? "Show map" : "Sidebar";
 }
 
 function setSidebarTab(tab) {
@@ -1135,8 +1159,8 @@ function updateAiReviewButton() {
   runAiReviewButton.disabled = running;
   runAiReviewButton.textContent = running ? "PI reviewing..." : state.aiReview.status === "done" ? "Rerun PI review" : "Run PI review";
   runAiReviewButton.className = running
-    ? "cursor-default rounded-md border border-[#8957e5]/30 bg-[#8957e5]/10 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] opacity-70"
-    : "cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] hover:bg-[#8957e5]/25";
+    ? "cursor-default rounded-md border border-[#8957e5]/30 bg-[#8957e5]/10 px-2.5 py-1 text-[11px] font-medium text-[#d2a8ff] opacity-70"
+    : "cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-2.5 py-1 text-[11px] font-medium text-[#d2a8ff] hover:bg-[#8957e5]/25";
 }
 
 function updateToggleButtons() {
@@ -1246,35 +1270,22 @@ function bindInsightNav(chapterId = null) {
 
 function aiReviewConfigHtml(config) {
   if (!config) return "";
-  const phaseLabels = {
-    scout: "Scout",
-    chapter: "Agents",
-    validation: "Critic",
-    synthesis: "Synthesis",
-  };
-  const phases = ["scout", "chapter", "validation", "synthesis"]
+  const warnings = Array.isArray(config.warnings) ? config.warnings : [];
+  const phaseSummary = ["scout", "chapter", "validation", "synthesis"]
     .map((phase) => {
       const phaseConfig = config.phases?.[phase];
       if (!phaseConfig) return "";
-      const model = phaseConfig.model || "active PI model";
-      return `
-        <div class="rounded border border-review-border bg-[#0d1117]/70 px-2 py-1">
-          <div class="text-[10px] font-semibold uppercase tracking-wider text-review-muted">${phaseLabels[phase]}</div>
-          <div class="mt-0.5 truncate text-[11px] text-review-text" title="${escapeHtml(model)}">${escapeHtml(model)}</div>
-          <div class="text-[10px] text-review-muted">reasoning: ${escapeHtml(phaseConfig.reasoning || "off")}</div>
-        </div>
-      `;
+      return `${phase}: ${phaseConfig.model || "active model"} (${phaseConfig.reasoning || "off"})`;
     })
-    .join("");
-  const warnings = Array.isArray(config.warnings) ? config.warnings : [];
+    .filter(Boolean)
+    .join("\n");
   return `
     <div class="relative mt-3">
-      <div class="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-review-muted">
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-review-muted" title="${escapeHtml(phaseSummary)}">
         <span>Depth: <span class="text-review-text">${escapeHtml(humanizeToken(config.depth || "standard"))}</span></span>
         <span>${Number(config.parallelChapterReviews || 0)} parallel agent(s)</span>
         <span>cap ${Number(config.maxFindingsPerChapter || 0)} finding(s)/chapter</span>
       </div>
-      <div class="grid grid-cols-2 gap-1.5">${phases}</div>
       ${warnings.length > 0 ? `<div class="mt-2 rounded border border-[#d29922]/30 bg-[#d29922]/10 px-2 py-1.5 text-[11px] leading-4 text-[#e3b341]">${warnings.map(escapeHtml).join("<br>")}</div>` : ""}
     </div>
   `;
@@ -1295,8 +1306,7 @@ function aiReviewPanelHtml(chapterId = null) {
           </div>
           <span class="text-[11px] text-review-muted">Idle</span>
         </div>
-        <div class="relative mt-2 text-sm text-review-text">Parallel patch review is ready.</div>
-        <div class="relative mt-2 text-xs text-review-muted">Run PI review to fan out chapter subagents and stream findings back into the diff.</div>
+        <div class="relative mt-2 text-sm text-review-text">Ready for parallel patch review.</div>
         ${aiReviewConfigHtml(config)}
       </div>
     `;
@@ -1305,12 +1315,13 @@ function aiReviewPanelHtml(chapterId = null) {
   const chapters = chapterId
     ? progress.chapters.filter((chapter) => chapter.chapterId === chapterId)
     : progress.chapters;
-  const visibleChapters = chapters.slice(0, chapterId ? 1 : 8);
+  const visibleChapters = chapters.slice(0, chapterId ? 1 : 4);
   const hiddenCount = Math.max(0, chapters.length - visibleChapters.length);
   const completedCount = progress.chapters.filter((chapter) => chapter.status === "done").length;
   const failedCount = progress.chapters.filter((chapter) => chapter.status === "failed").length;
   const totalFindings = progress.chapters.reduce((total, chapter) => total + chapter.findingCount, 0);
   const progressPercent = progress.chapters.length === 0 ? 0 : Math.round(((completedCount + failedCount) / progress.chapters.length) * 100);
+  const showChapterRows = running || failedCount > 0 || chapterId != null;
 
   return `
     <div class="ai-review-card rounded-md border p-3" data-running="${running ? "true" : "false"}">
@@ -1332,8 +1343,8 @@ function aiReviewPanelHtml(chapterId = null) {
         <span>${totalFindings} finding(s)</span>
       </div>
       ${aiReviewConfigHtml(config)}
-      ${progress.scoutSummary ? `<div class="relative mt-2 text-xs leading-5 text-review-muted">${escapeHtml(progress.scoutSummary)}</div>` : ""}
-      <div class="relative mt-3 space-y-1.5">
+      ${running && progress.scoutSummary ? `<div class="relative mt-2 line-clamp-2 text-xs leading-5 text-review-muted">${escapeHtml(progress.scoutSummary)}</div>` : ""}
+      ${showChapterRows ? `<div class="relative mt-3 space-y-1.5">
         ${visibleChapters.map((chapter) => `
           <div class="rounded border border-review-border bg-review-panel px-2 py-1.5">
             <div class="flex items-center justify-between gap-2">
@@ -1347,7 +1358,7 @@ function aiReviewPanelHtml(chapterId = null) {
           </div>
         `).join("")}
         ${hiddenCount > 0 ? `<div class="px-2 text-xs text-review-muted">${hiddenCount} more chapter agent(s).</div>` : ""}
-      </div>
+      </div>` : ""}
     </div>
   `;
 }
@@ -1360,8 +1371,8 @@ function renderDefaultInsight() {
   const reviewQueueHtml = `
     <div class="rounded-md border border-review-border bg-[#010409] p-3">
       <div class="flex items-center justify-between gap-3">
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review queue</div>
-        <span class="text-[11px] text-review-muted">${findingCounts.total} AI finding(s)</span>
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Findings queue</div>
+        <span class="text-[11px] text-review-muted">${findingCounts.total} total</span>
       </div>
       <div class="mt-3 grid grid-cols-3 gap-2">
         <div class="rounded border border-[#58a6ff]/30 bg-[#58a6ff]/10 px-2 py-1.5">
@@ -1378,7 +1389,7 @@ function renderDefaultInsight() {
         </div>
       </div>
       <div class="mt-3 text-xs leading-5 text-review-muted">
-        AI findings are suggestions. Drafted items become normal local comments and are published with the rest of the review.
+        Drafted findings become normal local comments and publish with the review.
       </div>
     </div>
   `;
@@ -1406,8 +1417,11 @@ function renderDefaultInsight() {
       ${aiReviewPanelHtml()}
       ${reviewQueueHtml}
       <div>
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Approval packet</div>
-        <div class="mt-2 text-sm font-medium text-white">${escapeHtml(packet.summary)}</div>
+        <div class="flex items-center justify-between gap-3">
+          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review packet</div>
+          <button data-action="edit-packet" class="cursor-pointer text-[11px] font-medium text-[#58a6ff] hover:text-[#79c0ff]">Edit</button>
+        </div>
+        <div class="mt-2 text-sm font-medium leading-5 text-white">${escapeHtml(packet.summary)}</div>
         ${reviewData.analysis?.coverage ? `
           <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-review-muted">
             ${diffstatHtml(coverageDiffstatCounts(reviewData.analysis.coverage), { showZero: true })}
@@ -1416,17 +1430,14 @@ function renderDefaultInsight() {
         ` : ""}
         <div class="mt-2 text-[11px] text-review-muted">Suggested verdict: <span class="font-medium text-review-text">${escapeHtml(humanizeToken(packet.suggestedVerdict))}</span></div>
       </div>
-      ${packet.body ? `
-        <pre class="scrollbar-thin max-h-[360px] overflow-auto whitespace-pre-wrap rounded-md border border-review-border bg-[#010409] p-3 text-xs leading-5 text-review-text">${escapeHtml(packet.body)}</pre>
-      ` : ""}
       <div>
         <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Local draft comments</div>
         <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments yet.")}</div>
         <div class="mt-2 text-xs text-review-muted">Draft comments autosave locally until you finish the review or publish to GitHub.</div>
       </div>
-      <div class="text-xs text-review-muted">Select a chapter or finding to inspect details.</div>
     </div>
   `;
+  insightContentEl.querySelector("[data-action='edit-packet']")?.addEventListener("click", showApprovalPacketModal);
   bindCommentSummaryLinks();
 }
 
@@ -1691,25 +1702,31 @@ function renderReviewMap() {
     const active = state.activeInsight.type === "chapter" && state.activeInsight.id === chapter.id;
     const stats = diffstatHtml(chapterDiffstatCounts(chapter), { compact: true, showZero: true });
     const draftCommentCount = getDraftCommentsForChapter(chapter).length;
+    const findingCount = (chapter.findingIds || []).length;
+    const metaItems = [
+      `<span>${(chapter.fileIds || []).length} file(s)</span>`,
+      stats,
+      draftCommentCount > 0 ? `<span>${draftCommentCount} draft(s)</span>` : "",
+      findingCount > 0 ? `<span>${findingCount} finding(s)</span>` : "",
+    ].filter(Boolean).join("");
     const button = document.createElement("button");
     button.type = "button";
     if (active) button.setAttribute("aria-current", "true");
     button.className = [
-      "mb-2 block w-full rounded-md border p-3 text-left",
+      "mb-1.5 block w-full rounded-md border px-2.5 py-2 text-left",
       active ? "border-[#2ea043]/40 bg-[#238636]/10" : "border-review-border bg-[#010409] hover:bg-[#161b22]",
     ].join(" ");
     button.innerHTML = `
-      <div class="mb-2 flex items-center justify-between gap-2 text-[11px] font-medium">
-        <span class="text-review-muted">Chapter ${index + 1}</span>
-        <span class="${reviewed ? "text-[#3fb950]" : severityTextClass(chapter.risk)}">${reviewed ? "Reviewed" : `${escapeHtml(humanizeToken(chapter.risk))} risk`}</span>
+      <div class="mb-1.5 flex items-start justify-between gap-2">
+        <div class="flex min-w-0 items-center gap-2">
+          <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-review-border bg-review-panel text-[10px] font-semibold text-review-muted">${index + 1}</span>
+          <span class="min-w-0 truncate text-sm font-semibold leading-5 text-white">${escapeHtml(chapter.title)}</span>
+        </div>
+        <span class="shrink-0 text-[10px] font-semibold uppercase tracking-wider ${reviewed ? "text-[#3fb950]" : severityTextClass(chapter.risk)}">${reviewed ? "Done" : humanizeToken(chapter.risk)}</span>
       </div>
-      <div class="text-sm font-semibold leading-5 text-white">${escapeHtml(chapter.title)}</div>
-      <div class="mt-1 line-clamp-3 text-xs leading-5 text-review-muted">${escapeHtml(chapter.summary)}</div>
-      <div class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-review-muted">
-        <span>${(chapter.fileIds || []).length} file(s)</span>
-        ${stats}
-        <span>${draftCommentCount} draft comment(s)</span>
-        <span>${(chapter.findingIds || []).length} AI finding(s)</span>
+      <div class="line-clamp-2 text-xs leading-5 text-review-muted">${escapeHtml(chapter.summary)}</div>
+      <div class="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-review-muted">
+        ${metaItems}
       </div>
     `;
     button.addEventListener("click", () => {
@@ -1783,7 +1800,7 @@ function renderTree() {
   scheduleSessionSave();
   fileTreeEl.innerHTML = "";
   updateSidebarTabs();
-  sourceLabelEl.textContent = reviewData.source?.label || "Review source";
+  sourceLabelEl.textContent = workflowTitle.title;
   analysisStatusEl.textContent = state.aiReview.status === "running"
     ? state.aiReview.message
     : state.aiReview.status === "done" || state.aiReview.status === "failed"
@@ -1799,7 +1816,7 @@ function renderTree() {
     renderReviewMap();
     sidebarTitleEl.textContent = "Review map";
     setSummary(
-      `${chapters.length} chapter(s) • ${findings.length} AI finding(s) • ${comments} draft comment(s)${state.overallComment ? " • overall note" : ""}`,
+      `${chapters.length} chapters • ${findings.length} findings • ${comments} drafts${state.overallComment ? " • note" : ""}`,
       coverageDiffstatCounts(reviewData.analysis?.coverage),
     );
     updateToggleButtons();
@@ -1814,7 +1831,7 @@ function renderTree() {
     renderFindings();
     sidebarTitleEl.textContent = "Findings";
     setSummary(
-      `${findings.length} AI finding(s) • ${newFindings} new • ${comments} draft comment(s)${state.overallComment ? " • overall note" : ""}`,
+      `${findings.length} findings • ${newFindings} to review • ${comments} drafts${state.overallComment ? " • note" : ""}`,
       coverageDiffstatCounts(reviewData.analysis?.coverage),
     );
     updateToggleButtons();
@@ -1842,7 +1859,7 @@ function renderTree() {
   sidebarTitleEl.textContent = scopeLabel(state.currentScope);
   const filteredSuffix = state.fileFilter.trim() ? ` • ${visibleFiles.length} shown` : "";
   setSummary(
-    `${scopedFiles.length} file(s) • ${comments} draft comment(s)${state.overallComment ? " • overall note" : ""}${filteredSuffix}`,
+    `${scopedFiles.length} files • ${comments} drafts${state.overallComment ? " • note" : ""}${filteredSuffix}`,
     state.currentScope === "all-files" ? null : scopedDiffstatCounts(scopedFiles, state.currentScope),
   );
   updateToggleButtons();
@@ -1906,8 +1923,8 @@ function showOverallCommentModal() {
 function showApprovalPacketModal() {
   const packet = reviewData.analysis?.approvalPacket;
   showTextModal({
-    title: "Approval packet",
-    description: "Edit the review summary before finishing or publishing.",
+    title: "Review packet",
+    description: "Edit the review body before finishing or publishing.",
     initialValue: packet?.body || "",
     saveLabel: "Save packet",
     onSave: (value) => {
@@ -1928,23 +1945,41 @@ function suggestedGitHubReviewEvent() {
 
 function showPublishGitHubModal() {
   if (state.aiReview.status === "running") return;
+  syncCommentBodiesFromDOM();
+  const submitPayload = buildSubmitPayload();
+  const draftCount = submitPayload.comments.length;
+  const findingCounts = findingStatusCounts();
   const backdrop = document.createElement("div");
   backdrop.className = "review-modal-backdrop";
   backdrop.innerHTML = `
     <div class="review-modal-card">
-      <div class="mb-2 text-base font-semibold text-white">Publish to GitHub</div>
-      <div class="mb-4 text-sm text-review-muted">Choose the review verdict and body to post. Current local draft comments will be sent to GitHub; published comments are not synced back into this window yet.</div>
-      <label class="mb-2 block text-xs font-medium uppercase tracking-wider text-review-muted" for="github-review-event">Verdict</label>
+      <div class="mb-1 text-base font-semibold text-white">Publish GitHub review</div>
+      <div class="mb-4 text-sm leading-5 text-review-muted">Send the review body and ${draftCount} local draft comment(s) to GitHub. Published comments are not synced back into this window yet.</div>
+      <div class="mb-4 grid grid-cols-3 gap-2">
+        <div class="rounded-md border border-review-border bg-[#010409] px-3 py-2">
+          <div class="text-sm font-semibold text-white">${draftCount}</div>
+          <div class="text-[10px] uppercase tracking-wider text-review-muted">Draft comments</div>
+        </div>
+        <div class="rounded-md border border-review-border bg-[#010409] px-3 py-2">
+          <div class="text-sm font-semibold text-[#58a6ff]">${findingCounts.open}</div>
+          <div class="text-[10px] uppercase tracking-wider text-review-muted">Findings open</div>
+        </div>
+        <div class="rounded-md border border-review-border bg-[#010409] px-3 py-2">
+          <div class="text-sm font-semibold text-[#3fb950]">${findingCounts.drafted}</div>
+          <div class="text-[10px] uppercase tracking-wider text-review-muted">Findings drafted</div>
+        </div>
+      </div>
+      <label class="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-review-muted" for="github-review-event">Verdict</label>
       <select id="github-review-event" class="mb-4 w-full rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
         <option value="COMMENT">Comment</option>
         <option value="REQUEST_CHANGES">Request changes</option>
         <option value="APPROVE">Approve</option>
       </select>
-      <label class="mb-2 block text-xs font-medium uppercase tracking-wider text-review-muted" for="github-review-body">Review body</label>
-      <textarea id="github-review-body" class="scrollbar-thin min-h-48 w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">${escapeHtml(reviewData.analysis?.approvalPacket?.body || "")}</textarea>
+      <label class="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-review-muted" for="github-review-body">Review body</label>
+      <textarea id="github-review-body" class="scrollbar-thin min-h-40 w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm leading-6 text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">${escapeHtml(reviewData.analysis?.approvalPacket?.body || "")}</textarea>
       <div class="mt-4 flex justify-end gap-2">
-        <button id="github-publish-cancel" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-4 py-2 text-sm font-medium text-review-text hover:bg-[#21262d]">Cancel</button>
-        <button id="github-publish-submit" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb] px-4 py-2 text-sm font-medium text-white hover:bg-[#388bfd]">Publish</button>
+        <button id="github-publish-cancel" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-sm font-medium text-review-text hover:bg-[#21262d]">Cancel</button>
+        <button id="github-publish-submit" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#388bfd]">Publish review</button>
       </div>
     </div>
   `;
