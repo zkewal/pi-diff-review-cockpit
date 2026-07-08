@@ -16,3 +16,16 @@ test("package metadata is wired for local development", () => {
   assert.equal(typeof packageJson.scripts?.check, "string");
   assert.equal(typeof packageJson.scripts?.test, "string");
 });
+
+test("right-panel UI avoids duplicated review text and dead progress affordances", () => {
+  const appJs = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+
+  assert.equal(appJs.includes("Drafted on diff"), false);
+  assert.equal(appJs.includes("Suggested comment</div>"), false);
+  assert.equal(appJs.includes("Autosaves locally. Submit review includes non-empty drafts."), false);
+  assert.equal(appJs.includes("Draft comments autosave locally"), false);
+  assert.equal(appJs.includes("Rerun AI review"), false);
+  assert.equal(appJs.includes("h-1.5 overflow-hidden rounded-full"), false);
+  assert.equal(appJs.includes("No suggested comment."), false);
+  assert.equal(appJs.includes("AI Suggested Draft"), true);
+});

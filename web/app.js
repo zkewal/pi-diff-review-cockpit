@@ -160,6 +160,15 @@ repoRootEl.textContent = workflowTitle.subtitle;
 windowTitleEl.textContent = workflowTitle.title;
 document.title = workflowTitle.documentTitle;
 
+function workflowCrumbLabel() {
+  const github = reviewData.source?.github;
+  return github ? `PR #${github.number}` : workflowTitle.title;
+}
+
+function setInsightBreadcrumb(parts) {
+  insightPanelTitleEl.textContent = [workflowCrumbLabel(), ...parts].filter(Boolean).join(" > ");
+}
+
 let monacoApi = null;
 let diffEditor = null;
 let originalModel = null;
@@ -571,14 +580,14 @@ function commentSummaryHtml(comments, emptyText) {
     return `<div class="text-sm text-review-muted">${escapeHtml(emptyText)}</div>`;
   }
   return `
-    <div class="space-y-2">
+    <div class="space-y-1">
       ${visibleComments.map((comment) => {
         const file = getFileById(comment.fileId);
         const body = String(comment.body || "").trim();
+        const preview = body ? `"${body.replace(/\s+/g, " ").slice(0, 80)}${body.length > 80 ? "..." : ""}"` : "Empty draft";
         return `
-          <button data-comment-jump-id="${escapeHtml(comment.id)}" class="block w-full cursor-pointer rounded-md border border-review-border bg-[#010409] p-2 text-left hover:bg-[#161b22]">
-            <div class="truncate text-[11px] font-medium text-review-muted">${escapeHtml(getScopeDisplayPath(file, comment.scope))} • ${escapeHtml(commentLocationLabel(comment))}</div>
-            <div class="mt-1 line-clamp-2 text-xs leading-5 text-review-text">${escapeHtml(body || "Empty draft comment")}</div>
+          <button data-comment-jump-id="${escapeHtml(comment.id)}" class="block w-full cursor-pointer rounded px-2 py-1.5 text-left text-xs hover:bg-[#161b22]">
+            <span class="block truncate text-review-text">${escapeHtml(getScopeDisplayPath(file, comment.scope))} • ${escapeHtml(commentLocationLabel(comment))} • ${escapeHtml(preview)}</span>
           </button>
         `;
       }).join("")}
@@ -1227,10 +1236,11 @@ function updateAiReviewButton() {
   const running = state.aiReview.status === "running";
   document.querySelectorAll("[data-action='run-ai-review']").forEach((button) => {
     button.disabled = running;
-    button.textContent = running ? "Reviewing..." : state.aiReview.status === "done" ? "Rerun AI review" : "Run AI review";
+    button.textContent = running ? "..." : state.aiReview.status === "done" ? "Refresh" : "Run";
+    button.title = state.aiReview.status === "done" ? "Refresh AI review" : "Run AI review";
     button.className = running
-      ? "cursor-default rounded-md border border-[#8957e5]/25 bg-[#8957e5]/10 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] opacity-70"
-      : "cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] hover:bg-[#8957e5]/20";
+      ? "shrink-0 cursor-default rounded px-2 py-1 text-[11px] font-medium text-review-muted opacity-70"
+      : "shrink-0 cursor-pointer rounded px-2 py-1 text-[11px] font-medium text-review-muted hover:bg-[#21262d] hover:text-review-text";
   });
 }
 
@@ -1356,21 +1366,16 @@ function aiReviewConfigHtml(config) {
 function aiReviewPanelHtml(chapterId = null) {
   const progress = state.aiReview.progress;
   const config = progress?.config || state.aiReview.config || reviewData.aiReviewConfig || null;
-  const title = chapterId ? "AI review for this area" : "AI review";
   const running = progress?.status === "running";
+  const buttonLabel = running ? "..." : progress?.status === "done" ? "Refresh" : "Run";
   if (!progress) {
     return `
-      <div class="ai-review-card rounded-md border border-[#8957e5]/20 p-3" data-running="false">
-        <div class="relative flex items-center justify-between gap-2">
-          <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-review-muted">
-            <span class="rounded bg-[#8957e5]/15 px-1.5 py-0.5 text-[#d2a8ff]">AI</span>
-            <span>${title}</span>
-          </div>
-          <span class="text-[11px] text-review-muted">Idle</span>
+      <div class="rounded-md border border-[#30363d]/70 bg-[#010409] px-2.5 py-2">
+        <div class="flex items-center justify-between gap-2">
+          <div class="min-w-0 truncate text-xs text-review-muted"><span class="font-medium text-[#d2a8ff]">AI</span> idle · ready to scan changed hunks</div>
+          <button data-action="run-ai-review" title="Run AI review" class="shrink-0 cursor-pointer rounded px-2 py-1 text-[11px] font-medium text-[#d2a8ff] hover:bg-[#8957e5]/15">${buttonLabel}</button>
         </div>
-        <div class="relative mt-2 text-sm text-review-text">Ready to review changed hunks and suggest findings.</div>
         ${aiReviewConfigHtml(config)}
-        <button data-action="run-ai-review" class="mt-3 cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] hover:bg-[#8957e5]/20">Run AI review</button>
       </div>
     `;
   }
@@ -1378,57 +1383,33 @@ function aiReviewPanelHtml(chapterId = null) {
   const chapters = chapterId
     ? progress.chapters.filter((chapter) => chapter.chapterId === chapterId)
     : progress.chapters;
-  const visibleChapters = chapters.slice(0, chapterId ? 1 : 4);
-  const hiddenCount = Math.max(0, chapters.length - visibleChapters.length);
   const completedCount = progress.chapters.filter((chapter) => chapter.status === "done").length;
   const failedCount = progress.chapters.filter((chapter) => chapter.status === "failed").length;
   const totalFindings = progress.chapters.reduce((total, chapter) => total + chapter.findingCount, 0);
-  const progressPercent = progress.chapters.length === 0 ? 0 : Math.round(((completedCount + failedCount) / progress.chapters.length) * 100);
-  const showChapterRows = running || failedCount > 0 || chapterId != null;
+  const currentChapter = chapterId ? chapters[0] : null;
+  const statusText = currentChapter
+    ? `${humanizeToken(currentChapter.status)} · ${currentChapter.findingCount} finding(s)`
+    : `${humanizeToken(progress.status)} · ${completedCount}/${progress.chapters.length} area(s) · ${totalFindings} finding(s)`;
 
   return `
-    <div class="ai-review-card rounded-md border p-3" data-running="${running ? "true" : "false"}">
-      <div class="relative flex items-center justify-between gap-2">
-        <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-review-muted">
-          <span class="rounded bg-[#8957e5]/15 px-1.5 py-0.5 text-[#d2a8ff]">AI</span>
-          <span>${title}</span>
+    <div class="rounded-md border border-[#30363d]/70 bg-[#010409] px-2.5 py-2" data-running="${running ? "true" : "false"}">
+      <div class="flex items-center justify-between gap-2">
+        <div class="flex min-w-0 items-center gap-2 text-xs text-review-muted">
+          <span class="font-medium text-[#d2a8ff]">AI</span>
           ${running ? `<span class="flex items-center gap-1" aria-hidden="true"><span class="ai-pulse-dot"></span><span class="ai-pulse-dot"></span><span class="ai-pulse-dot"></span></span>` : ""}
+          <span class="min-w-0 truncate ${aiReviewStepClass(progress.status)}">${escapeHtml(statusText)}</span>
         </div>
-        <span class="text-[11px] ${aiReviewStepClass(progress.status)}">${escapeHtml(humanizeToken(progress.status))}</span>
+        <button data-action="run-ai-review" title="${progress.status === "done" ? "Refresh AI review" : "Run AI review"}" class="shrink-0 cursor-pointer rounded px-2 py-1 text-[11px] font-medium text-review-muted hover:bg-[#21262d] hover:text-review-text">${buttonLabel}</button>
       </div>
-      <div class="relative mt-2 text-sm leading-5 text-review-text">${escapeHtml(progress.message || state.aiReview.message)}</div>
-      <div class="relative mt-3 h-1.5 overflow-hidden rounded-full bg-[#161b22]">
-        <div class="h-full rounded-full bg-[#58a6ff]" style="width: ${progressPercent}%"></div>
-      </div>
-      <div class="relative mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-review-muted">
-        <span>${completedCount}/${progress.chapters.length} area(s)</span>
-        ${failedCount > 0 ? `<span class="text-[#f85149]">${failedCount} failed</span>` : ""}
-        <span>${totalFindings} finding(s)</span>
-      </div>
+      ${failedCount > 0 ? `<div class="mt-1 text-[11px] text-[#f85149]">${failedCount} area(s) failed</div>` : ""}
       ${aiReviewConfigHtml(config)}
-      ${running && progress.scoutSummary ? `<div class="relative mt-2 line-clamp-2 text-xs leading-5 text-review-muted">${escapeHtml(progress.scoutSummary)}</div>` : ""}
-      ${showChapterRows ? `<div class="relative mt-3 space-y-1.5">
-        ${visibleChapters.map((chapter) => `
-          <div class="rounded border border-review-border bg-review-panel px-2 py-1.5">
-            <div class="flex items-center justify-between gap-2">
-              <span class="min-w-0 truncate text-xs font-medium text-review-text">${escapeHtml(chapter.title)}</span>
-              <span class="shrink-0 text-[11px] ${aiReviewStepClass(chapter.status)}">${escapeHtml(humanizeToken(chapter.status))}</span>
-            </div>
-            <div class="mt-0.5 flex items-center justify-between gap-2 text-[11px] text-review-muted">
-              <span class="min-w-0 truncate">${escapeHtml(chapter.message)}</span>
-              <span class="shrink-0">${chapter.findingCount} finding(s)</span>
-            </div>
-          </div>
-        `).join("")}
-        ${hiddenCount > 0 ? `<div class="px-2 text-xs text-review-muted">${hiddenCount} more review area(s).</div>` : ""}
-      </div>` : ""}
-      <button data-action="run-ai-review" class="relative mt-3 cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] hover:bg-[#8957e5]/20">${state.aiReview.status === "done" ? "Rerun AI review" : "Run AI review"}</button>
+      ${running && progress.scoutSummary ? `<div class="mt-1 line-clamp-1 text-[11px] text-review-muted">${escapeHtml(progress.scoutSummary)}</div>` : ""}
     </div>
   `;
 }
 
 function renderDefaultInsight() {
-  insightPanelTitleEl.textContent = "Review summary";
+  setInsightBreadcrumb(["Summary"]);
   const packet = reviewData.analysis?.approvalPacket;
   const draftComments = getDraftComments();
   const findingCounts = findingStatusCounts();
@@ -1454,9 +1435,8 @@ function renderDefaultInsight() {
       </div>
       ${aiReviewPanelHtml()}
       ${draftComments.length > 0 ? `<div>
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Local draft comments</div>
+        <div class="text-xs font-medium text-review-muted">Drafts</div>
         <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments yet.")}</div>
-        <div class="mt-2 text-xs text-review-muted">Draft comments autosave locally and are included when you submit the review.</div>
       </div>` : ""}
     </div>
   `;
@@ -1475,7 +1455,7 @@ function getChapterDisplayFiles(chapter) {
 }
 
 function renderInsightForChapter(chapter) {
-  insightPanelTitleEl.textContent = "Review area";
+  setInsightBreadcrumb([chapter.title]);
   const reviewed = state.reviewedChapters[chapter.id] === true;
   const files = getChapterDisplayFiles(chapter);
   const visibleFiles = files.slice(0, 60);
@@ -1492,14 +1472,8 @@ function renderInsightForChapter(chapter) {
 
   insightContentEl.innerHTML = `
     <div class="space-y-4">
-      ${insightNavHtml([{ id: "overview", label: "Review summary" }, { label: chapter.title }])}
       ${aiReviewPanelHtml(chapter.id)}
       <div>
-        <div class="mb-2 flex items-center gap-2">
-          <span class="${chapterPriorityBadgeClass(chapter.priority)}">${escapeHtml(chapterPriorityLabel(chapter.priority))}</span>
-          <span class="${reviewStatusBadgeClass(reviewed)}">${reviewed ? "Reviewed" : "Not reviewed"}</span>
-          ${attentionTagsHtml(chapter)}
-        </div>
         <div class="text-base font-semibold leading-6 text-white">${escapeHtml(chapter.title)}</div>
         <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(chapter.summary)}</div>
         <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-review-muted">
@@ -1539,17 +1513,17 @@ function renderInsightForChapter(chapter) {
           ${hiddenFileCount > 0 ? `<div class="px-2 py-1 text-xs text-review-muted">${hiddenFileCount} more file(s) hidden. Use the Files tab to browse all files.</div>` : ""}
         </div>
       </div>
-      <div>
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Local draft comments</div>
+      ${draftComments.length > 0 ? `<div>
+        <div class="text-xs font-medium text-review-muted">Drafts</div>
         <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments in this area.")}</div>
-      </div>
-      <div>
+      </div>` : ""}
+      ${findings.length > 0 ? `<div>
         <div class="flex items-center justify-between gap-3">
           <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Findings</div>
           <div class="text-[11px] text-review-muted">${chapterFindingCounts.open} open • ${chapterFindingCounts.drafted} drafted • ${chapterFindingCounts.dismissed} closed</div>
         </div>
         <div class="mt-2 space-y-2">
-          ${findings.length === 0 ? `<div class="text-sm text-review-muted">No AI findings linked to this area.</div>` : findings.map((finding) => `
+          ${findings.map((finding) => `
             <button data-finding-id="${escapeHtml(finding.id)}" class="block w-full rounded-md border border-review-border bg-[#010409] p-2 text-left hover:bg-[#161b22]">
               <div class="flex items-center justify-between gap-2 text-[11px]">
                 <span class="${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
@@ -1559,7 +1533,7 @@ function renderInsightForChapter(chapter) {
             </button>
           `).join("")}
         </div>
-      </div>
+      </div>` : ""}
     </div>
   `;
 
@@ -1620,19 +1594,15 @@ function openFirstFindingLocation(finding) {
 }
 
 function renderInsightForFinding(finding) {
-  insightPanelTitleEl.textContent = "Finding detail";
+  const chapter = chapterForFinding(finding);
+  setInsightBreadcrumb([...(chapter ? [chapter.title] : []), "Finding"]);
   const status = state.findingStatuses[finding.id] || "new";
   const canCreateDraft = firstDraftableFindingLocation(finding) != null;
-  const chapter = chapterForFinding(finding);
-  const isDrafted = status === "accepted-comment";
+  const draftComment = draftCommentForFinding(finding);
+  const isDrafted = status === "accepted-comment" && draftComment != null;
 
   insightContentEl.innerHTML = `
     <div class="space-y-4">
-      ${insightNavHtml([
-        { id: "overview", label: "Review summary" },
-        ...(chapter ? [{ id: "chapter", label: chapter.title }] : []),
-        { label: "Finding" },
-      ])}
       <div class="rounded-md bg-[#010409] p-3">
         <div class="mb-2 flex flex-wrap items-center gap-2">
           <span class="rounded bg-[#30363d]/50 px-2 py-0.5 text-[11px] font-medium text-review-muted">${escapeHtml(humanizeToken(finding.kind))}</span>
@@ -1660,16 +1630,15 @@ function renderInsightForFinding(finding) {
           `).join("")}
         </div>
       </div>
-      <div>
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Suggested comment</div>
-        <div class="mt-2 whitespace-pre-wrap rounded-md border border-review-border bg-[#010409] p-3 text-xs leading-5 text-review-text">${escapeHtml(finding.suggestedComment || "No suggested comment.")}</div>
-        ${isDrafted ? `<div class="mt-2 text-xs text-[#3fb950]">A draft comment was created in the diff and will be included when you submit the review.</div>` : ""}
-      </div>
       <div class="flex flex-wrap gap-2">
         ${isDrafted
-          ? `<span class="rounded-md border border-[#2ea043]/40 bg-[#238636]/10 px-3 py-1.5 text-xs font-medium text-[#3fb950]">Drafted on diff</span>`
+          ? `
+            <span class="rounded-md bg-[#238636]/10 px-3 py-1.5 text-xs font-medium text-[#3fb950]">Draft ready on diff</span>
+            <button data-finding-action="open-draft" class="${insightActionButtonClass(false)}">Open inline</button>
+            <button data-finding-action="remove-draft" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Remove draft</button>
+          `
           : canCreateDraft
-            ? `<button data-finding-action="create-draft" class="${insightActionButtonClass(false)}">Draft on diff</button>`
+            ? `<button data-finding-action="create-draft" class="${insightActionButtonClass(false)}">Apply suggestion to diff</button>`
             : `<span class="rounded-md border border-review-border bg-[#010409] px-3 py-1.5 text-xs text-review-muted">No commentable diff line</span>`}
         <button data-finding-status="${status === "dismissed" ? "new" : "dismissed"}" class="${insightActionButtonClass(status === "dismissed")}">${status === "dismissed" ? "Reopen" : "Dismiss"}</button>
       </div>
@@ -1685,6 +1654,11 @@ function renderInsightForFinding(finding) {
     });
   });
   insightContentEl.querySelector("[data-finding-action='open-location']")?.addEventListener("click", () => openFirstFindingLocation(finding));
+  insightContentEl.querySelector("[data-finding-action='open-draft']")?.addEventListener("click", () => {
+    const draft = draftCommentForFinding(finding);
+    if (draft) openDraftCommentFromSummary(draft.id);
+  });
+  insightContentEl.querySelector("[data-finding-action='remove-draft']")?.addEventListener("click", () => removeDraftCommentForFinding(finding));
   insightContentEl.querySelectorAll("[data-finding-status]").forEach((button) => {
     button.addEventListener("click", () => setFindingStatus(finding, button.getAttribute("data-finding-status")));
   });
@@ -2068,20 +2042,22 @@ function clearViewZones() {
 function renderCommentDOM(comment, onDelete) {
   const container = document.createElement("div");
   container.className = "view-zone-container";
-  const title = comment.side === "file"
+  const locationTitle = comment.side === "file"
     ? `File comment • ${scopeLabel(comment.scope)}`
     : `${comment.side === "original" ? "Original" : "Modified"} line ${comment.startLine} • ${scopeLabel(comment.scope)}`;
+  const sourceTitle = String(comment.id || "").startsWith("ai:")
+    ? "AI Suggested Draft"
+    : "Your Draft";
 
   container.innerHTML = `
     <div class="mb-2 flex items-center justify-between gap-3">
-      <div class="text-xs font-semibold text-review-text">${escapeHtml(title)}</div>
-      <span class="text-[11px] font-medium text-[#3fb950]">Autosaved draft</span>
+      <div class="min-w-0">
+        <div class="text-xs font-semibold text-review-text">${escapeHtml(sourceTitle)}</div>
+        <div class="mt-0.5 truncate text-[11px] text-review-muted">${escapeHtml(locationTitle)}</div>
+      </div>
+      <button data-action="delete" class="shrink-0 cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Delete</button>
     </div>
     <textarea data-comment-id="${escapeHtml(comment.id)}" class="scrollbar-thin min-h-[76px] w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="Leave a comment"></textarea>
-    <div class="mt-2 flex items-center justify-between gap-3">
-      <div class="text-xs text-review-muted">Autosaves locally. Submit review includes non-empty drafts.</div>
-      <button data-action="delete" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Delete</button>
-    </div>
   `;
   const textarea = container.querySelector("textarea");
   const saveDraft = () => {
@@ -2194,6 +2170,19 @@ function createFirstDraftCommentFromFinding(finding) {
   renderAll({ restoreFileScroll: true });
 }
 
+function draftCommentForFinding(finding) {
+  return state.comments.find((comment) => String(comment.id || "").startsWith(`ai:${finding.id}:`)) || null;
+}
+
+function removeDraftCommentForFinding(finding) {
+  const draft = draftCommentForFinding(finding);
+  if (!draft) return;
+  state.comments = state.comments.filter((comment) => comment.id !== draft.id);
+  state.findingStatuses[finding.id] = "new";
+  state.activeInsight = { type: "finding", id: finding.id };
+  updateCommentsUI();
+}
+
 function renderAiFindingZoneDOM(finding, location) {
   const container = document.createElement("div");
   container.className = "view-zone-container ai-finding-zone";
@@ -2207,13 +2196,10 @@ function renderAiFindingZoneDOM(finding, location) {
     </div>
     <div class="text-sm font-medium leading-5 text-white">${escapeHtml(finding.title)}</div>
     <div class="mt-1 line-clamp-2 text-xs leading-5 text-review-muted">${escapeHtml(finding.explanation)}</div>
-    <div class="mt-2 flex items-center justify-between gap-3">
-      <div class="min-w-0 truncate text-xs text-review-muted">${escapeHtml(finding.suggestedComment || "No suggested comment.")}</div>
-      <div class="flex shrink-0 items-center gap-2">
-        <button data-action="open" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:bg-[#21262d]">Open</button>
-        <button data-action="dismiss" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Dismiss</button>
-        <button data-action="accept" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Draft on diff</button>
-      </div>
+    <div class="mt-2 flex items-center justify-end gap-2">
+      <button data-action="open" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:bg-[#21262d]">Open details</button>
+      <button data-action="dismiss" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Dismiss</button>
+      <button data-action="accept" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Apply suggestion</button>
     </div>
   `;
   container.querySelector("[data-action='open']").addEventListener("click", () => {
@@ -2262,7 +2248,7 @@ function syncViewZones() {
       const lineCount = typeof item.body === "string" && item.body.length > 0 ? item.body.split("\n").length : 1;
       const id = accessor.addZone({
         afterLineNumber: item.startLine,
-        heightInPx: Math.max(150, lineCount * 22 + 86),
+        heightInPx: Math.max(132, lineCount * 22 + 68),
         domNode,
       });
       activeViewZones.push({ id, editor });
@@ -2275,7 +2261,7 @@ function syncViewZones() {
     editor.changeViewZones((accessor) => {
       const id = accessor.addZone({
         afterLineNumber: location.line,
-        heightInPx: 142,
+        heightInPx: 118,
         domNode,
       });
       activeViewZones.push({ id, editor });
@@ -2910,7 +2896,7 @@ function getKeyboardActions() {
       keywords: "command palette",
       match: key("k", { metaOrCtrl: true }),
     }),
-    shortcutAction("run-ai-review", state.aiReview.status === "done" ? "Rerun AI review" : "Run AI review", "", runAiReviewFromUi, {
+    shortcutAction("run-ai-review", state.aiReview.status === "done" ? "Refresh AI review" : "Run AI review", "", runAiReviewFromUi, {
       keywords: "ai review findings",
       enabled: () => state.aiReview.status !== "running",
     }),

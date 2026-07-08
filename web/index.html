@@ -78,6 +78,7 @@
     border-top: 1px solid #30363d;
     border-bottom: 1px solid #30363d;
     background: #161b22;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
     overflow: visible;
   }
 
@@ -187,43 +188,9 @@
     background: #f85149;
   }
 
-  @keyframes ai-panel-sheen {
-    0% { transform: translateX(-120%); opacity: 0; }
-    30% { opacity: 0.65; }
-    100% { transform: translateX(220%); opacity: 0; }
-  }
-
   @keyframes ai-dot-pulse {
     0%, 100% { transform: scale(0.72); opacity: 0.45; }
     50% { transform: scale(1); opacity: 1; }
-  }
-
-  @keyframes ai-border-breathe {
-    0%, 100% { box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.08), 0 0 0 rgba(88, 166, 255, 0); }
-    50% { box-shadow: inset 0 0 0 1px rgba(88, 166, 255, 0.28), 0 0 24px rgba(88, 166, 255, 0.08); }
-  }
-
-  .ai-review-card {
-    position: relative;
-    overflow: hidden;
-    border-color: rgba(88, 166, 255, 0.22);
-    background:
-      linear-gradient(180deg, rgba(88, 166, 255, 0.08), rgba(13, 17, 23, 0) 48%),
-      #010409;
-  }
-
-  .ai-review-card[data-running="true"] {
-    animation: ai-border-breathe 2.4s ease-in-out infinite;
-  }
-
-  .ai-review-card[data-running="true"]::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    width: 40%;
-    background: linear-gradient(90deg, transparent, rgba(210, 168, 255, 0.08), transparent);
-    animation: ai-panel-sheen 2.8s ease-in-out infinite;
-    pointer-events: none;
   }
 
   .ai-pulse-dot {
@@ -243,13 +210,13 @@
   }
 
   .ai-finding-zone {
-    border-color: rgba(88, 166, 255, 0.28);
-    background: linear-gradient(180deg, rgba(88, 166, 255, 0.08), rgba(22, 27, 34, 0.96));
+    border-left: 2px solid rgba(210, 168, 255, 0.72);
+    border-top-color: rgba(137, 87, 229, 0.26);
+    border-bottom-color: rgba(137, 87, 229, 0.22);
+    background: linear-gradient(180deg, rgba(137, 87, 229, 0.08), rgba(22, 27, 34, 0.96));
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .ai-review-card[data-running="true"],
-    .ai-review-card[data-running="true"]::before,
     .ai-pulse-dot {
       animation: none;
     }
@@ -314,10 +281,10 @@
     <div id="editor-container" class="min-h-0 min-w-0 flex-1"></div>
     </main>
     <aside id="insight-panel" tabindex="-1" class="flex min-h-0 w-[340px] shrink-0 flex-col border-l border-review-border bg-[#0d1117]">
-      <div class="border-b border-review-border px-4 py-3">
-        <div id="insight-panel-title" class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review summary</div>
-        <div id="source-label" class="mt-1 truncate text-sm font-medium text-white"></div>
-        <div id="analysis-status" class="mt-1 text-[11px] text-review-muted"></div>
+      <div class="border-b border-review-border px-4 py-2">
+        <div id="insight-panel-title" class="truncate text-xs font-medium text-review-muted">Review summary</div>
+        <div id="source-label" class="hidden"></div>
+        <div id="analysis-status" class="hidden"></div>
       </div>
       <div id="insight-content" class="scrollbar-thin min-h-0 flex-1 overflow-auto px-4 py-3"></div>
     </aside>
