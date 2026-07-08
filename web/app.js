@@ -90,6 +90,7 @@ const state = {
   activeDiffSide: "modified",
   activeDiffLine: null,
   pendingHunkFocus: null,
+  pendingFindingFocus: null,
   aiReview: {
     requestId: null,
     status: "idle",
@@ -1073,6 +1074,48 @@ function applyPendingHunkFocus() {
   if (target) focusDiffLine(target.side, target.start, target.end);
 }
 
+function pulseInlineFinding(findingId, location) {
+  if (!findingId || !location) return;
+  document.querySelectorAll(".ai-finding-zone").forEach((node) => {
+    if (node.dataset.aiFindingId !== findingId) return;
+    if (node.dataset.aiFindingSide !== location.side) return;
+    if (Number(node.dataset.aiFindingLine) !== Number(location.line)) return;
+    node.classList.remove("is-pulsing");
+    void node.offsetWidth;
+    node.classList.add("is-pulsing");
+    setTimeout(() => node.classList.remove("is-pulsing"), 1300);
+  });
+}
+
+function queueFindingFocus(location, findingId = null) {
+  state.pendingHunkFocus = null;
+  if (!location || location.side === "file" || location.line == null) {
+    state.pendingFindingFocus = null;
+    return;
+  }
+  state.pendingFindingFocus = {
+    findingId,
+    fileId: location.fileId,
+    scope: "git-diff",
+    side: location.side,
+    line: location.line,
+    endLine: location.line,
+  };
+}
+
+function applyPendingFindingFocus() {
+  const pending = state.pendingFindingFocus;
+  if (!pending) return false;
+  if (pending.fileId !== state.activeFileId || pending.scope !== state.currentScope) return false;
+  if (!isActiveFileReady()) return false;
+
+  const focused = focusDiffLine(pending.side, pending.line, pending.endLine);
+  if (!focused) return false;
+  state.pendingFindingFocus = null;
+  pulseInlineFinding(pending.findingId, pending);
+  return true;
+}
+
 function renderTreeNode(node, depth) {
   const children = [...node.children.values()].sort((a, b) => {
     if (a.kind !== b.kind) return a.kind === "dir" ? -1 : 1;
@@ -1291,12 +1334,6 @@ function openFileFromAnalysis(fileId) {
 
 function firstExistingChapterFileId(chapter) {
   return getChapterDisplayFiles(chapter)[0]?.id ?? null;
-}
-
-function firstExistingFindingFileId(finding) {
-  return (finding.locations || [])
-    .map((location) => location.fileId)
-    .find((fileId) => getFileById(fileId) != null) || null;
 }
 
 function firstDraftableFindingLocation(finding) {
@@ -1553,8 +1590,8 @@ function renderInsightForChapter(chapter) {
       const finding = getReviewFinding(button.getAttribute("data-finding-id"));
       if (!finding) return;
       state.activeInsight = { type: "finding", id: finding.id };
-      const fileId = firstExistingFindingFileId(finding);
-      if (fileId) openFileFromAnalysis(fileId);
+      const location = firstExistingFindingLocation(finding);
+      if (location) openFirstFindingLocation(finding);
       else renderTree();
     });
   });
@@ -1571,7 +1608,7 @@ function chapterForFinding(finding) {
   return getReviewChapters().find((chapter) => (chapter.findingIds || []).includes(finding.id)) || null;
 }
 
-function openFindingLocation(location) {
+function openFindingLocation(location, options = {}) {
   const file = getFileById(location.fileId);
   if (!file) return;
   saveCurrentScrollPosition();
@@ -1581,16 +1618,19 @@ function openFindingLocation(location) {
     state.activeDiffSide = location.side;
     state.activeDiffLine = location.line ?? null;
   }
-  renderAll({ restoreFileScroll: true });
+  queueFindingFocus(location, options.findingId || null);
+  renderAll({ restoreFileScroll: false });
   ensureFileLoaded(file.id, state.currentScope);
-  if (location.side !== "file" && location.line != null) {
-    setTimeout(() => focusDiffLine(location.side, location.line, location.line), 50);
-  }
+  requestAnimationFrame(applyPendingFindingFocus);
+}
+
+function firstExistingFindingLocation(finding) {
+  return (finding.locations || []).find((item) => getFileById(item.fileId)) || null;
 }
 
 function openFirstFindingLocation(finding) {
-  const location = (finding.locations || []).find((item) => getFileById(item.fileId));
-  if (location) openFindingLocation(location);
+  const location = firstExistingFindingLocation(finding);
+  if (location) openFindingLocation(location, { findingId: finding.id });
 }
 
 function renderInsightForFinding(finding) {
@@ -1650,7 +1690,7 @@ function renderInsightForFinding(finding) {
     button.addEventListener("click", () => {
       const index = Number(button.getAttribute("data-location-index"));
       const location = (finding.locations || [])[index];
-      if (location) openFindingLocation(location);
+      if (location) openFindingLocation(location, { findingId: finding.id });
     });
   });
   insightContentEl.querySelector("[data-finding-action='open-location']")?.addEventListener("click", () => openFirstFindingLocation(finding));
@@ -1774,8 +1814,8 @@ function renderFindings() {
     `;
     button.addEventListener("click", () => {
       state.activeInsight = { type: "finding", id: finding.id };
-      const fileId = firstExistingFindingFileId(finding);
-      if (fileId) openFileFromAnalysis(fileId);
+      const location = firstExistingFindingLocation(finding);
+      if (location) openFirstFindingLocation(finding);
       else renderTree();
     });
     fileTreeEl.appendChild(button);
@@ -2186,6 +2226,9 @@ function removeDraftCommentForFinding(finding) {
 function renderAiFindingZoneDOM(finding, location) {
   const container = document.createElement("div");
   container.className = "view-zone-container ai-finding-zone";
+  container.setAttribute("data-ai-finding-id", finding.id);
+  container.setAttribute("data-ai-finding-side", location.side);
+  container.setAttribute("data-ai-finding-line", String(location.line));
   container.innerHTML = `
     <div class="mb-2 flex items-center justify-between gap-3">
       <div class="flex min-w-0 items-center gap-2 text-xs font-semibold text-review-text">
@@ -2383,11 +2426,13 @@ function mountFile(options = {}) {
     if (options.restoreFileScroll) restoreFileScrollPosition();
     if (options.preserveScroll) restoreScrollState(scrollState);
     applyPendingHunkFocus();
+    applyPendingFindingFocus();
     setTimeout(() => {
       layoutEditor();
       if (options.restoreFileScroll) restoreFileScrollPosition();
       if (options.preserveScroll) restoreScrollState(scrollState);
       applyPendingHunkFocus();
+      applyPendingFindingFocus();
     }, 50);
   });
 }

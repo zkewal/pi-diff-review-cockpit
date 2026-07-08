@@ -29,3 +29,14 @@ test("right-panel UI avoids duplicated review text and dead progress affordances
   assert.equal(appJs.includes("No suggested comment."), false);
   assert.equal(appJs.includes("AI Suggested Draft"), true);
 });
+
+test("finding cards focus and pulse the selected inline finding", () => {
+  const appJs = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
+
+  assert.equal(appJs.includes("pendingFindingFocus"), true);
+  assert.equal(appJs.includes("openFirstFindingLocation(finding"), true);
+  assert.equal(appJs.includes("pulseInlineFinding"), true);
+  assert.equal(appJs.includes("data-ai-finding-id"), true);
+  assert.equal(html.includes("ai-finding-pulse"), true);
+});

@@ -193,6 +193,22 @@
     50% { transform: scale(1); opacity: 1; }
   }
 
+  @keyframes ai-finding-pulse {
+    0% {
+      border-left-color: rgba(210, 168, 255, 0.95);
+      box-shadow: 0 0 0 0 rgba(210, 168, 255, 0.34), 0 4px 12px rgba(0, 0, 0, 0.3);
+      background: linear-gradient(180deg, rgba(137, 87, 229, 0.18), rgba(22, 27, 34, 0.98));
+    }
+    70% {
+      box-shadow: 0 0 0 8px rgba(210, 168, 255, 0), 0 4px 12px rgba(0, 0, 0, 0.3);
+    }
+    100% {
+      border-left-color: rgba(210, 168, 255, 0.72);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      background: linear-gradient(180deg, rgba(137, 87, 229, 0.08), rgba(22, 27, 34, 0.96));
+    }
+  }
+
   .ai-pulse-dot {
     width: 6px;
     height: 6px;
@@ -216,8 +232,13 @@
     background: linear-gradient(180deg, rgba(137, 87, 229, 0.08), rgba(22, 27, 34, 0.96));
   }
 
+  .ai-finding-zone.is-pulsing {
+    animation: ai-finding-pulse 1.2s ease-out 1;
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    .ai-pulse-dot {
+    .ai-pulse-dot,
+    .ai-finding-zone.is-pulsing {
       animation: none;
     }
   }
