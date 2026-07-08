@@ -23,10 +23,11 @@ Return strict JSON only. Do not wrap the response in Markdown. The JSON object m
 - "findings": an array of findings
 - "approvalPacket": a review summary object
 
-Group files into chapters in the order a reviewer should read them. Prefer domain-oriented chapters such as schema and migrations, API surface, service behavior, data models, tests, and miscellaneous changes. Each chapter must have:
+Group files into chapters in the order a reviewer should read them. Prefer domain-oriented chapters such as schema and migrations, API surface, service behavior, data models, tests, and miscellaneous changes. Use reviewOrder to encode the suggested review path: put dependencies, high-change core behavior, API/schema contracts, and likely blocker areas before supporting tests, docs, and reference changes. Each chapter must have:
 - id: stable kebab-case string
 - title: concise human-readable title
 - summary: one or two sentences explaining what to review
+- reviewOrder: positive integer, where 1 is the first chapter a human should review
 - priority: one of "review-first", "high-attention", "standard", "low-attention", "reference"
 - attentionTags: short labels explaining what to pay attention to, for example ["Schema", "API", "Tests"]
 - fileIds: array of file ids from the input only
@@ -92,6 +93,17 @@ function inferAttentionTags(title: string): string[] {
     default:
       return ["Misc"];
   }
+}
+
+function inferChapterReviewOrder(title: string): number {
+  const normalizedTitle = title.toLowerCase();
+  if (normalizedTitle.includes("schema") || normalizedTitle.includes("migration")) return 10;
+  if (normalizedTitle.includes("api") || normalizedTitle.includes("contract")) return 20;
+  if (normalizedTitle.includes("service") || normalizedTitle.includes("behavior")) return 30;
+  if (normalizedTitle.includes("model") || normalizedTitle.includes("data")) return 40;
+  if (normalizedTitle.includes("test")) return 50;
+  if (normalizedTitle.includes("misc") || normalizedTitle.includes("doc") || normalizedTitle.includes("package")) return 90;
+  return 60;
 }
 
 function getAnalysisFiles(dataset: ReviewDataset) {
@@ -170,6 +182,81 @@ function rangeLineCount(range: ReviewChapterRange): number {
   return Math.max(0, range.endLine - range.startLine + 1);
 }
 
+function chapterPrioritySortOrder(priority: ReviewChapterPriority): number {
+  switch (priority) {
+    case "review-first":
+      return 0;
+    case "high-attention":
+      return 1;
+    case "standard":
+      return 2;
+    case "low-attention":
+      return 3;
+    case "reference":
+      return 4;
+  }
+}
+
+function chapterPriorityWeight(priority: ReviewChapterPriority): number {
+  switch (priority) {
+    case "review-first":
+      return 100_000;
+    case "high-attention":
+      return 70_000;
+    case "standard":
+      return 40_000;
+    case "low-attention":
+      return 10_000;
+    case "reference":
+      return 0;
+  }
+}
+
+function chapterChangedLineCount(chapter: ReviewChapter): number {
+  return chapter.ranges.reduce((total, range) => total + rangeLineCount(range), 0);
+}
+
+function computeChapterReviewWeight(chapter: ReviewChapter): number {
+  const changedLineWeight = Math.min(chapterChangedLineCount(chapter), 50_000);
+  const fileWeight = Math.min(new Set(chapter.fileIds).size * 25, 5_000);
+  const findingWeight = Math.min(chapter.findingIds.length * 500, 10_000);
+  return chapterPriorityWeight(chapter.priority) + changedLineWeight + fileWeight + findingWeight;
+}
+
+function isUnmappedChapter(chapter: ReviewChapter): boolean {
+  return chapter.id === "unmapped-diff" || chapter.title === "Unmapped diff";
+}
+
+function normalizeReviewOrderValue(value: number, fallback: number): number {
+  return Number.isInteger(value) && value > 0 ? value : fallback;
+}
+
+function rankReviewChapters(chapters: readonly ReviewChapter[]): ReviewChapter[] {
+  return chapters
+    .map((chapter, originalIndex) => ({
+      chapter,
+      originalIndex,
+      reviewOrder: normalizeReviewOrderValue(chapter.reviewOrder, originalIndex + 1),
+      reviewWeight: computeChapterReviewWeight(chapter),
+      priorityOrder: chapterPrioritySortOrder(chapter.priority),
+      inferredOrder: inferChapterReviewOrder(chapter.title),
+      unmapped: isUnmappedChapter(chapter),
+    }))
+    .sort((left, right) => {
+      if (left.unmapped !== right.unmapped) return left.unmapped ? 1 : -1;
+      return left.reviewOrder - right.reviewOrder
+        || left.priorityOrder - right.priorityOrder
+        || right.reviewWeight - left.reviewWeight
+        || left.inferredOrder - right.inferredOrder
+        || left.originalIndex - right.originalIndex;
+    })
+    .map((item, index) => ({
+      ...item.chapter,
+      reviewOrder: index + 1,
+      reviewWeight: item.reviewWeight,
+    }));
+}
+
 function sameRangeTarget(left: ReviewChapterRange, right: ReviewChapterRange): boolean {
   return left.fileId === right.fileId && left.path === right.path && left.side === right.side;
 }
@@ -229,6 +316,8 @@ function completeDiffCoverage(analysis: ReviewAnalysis, dataset: ReviewDataset):
       id: unmappedChapterId,
       title: "Unmapped diff",
       summary: "Review changed areas that were not assigned to a more specific chapter.",
+      reviewOrder: Number.MAX_SAFE_INTEGER,
+      reviewWeight: 0,
       priority: "standard",
       attentionTags: ["Unmapped"],
       fileIds: unmappedFileIds,
@@ -255,7 +344,7 @@ function completeDiffCoverage(analysis: ReviewAnalysis, dataset: ReviewDataset):
 
   return {
     ...analysis,
-    chapters,
+    chapters: rankReviewChapters(chapters),
     approvalPacket,
     coverage: {
       fileCount: analysisFiles.length,
@@ -284,6 +373,8 @@ export function createFallbackAnalysis(dataset: ReviewDataset, message: string):
       id: chapterIdFromTitle(title),
       title,
       summary: `Review ${title.toLowerCase()} before marking this source complete.`,
+      reviewOrder: inferChapterReviewOrder(title),
+      reviewWeight: 0,
       priority: inferChapterPriority(title),
       attentionTags: inferAttentionTags(title),
       fileIds: [file.id],
@@ -322,6 +413,7 @@ function buildAnalysisInput(dataset: ReviewDataset): string {
       displayPath: file.gitDiff?.displayPath ?? file.path,
       inGitDiff: file.inGitDiff,
       inLastCommit: file.inLastCommit,
+      changedLineCount: countLineRanges(file.gitDiff?.commentableOriginalLines) + countLineRanges(file.gitDiff?.commentableModifiedLines),
       changedRanges: getFileCoverageRanges(file),
     })),
   });
@@ -421,6 +513,11 @@ function requirePositiveInteger(value: unknown, field: string): number {
   return value;
 }
 
+function normalizeChapterReviewOrder(value: unknown, index: number): number {
+  if (value == null) return index + 1;
+  return requirePositiveInteger(value, `chapters[${index}].reviewOrder`);
+}
+
 function normalizeChapterRange(value: unknown, chapterIndex: number, rangeIndex: number): ReviewChapterRange {
   const range = requireRecord(value, `chapters[${chapterIndex}].ranges[${rangeIndex}]`);
   const startLine = requirePositiveInteger(range.startLine, `chapters[${chapterIndex}].ranges[${rangeIndex}].startLine`);
@@ -454,6 +551,8 @@ function normalizeChapter(value: unknown, index: number): ReviewChapter {
     id: requireString(chapter.id, `chapters[${index}].id`),
     title,
     summary: requireString(chapter.summary, `chapters[${index}].summary`),
+    reviewOrder: normalizeChapterReviewOrder(chapter.reviewOrder, index),
+    reviewWeight: 0,
     priority: normalizeChapterPriority(chapter, index),
     attentionTags: normalizeAttentionTags(chapter.attentionTags, title),
     fileIds: requireStringArray(chapter.fileIds, `chapters[${index}].fileIds`),
@@ -628,7 +727,7 @@ export function parseReviewAnalysisJson(text: string, dataset?: ReviewDataset): 
   const analysis: ReviewAnalysis = {
     status: "ready",
     message: "AI analysis ready.",
-    chapters: parsed.chapters.map(normalizeChapter),
+    chapters: rankReviewChapters(parsed.chapters.map(normalizeChapter)),
     findings: parsed.findings.map(normalizeFinding),
     coverage: emptyCoverageSummary(),
     approvalPacket: normalizeApprovalPacket(parsed.approvalPacket),

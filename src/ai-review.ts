@@ -33,7 +33,7 @@ Only create findings for concrete, actionable concerns supported by the provided
 
 You are reviewing as one subagent in a larger cycle: scout -> chapter agents -> validation critic -> synthesis. Your findings are candidates and must be evidence-backed enough to survive validation.
 
-The chapter object must use the input chapter id, title, summary, priority, attentionTags, fileIds, and ranges. Its findingIds must reference only findings you create.
+The chapter object must use the input chapter id, title, summary, reviewOrder, reviewWeight, priority, attentionTags, fileIds, and ranges. Its findingIds must reference only findings you create.
 
 Each finding must have:
 - id: stable kebab-case string
@@ -168,6 +168,8 @@ export function normalizeChapterReviewJson(text: string, chapter: ReviewChapter,
       id: chapter.id,
       title: chapter.title,
       summary: chapter.summary,
+      reviewOrder: chapter.reviewOrder,
+      reviewWeight: chapter.reviewWeight,
       priority: chapter.priority,
       attentionTags: chapter.attentionTags,
       fileIds: chapter.fileIds,
@@ -195,6 +197,8 @@ function buildScoutInput(dataset: ReviewDataset, analysis: ReviewAnalysis, confi
       id: chapter.id,
       title: chapter.title,
       summary: chapter.summary,
+      reviewOrder: chapter.reviewOrder,
+      reviewWeight: chapter.reviewWeight,
       priority: chapter.priority,
       attentionTags: chapter.attentionTags,
       fileCount: chapter.fileIds.length,
@@ -305,6 +309,8 @@ async function buildChapterReviewInput(options: {
       id: options.chapter.id,
       title: options.chapter.title,
       summary: options.chapter.summary,
+      reviewOrder: options.chapter.reviewOrder,
+      reviewWeight: options.chapter.reviewWeight,
       priority: options.chapter.priority,
       attentionTags: options.chapter.attentionTags,
       fileIds: options.chapter.fileIds,
@@ -500,6 +506,8 @@ function buildValidationInput(dataset: ReviewDataset, analysis: ReviewAnalysis, 
     chapters: analysis.chapters.map((chapter) => ({
       id: chapter.id,
       title: chapter.title,
+      reviewOrder: chapter.reviewOrder,
+      reviewWeight: chapter.reviewWeight,
       priority: chapter.priority,
       attentionTags: chapter.attentionTags,
       fileIds: chapter.fileIds,
@@ -555,6 +563,8 @@ function buildSynthesisInput(dataset: ReviewDataset, analysis: ReviewAnalysis, s
       id: chapter.id,
       title: chapter.title,
       summary: chapter.summary,
+      reviewOrder: chapter.reviewOrder,
+      reviewWeight: chapter.reviewWeight,
       priority: chapter.priority,
       attentionTags: chapter.attentionTags,
       fileCount: chapter.fileIds.length,

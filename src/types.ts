@@ -271,6 +271,8 @@ export interface ReviewChapter {
   id: string;
   title: string;
   summary: string;
+  reviewOrder: number;
+  reviewWeight: number;
   priority: ReviewChapterPriority;
   attentionTags: string[];
   fileIds: string[];

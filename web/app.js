@@ -514,8 +514,56 @@ function aiReviewStepClass(status) {
   }
 }
 
+function chapterPriorityOrder(priority) {
+  switch (priority) {
+    case "review-first": return 0;
+    case "high-attention": return 1;
+    case "standard": return 2;
+    case "low-attention": return 3;
+    case "reference": return 4;
+    default: return 2;
+  }
+}
+
+function inferredChapterReviewOrder(chapter) {
+  const title = String(chapter?.title || "").toLowerCase();
+  if (title.includes("schema") || title.includes("migration")) return 10;
+  if (title.includes("api") || title.includes("contract")) return 20;
+  if (title.includes("service") || title.includes("behavior")) return 30;
+  if (title.includes("model") || title.includes("data")) return 40;
+  if (title.includes("test")) return 50;
+  if (title.includes("misc") || title.includes("doc") || title.includes("package")) return 90;
+  return 60;
+}
+
+function chapterReviewOrder(chapter, index, hasExplicitReviewOrder) {
+  if (Number.isInteger(chapter?.reviewOrder) && chapter.reviewOrder > 0) return chapter.reviewOrder;
+  return hasExplicitReviewOrder ? index + 1 : inferredChapterReviewOrder(chapter);
+}
+
+function chapterReviewWeight(chapter) {
+  return Number.isFinite(chapter?.reviewWeight) ? chapter.reviewWeight : 0;
+}
+
+function isUnmappedReviewChapter(chapter) {
+  return chapter?.id === "unmapped-diff" || chapter?.title === "Unmapped diff";
+}
+
 function getReviewChapters() {
-  return reviewData.analysis?.chapters || [];
+  const chapters = reviewData.analysis?.chapters || [];
+  const hasExplicitReviewOrder = chapters.some((chapter) => Number.isInteger(chapter?.reviewOrder) && chapter.reviewOrder > 0);
+  return chapters
+    .map((chapter, index) => ({ chapter, index }))
+    .sort((left, right) => {
+      const leftUnmapped = isUnmappedReviewChapter(left.chapter);
+      const rightUnmapped = isUnmappedReviewChapter(right.chapter);
+      if (leftUnmapped !== rightUnmapped) return leftUnmapped ? 1 : -1;
+      return chapterReviewOrder(left.chapter, left.index, hasExplicitReviewOrder) - chapterReviewOrder(right.chapter, right.index, hasExplicitReviewOrder)
+        || chapterPriorityOrder(left.chapter.priority) - chapterPriorityOrder(right.chapter.priority)
+        || chapterReviewWeight(right.chapter) - chapterReviewWeight(left.chapter)
+        || left.index - right.index;
+    })
+    .map(({ chapter }) => chapter);
 }
 
 function getReviewFindings() {

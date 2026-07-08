@@ -96,6 +96,24 @@ test("fallback groups migrations, services, api, and tests", () => {
   ]);
 });
 
+test("fallback ranks review plan independently of file order", () => {
+  const analysis = createFallbackAnalysis(dataset([
+    "scripts/update_snapshot.py",
+    "tests/app/api/test_qa_api.py",
+    "src/app/api/qa_api.py",
+    "migrations/versions/abc.py",
+  ]), "fallback");
+
+  assert.deepEqual(analysis.chapters.map((chapter) => chapter.title), [
+    "Schema and migrations",
+    "API surface",
+    "Tests",
+    "Miscellaneous changes",
+  ]);
+  assert.deepEqual(analysis.chapters.map((chapter) => chapter.reviewOrder), [1, 2, 3, 4]);
+  assert.ok(analysis.chapters.every((chapter) => chapter.reviewWeight > 0));
+});
+
 test("fallback uses chapter priority and attention tags instead of risk", () => {
   const analysis = createFallbackAnalysis(dataset([
     "migrations/versions/abc.py",
@@ -233,6 +251,63 @@ test("parser appends unmapped diff chapter for omitted focused files", () => {
   assert.equal(analysis.coverage.unmappedFileCount, 1);
   assert.equal(analysis.coverage.unmappedOriginalLineCount, 1);
   assert.equal(analysis.coverage.unmappedModifiedLineCount, 2);
+});
+
+test("parser uses explicit review order and recomputes chapter weights", () => {
+  const reviewDataset = dataset([
+    "tests/app/api/test_qa_api.py",
+    "src/app/api/qa_api.py",
+    "migrations/versions/abc.py",
+  ]);
+  const modelAnalysis = {
+    chapters: [
+      {
+        id: "tests",
+        title: "Tests",
+        summary: "Review test coverage.",
+        reviewOrder: 3,
+        priority: "standard",
+        attentionTags: ["Tests"],
+        fileIds: ["tests/app/api/test_qa_api.py"],
+        findingIds: [],
+      },
+      {
+        id: "api-surface",
+        title: "API surface",
+        summary: "Review API behavior.",
+        reviewOrder: 1,
+        priority: "review-first",
+        attentionTags: ["API"],
+        fileIds: ["src/app/api/qa_api.py"],
+        findingIds: [],
+      },
+      {
+        id: "schema",
+        title: "Schema and migrations",
+        summary: "Review migration ordering.",
+        reviewOrder: 2,
+        priority: "review-first",
+        attentionTags: ["Schema"],
+        fileIds: ["migrations/versions/abc.py"],
+        findingIds: [],
+      },
+    ],
+    findings: [],
+    approvalPacket: {
+      summary: "Review all areas.",
+      reviewedChapters: ["tests", "api-surface", "schema"],
+      acceptedRisks: [],
+      unresolvedFindings: [],
+      suggestedVerdict: "comment",
+      body: "Review all areas.",
+    },
+  };
+
+  const analysis = parseReviewAnalysisJson(JSON.stringify(modelAnalysis), reviewDataset);
+
+  assert.deepEqual(analysis.chapters.map((chapter) => chapter.id), ["api-surface", "schema", "tests"]);
+  assert.deepEqual(analysis.chapters.map((chapter) => chapter.reviewOrder), [1, 2, 3]);
+  assert.ok((analysis.chapters[0]?.reviewWeight ?? 0) > (analysis.chapters[2]?.reviewWeight ?? 0));
 });
 
 test("parser allows one file to be split across chapter ranges", () => {

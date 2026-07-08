@@ -55,6 +55,8 @@ function chapter(): ReviewChapter {
     id: "qa-api",
     title: "QA labeling API",
     summary: "Review API changes.",
+    reviewOrder: 1,
+    reviewWeight: 100_000,
     priority: "review-first",
     attentionTags: ["API"],
     fileIds: ["src/app/api/qa_api.py"],
