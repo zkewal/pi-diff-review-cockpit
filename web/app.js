@@ -424,8 +424,8 @@ function severityTextClass(severity) {
   }
 }
 
-function riskBadgeClass(risk) {
-  switch (risk) {
+function severityBadgeClass(severity) {
+  switch (severity) {
     case "critical":
     case "high":
       return "shrink-0 whitespace-nowrap rounded bg-[#f85149]/10 px-2 py-0.5 text-[11px] font-medium text-[#ff7b72]";
@@ -436,6 +436,38 @@ function riskBadgeClass(risk) {
     default:
       return "shrink-0 whitespace-nowrap rounded bg-[#30363d]/50 px-2 py-0.5 text-[11px] font-medium text-review-muted";
   }
+}
+
+function chapterPriorityLabel(priority) {
+  switch (priority) {
+    case "review-first": return "Review first";
+    case "high-attention": return "High attention";
+    case "low-attention": return "Low attention";
+    case "reference": return "Reference";
+    default: return "Standard";
+  }
+}
+
+function chapterPriorityBadgeClass(priority) {
+  switch (priority) {
+    case "review-first":
+      return "shrink-0 whitespace-nowrap rounded bg-[#8957e5]/12 px-2 py-0.5 text-[11px] font-medium text-[#d2a8ff]";
+    case "high-attention":
+      return "shrink-0 whitespace-nowrap rounded bg-[#d29922]/10 px-2 py-0.5 text-[11px] font-medium text-[#e3b341]";
+    case "low-attention":
+      return "shrink-0 whitespace-nowrap rounded bg-[#58a6ff]/10 px-2 py-0.5 text-[11px] font-medium text-[#79c0ff]";
+    case "reference":
+      return "shrink-0 whitespace-nowrap rounded bg-[#30363d]/50 px-2 py-0.5 text-[11px] font-medium text-review-muted";
+    default:
+      return "shrink-0 whitespace-nowrap rounded bg-[#238636]/10 px-2 py-0.5 text-[11px] font-medium text-[#7ee787]";
+  }
+}
+
+function attentionTagsHtml(chapter) {
+  return (chapter.attentionTags || [])
+    .slice(0, 3)
+    .map((tag) => `<span class="rounded bg-[#30363d]/45 px-1.5 py-0.5 text-[11px] font-medium text-review-muted">${escapeHtml(tag)}</span>`)
+    .join("");
 }
 
 function reviewStatusBadgeClass(done) {
@@ -1464,8 +1496,9 @@ function renderInsightForChapter(chapter) {
       ${aiReviewPanelHtml(chapter.id)}
       <div>
         <div class="mb-2 flex items-center gap-2">
-          <span class="${riskBadgeClass(chapter.risk)}">${escapeHtml(humanizeToken(chapter.risk))} risk</span>
+          <span class="${chapterPriorityBadgeClass(chapter.priority)}">${escapeHtml(chapterPriorityLabel(chapter.priority))}</span>
           <span class="${reviewStatusBadgeClass(reviewed)}">${reviewed ? "Reviewed" : "Not reviewed"}</span>
+          ${attentionTagsHtml(chapter)}
         </div>
         <div class="text-base font-semibold leading-6 text-white">${escapeHtml(chapter.title)}</div>
         <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(chapter.summary)}</div>
@@ -1603,7 +1636,7 @@ function renderInsightForFinding(finding) {
       <div class="rounded-md bg-[#010409] p-3">
         <div class="mb-2 flex flex-wrap items-center gap-2">
           <span class="rounded bg-[#30363d]/50 px-2 py-0.5 text-[11px] font-medium text-review-muted">${escapeHtml(humanizeToken(finding.kind))}</span>
-          <span class="${riskBadgeClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
+          <span class="${severityBadgeClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
           <span class="rounded bg-[#30363d]/50 px-2 py-0.5 text-[11px] font-medium text-review-muted">${escapeHtml(humanizeToken(finding.confidence))} confidence</span>
         </div>
         <div class="text-base font-semibold leading-6 text-white">${escapeHtml(finding.title)}</div>
@@ -1714,9 +1747,10 @@ function renderReviewMap() {
           <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-[#30363d]/60 text-[10px] font-semibold text-review-muted">${index + 1}</span>
           <span class="min-w-0 truncate text-sm font-semibold leading-5 text-white">${escapeHtml(chapter.title)}</span>
         </div>
-        <span class="${reviewed ? reviewStatusBadgeClass(true) : riskBadgeClass(chapter.risk)}">${reviewed ? "Reviewed" : `${humanizeToken(chapter.risk)} risk`}</span>
+        <span class="${reviewed ? reviewStatusBadgeClass(true) : chapterPriorityBadgeClass(chapter.priority)}">${reviewed ? "Reviewed" : chapterPriorityLabel(chapter.priority)}</span>
       </div>
       <div class="line-clamp-2 text-xs leading-5 text-review-muted">${escapeHtml(chapter.summary)}</div>
+      ${(chapter.attentionTags || []).length > 0 ? `<div class="mt-2 flex flex-wrap items-center gap-1">${attentionTagsHtml(chapter)}</div>` : ""}
       ${previewFiles.length > 0 ? `<div class="mt-2 space-y-1">
         ${previewFiles.map((file) => `<div class="truncate text-[11px] text-review-muted">${escapeHtml(file.path)}</div>`).join("")}
       </div>` : ""}

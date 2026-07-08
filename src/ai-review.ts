@@ -20,7 +20,7 @@ const SCOUT_SYSTEM_PROMPT = `You are a PI review scout for a code review cockpit
 
 Return strict JSON only: {"summary":"..."}.
 
-Summarize the highest-value parallel review strategy from the provided PR metadata and chapter map. Include risk areas, context each chapter agent should care about, and likely test areas. Do not invent bugs. Keep it concise.`;
+Summarize the highest-value parallel review strategy from the provided PR metadata and chapter map. Include priority areas, context each chapter agent should care about, and likely test areas. Do not invent bugs. Keep it concise.`;
 
 const CHAPTER_REVIEW_SYSTEM_PROMPT = `You are a PI review subagent reviewing one chapter of a diff.
 
@@ -33,7 +33,7 @@ Only create findings for concrete, actionable concerns supported by the provided
 
 You are reviewing as one subagent in a larger cycle: scout -> chapter agents -> validation critic -> synthesis. Your findings are candidates and must be evidence-backed enough to survive validation.
 
-The chapter object must use the input chapter id, title, summary, risk, and fileIds. Its findingIds must reference only findings you create.
+The chapter object must use the input chapter id, title, summary, priority, attentionTags, fileIds, and ranges. Its findingIds must reference only findings you create.
 
 Each finding must have:
 - id: stable kebab-case string
@@ -168,8 +168,10 @@ export function normalizeChapterReviewJson(text: string, chapter: ReviewChapter,
       id: chapter.id,
       title: chapter.title,
       summary: chapter.summary,
-      risk: chapter.risk,
+      priority: chapter.priority,
+      attentionTags: chapter.attentionTags,
       fileIds: chapter.fileIds,
+      ranges: chapter.ranges,
       findingIds,
     }],
     findings,
@@ -193,7 +195,8 @@ function buildScoutInput(dataset: ReviewDataset, analysis: ReviewAnalysis, confi
       id: chapter.id,
       title: chapter.title,
       summary: chapter.summary,
-      risk: chapter.risk,
+      priority: chapter.priority,
+      attentionTags: chapter.attentionTags,
       fileCount: chapter.fileIds.length,
       changedLines: {
         original: chapter.ranges.filter((range) => range.side === "original").reduce((total, range) => total + range.endLine - range.startLine + 1, 0),
@@ -259,7 +262,7 @@ async function runScout(ctx: ExtensionCommandContext, dataset: ReviewDataset, an
     }
   } catch {}
 
-  return `Review ${analysis.chapters.length} chapter(s), prioritizing high-risk chapters and changed hunks with schema, API, service, and test impact.`;
+  return `Review ${analysis.chapters.length} chapter(s), prioritizing review-first chapters and changed hunks with schema, API, service, and test impact.`;
 }
 
 function fileStatus(file: ReviewFile): string | null {
@@ -302,8 +305,10 @@ async function buildChapterReviewInput(options: {
       id: options.chapter.id,
       title: options.chapter.title,
       summary: options.chapter.summary,
-      risk: options.chapter.risk,
+      priority: options.chapter.priority,
+      attentionTags: options.chapter.attentionTags,
       fileIds: options.chapter.fileIds,
+      ranges: options.chapter.ranges,
     },
     files,
   });
@@ -495,8 +500,10 @@ function buildValidationInput(dataset: ReviewDataset, analysis: ReviewAnalysis, 
     chapters: analysis.chapters.map((chapter) => ({
       id: chapter.id,
       title: chapter.title,
-      risk: chapter.risk,
+      priority: chapter.priority,
+      attentionTags: chapter.attentionTags,
       fileIds: chapter.fileIds,
+      ranges: chapter.ranges,
       findingIds: chapter.findingIds,
     })),
     candidateFindings: analysis.findings.map((finding) => ({
@@ -548,8 +555,10 @@ function buildSynthesisInput(dataset: ReviewDataset, analysis: ReviewAnalysis, s
       id: chapter.id,
       title: chapter.title,
       summary: chapter.summary,
-      risk: chapter.risk,
+      priority: chapter.priority,
+      attentionTags: chapter.attentionTags,
       fileCount: chapter.fileIds.length,
+      ranges: chapter.ranges,
       findingIds: chapter.findingIds,
     })),
     findings: analysis.findings.map((finding) => ({

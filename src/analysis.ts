@@ -6,6 +6,7 @@ import type {
   CommentSide,
   ReviewAnalysis,
   ReviewChapter,
+  ReviewChapterPriority,
   ReviewChapterRange,
   ReviewCoverageSummary,
   ReviewFinding,
@@ -26,11 +27,14 @@ Group files into chapters in the order a reviewer should read them. Prefer domai
 - id: stable kebab-case string
 - title: concise human-readable title
 - summary: one or two sentences explaining what to review
-- risk: one of "critical", "high", "medium", "low", "info"
+- priority: one of "review-first", "high-attention", "standard", "low-attention", "reference"
+- attentionTags: short labels explaining what to pay attention to, for example ["Schema", "API", "Tests"]
 - fileIds: array of file ids from the input only
+- ranges: optional array of changed line ranges when only part of a file belongs to this chapter. Each range must use an input fileId, path, side "original" or "modified", startLine, and endLine. If omitted or empty, the chapter covers all changed ranges in fileIds.
 - findingIds: array of finding ids from your findings
 
-Every input file should appear in exactly one chapter. If a file does not fit a specific domain-oriented chapter, put it in a miscellaneous chapter. The review tool will add a final deterministic "Unmapped diff" chapter for any omitted changed files so no changed hunks are lost.
+Every changed range should have exactly one chapter owner. If a whole file fits one chapter, put its file id in that chapter without ranges. If a file does not fit a specific domain-oriented chapter, put it in a miscellaneous chapter. The review tool will add a final deterministic "Unmapped diff" chapter for any omitted changed ranges so no changed hunks are lost.
+If different hunks from the same large file belong to different review areas, repeat that file id across chapters and use non-overlapping ranges so each changed line has exactly one owner.
 
 Separate high-confidence bugs from informational explanations. Only create findings for concrete, actionable review concerns. Do not invent files, file ids, paths, or line numbers. When you are unsure about the exact line, set line to null. Each finding must have:
 - id: stable kebab-case string
@@ -64,6 +68,30 @@ function inferChapterTitle(path: string): string {
   if (path.includes("/models/")) return "Data models";
   if (path.includes("/services/")) return "Service behavior";
   return "Miscellaneous changes";
+}
+
+function inferChapterPriority(title: string): ReviewChapterPriority {
+  if (title === "Schema and migrations" || title === "API surface") return "review-first";
+  if (title === "Service behavior" || title === "Data models") return "high-attention";
+  if (title === "Miscellaneous changes") return "low-attention";
+  return "standard";
+}
+
+function inferAttentionTags(title: string): string[] {
+  switch (title) {
+    case "Schema and migrations":
+      return ["Schema", "Migrations"];
+    case "API surface":
+      return ["API"];
+    case "Data models":
+      return ["Models"];
+    case "Service behavior":
+      return ["Services"];
+    case "Tests":
+      return ["Tests"];
+    default:
+      return ["Misc"];
+  }
 }
 
 function getAnalysisFiles(dataset: ReviewDataset) {
@@ -108,6 +136,8 @@ function getFileRangeCounts(file: ReviewDataset["files"][number]): { original: n
 }
 
 function getChapterRanges(chapter: ReviewChapter, fileById: Map<string, ReviewDataset["files"][number]>): ReviewChapterRange[] {
+  if (chapter.ranges.length > 0) return chapter.ranges;
+
   return chapter.fileIds.flatMap((fileId) => {
     const file = fileById.get(fileId);
     return file == null ? [] : getFileCoverageRanges(file);
@@ -136,26 +166,73 @@ function uniqueChapterId(baseId: string, chapters: readonly ReviewChapter[]): st
   return `${baseId}-${index}`;
 }
 
+function rangeLineCount(range: ReviewChapterRange): number {
+  return Math.max(0, range.endLine - range.startLine + 1);
+}
+
+function sameRangeTarget(left: ReviewChapterRange, right: ReviewChapterRange): boolean {
+  return left.fileId === right.fileId && left.path === right.path && left.side === right.side;
+}
+
+function rangesOverlap(left: ReviewChapterRange, right: ReviewChapterRange): boolean {
+  return sameRangeTarget(left, right) && left.startLine <= right.endLine && right.startLine <= left.endLine;
+}
+
+function rangeContains(container: ReviewChapterRange, range: ReviewChapterRange): boolean {
+  return sameRangeTarget(container, range) && container.startLine <= range.startLine && container.endLine >= range.endLine;
+}
+
+function subtractRange(base: ReviewChapterRange, assignedRanges: readonly ReviewChapterRange[]): ReviewChapterRange[] {
+  let segments = [{ startLine: base.startLine, endLine: base.endLine }];
+
+  for (const assigned of assignedRanges) {
+    if (!sameRangeTarget(base, assigned)) continue;
+    const nextSegments: typeof segments = [];
+    for (const segment of segments) {
+      if (assigned.endLine < segment.startLine || assigned.startLine > segment.endLine) {
+        nextSegments.push(segment);
+        continue;
+      }
+      if (assigned.startLine > segment.startLine) {
+        nextSegments.push({ startLine: segment.startLine, endLine: assigned.startLine - 1 });
+      }
+      if (assigned.endLine < segment.endLine) {
+        nextSegments.push({ startLine: assigned.endLine + 1, endLine: segment.endLine });
+      }
+    }
+    segments = nextSegments;
+  }
+
+  return segments.map((segment) => ({
+    ...base,
+    startLine: segment.startLine,
+    endLine: segment.endLine,
+  }));
+}
+
 function completeDiffCoverage(analysis: ReviewAnalysis, dataset: ReviewDataset): ReviewAnalysis {
   const analysisFiles = getAnalysisFiles(dataset);
   const fileById = new Map(analysisFiles.map((file) => [file.id, file] as const));
-  const coveredFileIds = new Set(analysis.chapters.flatMap((chapter) => chapter.fileIds));
-  const unmappedFiles = analysisFiles.filter((file) => !coveredFileIds.has(file.id));
+  const allRanges = analysisFiles.flatMap(getFileCoverageRanges);
   const chapters = analysis.chapters.map((chapter) => ({
     ...chapter,
     ranges: getChapterRanges(chapter, fileById),
   }));
+  const assignedRanges = chapters.flatMap((chapter) => chapter.ranges);
+  const unmappedRanges = allRanges.flatMap((range) => subtractRange(range, assignedRanges));
+  const unmappedFileIds = [...new Set(unmappedRanges.map((range) => range.fileId))];
 
   let approvalPacket = analysis.approvalPacket;
-  if (unmappedFiles.length > 0) {
+  if (unmappedRanges.length > 0) {
     const unmappedChapterId = uniqueChapterId("unmapped-diff", chapters);
     const unmappedChapter: ReviewChapter = {
       id: unmappedChapterId,
       title: "Unmapped diff",
       summary: "Review changed areas that were not assigned to a more specific chapter.",
-      risk: "medium",
-      fileIds: unmappedFiles.map((file) => file.id),
-      ranges: unmappedFiles.flatMap(getFileCoverageRanges),
+      priority: "standard",
+      attentionTags: ["Unmapped"],
+      fileIds: unmappedFileIds,
+      ranges: unmappedRanges,
       findingIds: [],
     };
     chapters.push(unmappedChapter);
@@ -171,10 +248,8 @@ function completeDiffCoverage(analysis: ReviewAnalysis, dataset: ReviewDataset):
     counts.modified += fileCounts.modified;
     return counts;
   }, { original: 0, modified: 0 });
-  const unmappedTotals = unmappedFiles.reduce((counts, file) => {
-    const fileCounts = getFileRangeCounts(file);
-    counts.original += fileCounts.original;
-    counts.modified += fileCounts.modified;
+  const unmappedTotals = unmappedRanges.reduce((counts, range) => {
+    counts[range.side] += rangeLineCount(range);
     return counts;
   }, { original: 0, modified: 0 });
 
@@ -186,7 +261,7 @@ function completeDiffCoverage(analysis: ReviewAnalysis, dataset: ReviewDataset):
       fileCount: analysisFiles.length,
       originalLineCount: totals.original,
       modifiedLineCount: totals.modified,
-      unmappedFileCount: unmappedFiles.length,
+      unmappedFileCount: unmappedFileIds.length,
       unmappedOriginalLineCount: unmappedTotals.original,
       unmappedModifiedLineCount: unmappedTotals.modified,
     },
@@ -209,7 +284,8 @@ export function createFallbackAnalysis(dataset: ReviewDataset, message: string):
       id: chapterIdFromTitle(title),
       title,
       summary: `Review ${title.toLowerCase()} before marking this source complete.`,
-      risk: title === "Schema and migrations" ? "high" : "medium",
+      priority: inferChapterPriority(title),
+      attentionTags: inferAttentionTags(title),
       fileIds: [file.id],
       ranges: [],
       findingIds: [],
@@ -246,11 +322,13 @@ function buildAnalysisInput(dataset: ReviewDataset): string {
       displayPath: file.gitDiff?.displayPath ?? file.path,
       inGitDiff: file.inGitDiff,
       inLastCommit: file.inLastCommit,
+      changedRanges: getFileCoverageRanges(file),
     })),
   });
 }
 
 const REVIEW_FINDING_SEVERITIES = ["critical", "high", "medium", "low", "info"] as const satisfies readonly ReviewFindingSeverity[];
+const REVIEW_CHAPTER_PRIORITIES = ["review-first", "high-attention", "standard", "low-attention", "reference"] as const satisfies readonly ReviewChapterPriority[];
 const REVIEW_FINDING_KINDS = [
   "bug",
   "security",
@@ -297,16 +375,89 @@ function requireOneOf<T extends string>(value: unknown, allowed: readonly T[], f
   return value as T;
 }
 
+function legacyRiskToPriority(value: unknown): ReviewChapterPriority | null {
+  switch (value) {
+    case "critical":
+    case "high":
+      return "review-first";
+    case "medium":
+      return "standard";
+    case "low":
+      return "low-attention";
+    case "info":
+      return "reference";
+    default:
+      return null;
+  }
+}
+
+function normalizeChapterPriority(chapter: Record<string, unknown>, index: number): ReviewChapterPriority {
+  if (chapter.priority != null) {
+    return requireOneOf(chapter.priority, REVIEW_CHAPTER_PRIORITIES, `chapters[${index}].priority`);
+  }
+
+  const legacyPriority = legacyRiskToPriority(chapter.risk);
+  if (legacyPriority != null) return legacyPriority;
+
+  throw new Error(`AI analysis JSON has invalid chapters[${index}].priority.`);
+}
+
+function normalizeAttentionTags(value: unknown, title: string): string[] {
+  if (!Array.isArray(value)) return inferAttentionTags(title);
+
+  const tags = value
+    .filter((tag): tag is string => typeof tag === "string")
+    .map((tag) => tag.trim())
+    .filter((tag) => tag.length > 0)
+    .slice(0, 4);
+
+  return tags.length > 0 ? tags : inferAttentionTags(title);
+}
+
+function requirePositiveInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`AI analysis JSON has invalid ${field}.`);
+  }
+  return value;
+}
+
+function normalizeChapterRange(value: unknown, chapterIndex: number, rangeIndex: number): ReviewChapterRange {
+  const range = requireRecord(value, `chapters[${chapterIndex}].ranges[${rangeIndex}]`);
+  const startLine = requirePositiveInteger(range.startLine, `chapters[${chapterIndex}].ranges[${rangeIndex}].startLine`);
+  const endLine = requirePositiveInteger(range.endLine, `chapters[${chapterIndex}].ranges[${rangeIndex}].endLine`);
+  if (endLine < startLine) {
+    throw new Error(`AI analysis JSON has invalid chapters[${chapterIndex}].ranges[${rangeIndex}].endLine.`);
+  }
+
+  return {
+    fileId: requireString(range.fileId, `chapters[${chapterIndex}].ranges[${rangeIndex}].fileId`),
+    path: requireString(range.path, `chapters[${chapterIndex}].ranges[${rangeIndex}].path`),
+    side: requireOneOf(range.side, ["original", "modified"] as const, `chapters[${chapterIndex}].ranges[${rangeIndex}].side`),
+    startLine,
+    endLine,
+  };
+}
+
+function normalizeChapterRanges(value: unknown, chapterIndex: number): ReviewChapterRange[] {
+  if (value == null) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`AI analysis JSON has invalid chapters[${chapterIndex}].ranges.`);
+  }
+  return value.map((range, rangeIndex) => normalizeChapterRange(range, chapterIndex, rangeIndex));
+}
+
 function normalizeChapter(value: unknown, index: number): ReviewChapter {
   const chapter = requireRecord(value, `chapters[${index}]`);
+  const title = requireString(chapter.title, `chapters[${index}].title`);
 
   return {
     id: requireString(chapter.id, `chapters[${index}].id`),
-    title: requireString(chapter.title, `chapters[${index}].title`),
+    title,
     summary: requireString(chapter.summary, `chapters[${index}].summary`),
-    risk: requireOneOf(chapter.risk, REVIEW_FINDING_SEVERITIES, `chapters[${index}].risk`),
+    priority: normalizeChapterPriority(chapter, index),
+    attentionTags: normalizeAttentionTags(chapter.attentionTags, title),
     fileIds: requireStringArray(chapter.fileIds, `chapters[${index}].fileIds`),
-    ranges: [],
+    ranges: normalizeChapterRanges(chapter.ranges, index),
     findingIds: requireStringArray(chapter.findingIds, `chapters[${index}].findingIds`),
   };
 }
@@ -388,22 +539,49 @@ function requireUniqueIds(values: readonly { id: string }[], field: "chapters" |
 function validateAnalysisRelationships(analysis: ReviewAnalysis, dataset: ReviewDataset): void {
   const analysisFiles = getAnalysisFiles(dataset);
   const fileById = new Map(analysisFiles.map((file) => [file.id, file] as const));
+  const validRanges = analysisFiles.flatMap(getFileCoverageRanges);
   requireUniqueIds(analysis.chapters, "chapters");
   requireUniqueIds(analysis.findings, "findings");
 
   const findingIds = new Set(analysis.findings.map((finding) => finding.id));
   const chapterIds = new Set(analysis.chapters.map((chapter) => chapter.id));
-  const coveredFileIds = new Set<string>();
+  const fileOwnerHasExplicitRanges = new Map<string, boolean>();
+  const assignedRanges: Array<{ chapterIndex: number; rangeIndex: number; range: ReviewChapterRange }> = [];
 
   for (const [chapterIndex, chapter] of analysis.chapters.entries()) {
+    const hasExplicitRanges = chapter.ranges.length > 0;
     for (const [fileIdIndex, fileId] of chapter.fileIds.entries()) {
       if (!fileById.has(fileId)) {
         throw new Error(`AI analysis JSON references unknown chapters[${chapterIndex}].fileIds[${fileIdIndex}].`);
       }
-      if (coveredFileIds.has(fileId)) {
+      const previousOwnerHadExplicitRanges = fileOwnerHasExplicitRanges.get(fileId);
+      if (previousOwnerHadExplicitRanges != null && (!previousOwnerHadExplicitRanges || !hasExplicitRanges)) {
         throw new Error(`AI analysis JSON has duplicate chapters[${chapterIndex}].fileIds[${fileIdIndex}].`);
       }
-      coveredFileIds.add(fileId);
+      fileOwnerHasExplicitRanges.set(fileId, hasExplicitRanges);
+    }
+
+    for (const [rangeIndex, range] of getChapterRanges(chapter, fileById).entries()) {
+      if (!chapter.fileIds.includes(range.fileId)) {
+        throw new Error(`AI analysis JSON has invalid chapters[${chapterIndex}].ranges[${rangeIndex}].fileId.`);
+      }
+      const file = fileById.get(range.fileId);
+      if (!file) {
+        throw new Error(`AI analysis JSON references unknown chapters[${chapterIndex}].ranges[${rangeIndex}].fileId.`);
+      }
+      const expectedPaths = new Set(getFileCoverageRanges(file).map((candidate) => candidate.path));
+      if (!expectedPaths.has(range.path)) {
+        throw new Error(`AI analysis JSON has mismatched chapters[${chapterIndex}].ranges[${rangeIndex}].path.`);
+      }
+      if (!validRanges.some((candidate) => rangeContains(candidate, range))) {
+        throw new Error(`AI analysis JSON has out-of-diff chapters[${chapterIndex}].ranges[${rangeIndex}].`);
+      }
+      for (const assigned of assignedRanges) {
+        if (rangesOverlap(assigned.range, range)) {
+          throw new Error(`AI analysis JSON has overlapping chapters[${chapterIndex}].ranges[${rangeIndex}].`);
+        }
+      }
+      assignedRanges.push({ chapterIndex, rangeIndex, range });
     }
 
     for (const [findingIdIndex, findingId] of chapter.findingIds.entries()) {

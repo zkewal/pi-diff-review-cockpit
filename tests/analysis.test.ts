@@ -47,7 +47,8 @@ function validModelAnalysis() {
       id: "api-surface",
       title: "API surface",
       summary: "Review API behavior before approval.",
-      risk: "medium",
+      priority: "standard",
+      attentionTags: ["API"],
       fileIds: ["src/app/api/qa_api.py"],
       findingIds: ["missing-validation"],
     }],
@@ -93,6 +94,18 @@ test("fallback groups migrations, services, api, and tests", () => {
     "Service behavior",
     "Tests",
   ]);
+});
+
+test("fallback uses chapter priority and attention tags instead of risk", () => {
+  const analysis = createFallbackAnalysis(dataset([
+    "migrations/versions/abc.py",
+    "tests/app/api/test_qa_api.py",
+  ]), "fallback");
+
+  assert.equal(analysis.chapters[0]?.priority, "review-first");
+  assert.deepEqual(analysis.chapters[0]?.attentionTags, ["Schema", "Migrations"]);
+  assert.equal(analysis.chapters[1]?.priority, "standard");
+  assert.deepEqual(analysis.chapters[1]?.attentionTags, ["Tests"]);
 });
 
 test("fallback approval packet mentions source label", () => {
@@ -222,6 +235,60 @@ test("parser appends unmapped diff chapter for omitted focused files", () => {
   assert.equal(analysis.coverage.unmappedModifiedLineCount, 2);
 });
 
+test("parser allows one file to be split across chapter ranges", () => {
+  const path = "src/app/services/qa/large_service.py";
+  const reviewDataset = dataset([path]);
+  const file = reviewDataset.files[0];
+  assert.ok(file?.gitDiff);
+  file.gitDiff.commentableOriginalLines = [];
+  file.gitDiff.commentableModifiedLines = [{ start: 1, end: 6 }];
+
+  const modelAnalysis = {
+    chapters: [
+      {
+        id: "source-resolution",
+        title: "Source resolution",
+        summary: "Review source lookup behavior.",
+        priority: "high-attention",
+        attentionTags: ["Services"],
+        fileIds: [path],
+        ranges: [{ fileId: path, path, side: "modified", startLine: 1, endLine: 2 }],
+        findingIds: [],
+      },
+      {
+        id: "storage-contract",
+        title: "Storage contract",
+        summary: "Review storage behavior.",
+        priority: "standard",
+        attentionTags: ["Storage"],
+        fileIds: [path],
+        ranges: [{ fileId: path, path, side: "modified", startLine: 4, endLine: 5 }],
+        findingIds: [],
+      },
+    ],
+    findings: [],
+    approvalPacket: {
+      summary: "Review split service hunks.",
+      reviewedChapters: ["source-resolution", "storage-contract"],
+      acceptedRisks: [],
+      unresolvedFindings: [],
+      suggestedVerdict: "comment",
+      body: "Review split service hunks.",
+    },
+  };
+
+  const analysis = parseReviewAnalysisJson(JSON.stringify(modelAnalysis), reviewDataset);
+
+  assert.deepEqual(analysis.chapters[0]?.ranges, [{ fileId: path, path, side: "modified", startLine: 1, endLine: 2 }]);
+  assert.deepEqual(analysis.chapters[1]?.ranges, [{ fileId: path, path, side: "modified", startLine: 4, endLine: 5 }]);
+  assert.deepEqual(analysis.chapters[2]?.ranges, [
+    { fileId: path, path, side: "modified", startLine: 3, endLine: 3 },
+    { fileId: path, path, side: "modified", startLine: 6, endLine: 6 },
+  ]);
+  assert.equal(analysis.chapters[2]?.title, "Unmapped diff");
+  assert.equal(analysis.coverage.unmappedModifiedLineCount, 2);
+});
+
 test("parser does not require non-focused repo files in chapter coverage", () => {
   const modelAnalysis = validModelAnalysis();
 
@@ -239,7 +306,8 @@ test("parser rejects duplicate chapter file coverage", () => {
     id: "api-follow-up",
     title: "API follow-up",
     summary: "Review API edge cases before approval.",
-    risk: "medium",
+    priority: "standard",
+    attentionTags: ["API"],
     fileIds: ["src/app/api/qa_api.py"],
     findingIds: [],
   });

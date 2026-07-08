@@ -250,6 +250,7 @@ export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage |
 export type ReviewFindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type ReviewFindingKind = "bug" | "security" | "migration-risk" | "api-contract" | "test-gap" | "performance" | "question" | "informational";
 export type ReviewFindingStatus = "new" | "accepted-comment" | "dismissed" | "accepted-risk";
+export type ReviewChapterPriority = "review-first" | "high-attention" | "standard" | "low-attention" | "reference";
 
 export interface ReviewLocation {
   fileId: string;
@@ -270,7 +271,8 @@ export interface ReviewChapter {
   id: string;
   title: string;
   summary: string;
-  risk: ReviewFindingSeverity;
+  priority: ReviewChapterPriority;
+  attentionTags: string[];
   fileIds: string[];
   ranges: ReviewChapterRange[];
   findingIds: string[];
