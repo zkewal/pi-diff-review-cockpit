@@ -80,10 +80,6 @@ export interface ReviewCancelPayload {
   type: "cancel";
 }
 
-export interface ReviewSaveClosePayload {
-  type: "save-close";
-}
-
 export interface ReviewRequestFilePayload {
   type: "request-file";
   requestId: string;
@@ -134,10 +130,11 @@ export interface ReviewSessionSnapshot {
 
 export interface ReviewSaveSessionPayload {
   type: "save-session";
+  requestId?: string;
   snapshot: ReviewSessionSnapshot;
 }
 
-export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewSaveClosePayload | ReviewRequestFilePayload | ReviewPublishPayload | ReviewRunAiReviewPayload | ReviewSaveSessionPayload;
+export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewPublishPayload | ReviewRunAiReviewPayload | ReviewSaveSessionPayload;
 
 export interface ReviewFileDataMessage {
   type: "file-data";
@@ -156,6 +153,14 @@ export interface ReviewFileErrorMessage {
   scope: ReviewScope;
   commitSha?: string;
   message: string;
+}
+
+export interface ReviewSaveSessionResultMessage {
+  type: "save-session-result";
+  requestId: string;
+  ok: boolean;
+  message?: string;
+  savedAt?: string;
 }
 
 export type AiReviewRunStatus = "idle" | "running" | "done" | "failed";
@@ -240,7 +245,7 @@ export interface ReviewAiReviewErrorMessage {
   progress: AiReviewProgress;
 }
 
-export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewAiReviewProgressMessage | ReviewAiReviewPartialResultMessage | ReviewAiReviewResultMessage | ReviewAiReviewErrorMessage;
+export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewSaveSessionResultMessage | ReviewAiReviewProgressMessage | ReviewAiReviewPartialResultMessage | ReviewAiReviewResultMessage | ReviewAiReviewErrorMessage;
 
 export type ReviewFindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type ReviewFindingKind = "bug" | "security" | "migration-risk" | "api-contract" | "test-gap" | "performance" | "question" | "informational";

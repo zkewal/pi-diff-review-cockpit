@@ -29,7 +29,6 @@ import type {
   ReviewPublishPayload,
   ReviewRunAiReviewPayload,
   ReviewRequestFilePayload,
-  ReviewSaveClosePayload,
   ReviewSaveSessionPayload,
   ReviewSessionSnapshot,
   ReviewSubmitPayload,
@@ -45,10 +44,6 @@ function isSubmitPayload(value: ReviewWindowMessage): value is ReviewSubmitPaylo
 
 function isCancelPayload(value: ReviewWindowMessage): value is ReviewCancelPayload {
   return value.type === "cancel";
-}
-
-function isSaveClosePayload(value: ReviewWindowMessage): value is ReviewSaveClosePayload {
-  return value.type === "save-close";
 }
 
 function isRequestFilePayload(value: ReviewWindowMessage): value is ReviewRequestFilePayload {
@@ -233,7 +228,8 @@ export default function (pi: ExtensionAPI) {
 
     let sessionSnapshot: ReviewSessionSnapshot | null = sessionResolution.snapshot;
     let saveChain: Promise<void> = Promise.resolve();
-    const queueSessionSave = (snapshot: ReviewSessionSnapshot): void => {
+    let sendSaveResult: ((requestId: string, ok: boolean, message?: string) => void) | null = null;
+    const queueSessionSave = (snapshot: ReviewSessionSnapshot, requestId?: string): void => {
       sessionSnapshot = snapshot;
       const analysisToSave = snapshot.analysis?.approvalPacket
         ? {
@@ -243,19 +239,34 @@ export default function (pi: ExtensionAPI) {
         : analysis;
       saveChain = saveChain
         .catch(() => undefined)
-        .then(() => saveReviewSession(sessionDescriptor.storagePath, buildReviewSessionRecord({
-          sourceKey: sessionDescriptor.sourceKey,
-          fingerprint,
-          analysis: analysisToSave,
-          snapshot,
-        })));
+        .then(async () => {
+          try {
+            await saveReviewSession(sessionDescriptor.storagePath, buildReviewSessionRecord({
+              sourceKey: sessionDescriptor.sourceKey,
+              fingerprint,
+              analysis: analysisToSave,
+              snapshot,
+            }));
+            if (requestId != null) {
+              sendSaveResult?.(requestId, true);
+            }
+          } catch (error) {
+            if (requestId != null) {
+              const message = error instanceof Error ? error.message : String(error);
+              sendSaveResult?.(requestId, false, message);
+            }
+            throw error;
+          }
+        });
     };
-    const flushSessionSave = async (): Promise<void> => {
+    const flushSessionSave = async (): Promise<boolean> => {
       try {
         await saveChain;
+        return true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(`Could not save review session: ${message}`, "warning");
+        return false;
       }
     };
     const snapshotFromSubmit = (message: ReviewSubmitPayload): ReviewSessionSnapshot => ({
@@ -303,6 +314,15 @@ export default function (pi: ExtensionAPI) {
       const payload = escapeForInlineScript(JSON.stringify(message));
       window.send(`window.__reviewReceive(${payload});`);
     };
+    sendSaveResult = (requestId, ok, message): void => {
+      sendWindowMessage({
+        type: "save-session-result",
+        requestId,
+        ok,
+        message,
+        savedAt: ok ? new Date().toISOString() : undefined,
+      });
+    };
 
     const loadContents = (file: ReviewFile, scope: ReviewRequestFilePayload["scope"], commitSha?: string): Promise<ReviewFileContents> => {
       const cacheKey = `${scope}:${commitSha ?? ""}:${file.id}`;
@@ -317,7 +337,7 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.notify("Opened native review window.", "info");
 
     try {
-      const terminalMessagePromise = new Promise<ReviewSubmitPayload | ReviewCancelPayload | ReviewSaveClosePayload | null>((resolve, reject) => {
+      const terminalMessagePromise = new Promise<ReviewSubmitPayload | ReviewCancelPayload | null>((resolve, reject) => {
         let settled = false;
         let publishInFlight = false;
         let aiReviewInFlight = false;
@@ -331,7 +351,7 @@ export default function (pi: ExtensionAPI) {
           }
         };
 
-        const settle = (value: ReviewSubmitPayload | ReviewCancelPayload | ReviewSaveClosePayload | null): void => {
+        const settle = (value: ReviewSubmitPayload | ReviewCancelPayload | null): void => {
           if (settled) return;
           settled = true;
           cleanup();
@@ -490,7 +510,7 @@ export default function (pi: ExtensionAPI) {
         const onMessage = (data: unknown): void => {
           const message = data as ReviewWindowMessage;
           if (isSaveSessionPayload(message)) {
-            queueSessionSave(message.snapshot);
+            queueSessionSave(message.snapshot, message.requestId);
             return;
           }
           if (isRunAiReviewPayload(message)) {
@@ -506,7 +526,7 @@ export default function (pi: ExtensionAPI) {
             void handleRequestFile(message);
             return;
           }
-          if (isSubmitPayload(message) || isCancelPayload(message) || isSaveClosePayload(message)) {
+          if (isSubmitPayload(message) || isCancelPayload(message)) {
             settle(message);
           }
         };
@@ -546,15 +566,15 @@ export default function (pi: ExtensionAPI) {
       if (message?.type === "submit") {
         queueSessionSave(snapshotFromSubmit(message));
       }
-      await flushSessionSave();
+      const saveOk = await flushSessionSave();
       closeActiveWindow();
 
-      if (message?.type === "save-close") {
-        ctx.ui.notify("Review saved.", "info");
+      if (message == null) {
+        ctx.ui.notify(saveOk ? "Review saved." : "Review closed; autosave failed.", saveOk ? "info" : "warning");
         return;
       }
 
-      if (message == null || message.type === "cancel") {
+      if (message.type === "cancel") {
         ctx.ui.notify("Review cancelled.", "info");
         return;
       }

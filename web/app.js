@@ -127,7 +127,7 @@ const insightContentEl = document.getElementById("insight-content");
 const sourceLabelEl = document.getElementById("source-label");
 const analysisStatusEl = document.getElementById("analysis-status");
 const submitButton = document.getElementById("submit-button");
-const saveCloseButton = document.getElementById("save-close-button");
+const autosaveStatusButton = document.getElementById("autosave-status");
 const fileCommentButton = document.getElementById("file-comment-button");
 const toggleReviewedButton = document.getElementById("toggle-reviewed-button");
 const toggleUnchangedButton = document.getElementById("toggle-unchanged-button");
@@ -172,6 +172,8 @@ let activeViewZones = [];
 let editorResizeObserver = null;
 let requestSequence = 0;
 let sessionSaveTimer = null;
+let saveRequestSequence = 0;
+let latestSaveRequestId = null;
 
 function escapeHtml(value) {
   return String(value)
@@ -202,11 +204,28 @@ function buildSessionSnapshot() {
   };
 }
 
-function saveSessionNow() {
+function setAutosaveStatus(status, message, detail = "") {
+  if (!autosaveStatusButton) return;
+  autosaveStatusButton.textContent = message;
+  autosaveStatusButton.dataset.status = status;
+  autosaveStatusButton.title = detail || message;
+  autosaveStatusButton.disabled = status !== "failed";
+  autosaveStatusButton.className = {
+    saving: "cursor-default rounded-md px-2 py-1 text-[11px] font-medium text-review-muted",
+    saved: "cursor-default rounded-md px-2 py-1 text-[11px] font-medium text-[#3fb950]",
+    failed: "cursor-pointer rounded-md bg-[#f85149]/10 px-2 py-1 text-[11px] font-medium text-[#ff7b72] hover:bg-[#f85149]/15",
+  }[status] || "cursor-default rounded-md px-2 py-1 text-[11px] font-medium text-review-muted";
+}
+
+function saveSessionNow(options = {}) {
   if (!window.glimpse?.send) return;
   syncCommentBodiesFromDOM();
+  const requestId = `save:${Date.now()}:${++saveRequestSequence}`;
+  latestSaveRequestId = requestId;
+  if (options.showStatus !== false) setAutosaveStatus("saving", "Saving...");
   window.glimpse.send({
     type: "save-session",
+    requestId,
     snapshot: buildSessionSnapshot(),
   });
 }
@@ -1197,7 +1216,6 @@ function updateToggleButtons() {
   updateAiReviewButton();
   modeHintEl.textContent = scopeHint(state.currentScope);
   submitButton.disabled = state.aiReview.status === "running";
-  saveCloseButton.disabled = false;
 }
 
 function findPreferredScopeForFile(file) {
@@ -2465,6 +2483,18 @@ function createGlyphHoverActions(editor, side) {
 window.__reviewReceive = function (message) {
   if (!message || typeof message !== "object") return;
 
+  if (message.type === "save-session-result") {
+    if (message.requestId !== latestSaveRequestId) return;
+    if (message.ok) {
+      const savedAt = message.savedAt ? new Date(message.savedAt) : null;
+      const detail = savedAt && !Number.isNaN(savedAt.getTime()) ? `Saved at ${savedAt.toLocaleTimeString()}` : "Saved";
+      setAutosaveStatus("saved", "Saved", detail);
+    } else {
+      setAutosaveStatus("failed", "Save failed", message.message || "Click to retry autosave.");
+    }
+    return;
+  }
+
   if (message.type === "ai-review-progress") {
     if (message.requestId !== state.aiReview.requestId) return;
     state.aiReview = {
@@ -2713,12 +2743,6 @@ function finishReview() {
   window.glimpse.close();
 }
 
-function saveAndCloseReview() {
-  saveSessionNow();
-  window.glimpse.send({ type: "save-close" });
-  window.glimpse.close();
-}
-
 function submitReview() {
   if (state.aiReview.status === "running") return;
   if (reviewData.source?.canPublishGitHubReview) {
@@ -2882,10 +2906,6 @@ function getKeyboardActions() {
       enabled: () => state.aiReview.status !== "running",
       match: key("p"),
     }),
-    shortcutAction("save-close-review", "Save & close", "", saveAndCloseReview, {
-      keywords: "save close exit",
-      enabled: () => state.aiReview.status !== "running",
-    }),
   ];
 }
 
@@ -3019,7 +3039,13 @@ function handleGlobalShortcut(event) {
 
 submitButton.addEventListener("click", submitReview);
 
-saveCloseButton.addEventListener("click", saveAndCloseReview);
+autosaveStatusButton?.addEventListener("click", () => {
+  if (autosaveStatusButton.dataset.status === "failed") saveSessionNow();
+});
+
+window.addEventListener("beforeunload", () => {
+  saveSessionNow({ showStatus: false });
+});
 
 fileCommentButton.addEventListener("click", () => {
   showFileCommentModal();
