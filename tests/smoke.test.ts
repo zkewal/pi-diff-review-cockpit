@@ -27,7 +27,17 @@ test("right-panel UI avoids duplicated review text and dead progress affordances
   assert.equal(appJs.includes("Rerun AI review"), false);
   assert.equal(appJs.includes("h-1.5 overflow-hidden rounded-full"), false);
   assert.equal(appJs.includes("No suggested comment."), false);
-  assert.equal(appJs.includes("AI Suggested Draft"), true);
+  assert.equal(appJs.includes("AI Suggested Draft"), false);
+  assert.equal(appJs.includes("Draft ready on diff"), false);
+  assert.equal(appJs.includes("Open inline"), false);
+  assert.equal(appJs.includes("Remove draft"), false);
+  assert.equal(appJs.includes("Apply suggestion"), false);
+  assert.equal(appJs.includes("Stage Comment"), true);
+  assert.equal(appJs.includes("Staged"), true);
+  assert.equal(appJs.includes("data-comment-action=\"edit\""), true);
+  assert.equal(appJs.includes("data-comment-action=\"save\""), true);
+  assert.equal(appJs.includes("data-comment-action=\"cancel\""), true);
+  assert.equal(appJs.includes("data-comment-action=\"delete\""), true);
 });
 
 test("finding cards focus and pulse the selected inline finding", () => {

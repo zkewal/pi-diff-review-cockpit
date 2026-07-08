@@ -105,7 +105,7 @@ export interface ReviewRunAiReviewPayload {
 export type ReviewSessionRestoreStatus = "new" | "restored" | "stale" | "refreshed";
 
 export interface ReviewActiveInsightState {
-  type: "default" | "chapter" | "finding";
+  type: "default" | "chapter" | "finding" | "comment";
   id: string | null;
 }
 

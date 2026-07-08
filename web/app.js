@@ -20,7 +20,7 @@ function commentsOrEmpty(value) {
 
 function activeInsightOrDefault(value) {
   if (!isPlainObject(value)) return { type: "default", id: null };
-  if (!["default", "chapter", "finding"].includes(value.type)) return { type: "default", id: null };
+  if (!["default", "chapter", "finding", "comment"].includes(value.type)) return { type: "default", id: null };
   return {
     type: value.type,
     id: typeof value.id === "string" ? value.id : null,
@@ -91,6 +91,7 @@ const state = {
   activeDiffLine: null,
   pendingHunkFocus: null,
   pendingFindingFocus: null,
+  editingCommentIds: new Set(),
   aiReview: {
     requestId: null,
     status: "idle",
@@ -280,7 +281,7 @@ function scopeLabel(scope) {
 function scopeHint(scope) {
   switch (scope) {
     case "git-diff":
-      return "Review changed hunks. Click line numbers to draft comments.";
+      return "Review changed hunks. Click line numbers to stage comments.";
     case "last-commit":
       return "Review the last commit against its parent.";
     case "commit":
@@ -488,7 +489,7 @@ function reviewStatusBadgeClass(done) {
 
 function findingStatusLabel(status) {
   switch (status) {
-    case "accepted-comment": return "Drafted";
+    case "accepted-comment": return "Staged";
     case "dismissed": return "Dismissed";
     case "accepted-risk": return "Accepted risk";
     default: return "Needs review";
@@ -585,14 +586,14 @@ function commentSummaryHtml(comments, emptyText) {
       ${visibleComments.map((comment) => {
         const file = getFileById(comment.fileId);
         const body = String(comment.body || "").trim();
-        const preview = body ? `"${body.replace(/\s+/g, " ").slice(0, 80)}${body.length > 80 ? "..." : ""}"` : "Empty draft";
+        const preview = body ? `"${body.replace(/\s+/g, " ").slice(0, 80)}${body.length > 80 ? "..." : ""}"` : "Empty comment";
         return `
           <button data-comment-jump-id="${escapeHtml(comment.id)}" class="block w-full cursor-pointer rounded px-2 py-1.5 text-left text-xs hover:bg-[#161b22]">
             <span class="block truncate text-review-text">${escapeHtml(getScopeDisplayPath(file, comment.scope))} • ${escapeHtml(commentLocationLabel(comment))} • ${escapeHtml(preview)}</span>
           </button>
         `;
       }).join("")}
-      ${hiddenCount > 0 ? `<div class="px-2 text-xs text-review-muted">${hiddenCount} more draft comment(s).</div>` : ""}
+      ${hiddenCount > 0 ? `<div class="px-2 text-xs text-review-muted">${hiddenCount} more staged comment(s).</div>` : ""}
     </div>
   `;
 }
@@ -613,6 +614,7 @@ function openDraftCommentFromSummary(commentId) {
     state.activeDiffSide = comment.side;
     state.activeDiffLine = comment.startLine;
   }
+  state.activeInsight = { type: "comment", id: comment.id };
   renderAll({ restoreFileScroll: true });
   ensureFileLoaded(file.id, comment.scope);
 
@@ -1466,14 +1468,14 @@ function renderDefaultInsight() {
         </div>
         <div class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-review-muted">
           <span>${findingCounts.total} AI finding(s)</span>
-          <span>${draftComments.length} draft(s)</span>
+          <span>${draftComments.length} staged</span>
           <span>Suggested verdict: <span class="font-medium text-review-text">${escapeHtml(verdict)}</span></span>
         </div>
       </div>
       ${aiReviewPanelHtml()}
       ${draftComments.length > 0 ? `<div>
-        <div class="text-xs font-medium text-review-muted">Drafts</div>
-        <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments yet.")}</div>
+        <div class="text-xs font-medium text-review-muted">Staged comments</div>
+        <div class="mt-2">${commentSummaryHtml(draftComments, "No staged comments yet.")}</div>
       </div>` : ""}
     </div>
   `;
@@ -1516,7 +1518,7 @@ function renderInsightForChapter(chapter) {
         <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-review-muted">
           ${diffstatHtml(chapterDiffstatCounts(chapter), { showZero: true })}
           <span>${(chapter.fileIds || []).length} file(s)</span>
-          <span>${draftComments.length} draft comment(s)</span>
+          <span>${draftComments.length} staged comment(s)</span>
           <span>${chapterFindingCounts.open} finding(s) to review</span>
         </div>
       </div>
@@ -1551,13 +1553,13 @@ function renderInsightForChapter(chapter) {
         </div>
       </div>
       ${draftComments.length > 0 ? `<div>
-        <div class="text-xs font-medium text-review-muted">Drafts</div>
-        <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments in this area.")}</div>
+        <div class="text-xs font-medium text-review-muted">Staged comments</div>
+        <div class="mt-2">${commentSummaryHtml(draftComments, "No staged comments in this area.")}</div>
       </div>` : ""}
       ${findings.length > 0 ? `<div>
         <div class="flex items-center justify-between gap-3">
           <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Findings</div>
-          <div class="text-[11px] text-review-muted">${chapterFindingCounts.open} open • ${chapterFindingCounts.drafted} drafted • ${chapterFindingCounts.dismissed} closed</div>
+          <div class="text-[11px] text-review-muted">${chapterFindingCounts.open} open • ${chapterFindingCounts.drafted} staged • ${chapterFindingCounts.dismissed} closed</div>
         </div>
         <div class="mt-2 space-y-2">
           ${findings.map((finding) => `
@@ -1595,13 +1597,6 @@ function renderInsightForChapter(chapter) {
       else renderTree();
     });
   });
-}
-
-function setFindingStatus(finding, status) {
-  state.findingStatuses[finding.id] = status;
-  delete state.acceptedFindingComments[finding.id];
-  state.activeInsight = { type: "finding", id: finding.id };
-  renderTree();
 }
 
 function chapterForFinding(finding) {
@@ -1670,18 +1665,13 @@ function renderInsightForFinding(finding) {
           `).join("")}
         </div>
       </div>
-      <div class="flex flex-wrap gap-2">
-        ${isDrafted
-          ? `
-            <span class="rounded-md bg-[#238636]/10 px-3 py-1.5 text-xs font-medium text-[#3fb950]">Draft ready on diff</span>
-            <button data-finding-action="open-draft" class="${insightActionButtonClass(false)}">Open inline</button>
-            <button data-finding-action="remove-draft" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Remove draft</button>
-          `
-          : canCreateDraft
-            ? `<button data-finding-action="create-draft" class="${insightActionButtonClass(false)}">Apply suggestion to diff</button>`
-            : `<span class="rounded-md border border-review-border bg-[#010409] px-3 py-1.5 text-xs text-review-muted">No commentable diff line</span>`}
-        <button data-finding-status="${status === "dismissed" ? "new" : "dismissed"}" class="${insightActionButtonClass(status === "dismissed")}">${status === "dismissed" ? "Reopen" : "Dismiss"}</button>
-      </div>
+      ${isDrafted
+        ? stagedCommentBlockHtml(draftComment)
+        : `<div class="flex flex-wrap gap-2">
+            ${canCreateDraft
+              ? `<button data-finding-action="stage-comment" class="${insightActionButtonClass(false)}">Stage Comment</button>`
+              : `<span class="rounded-md border border-review-border bg-[#010409] px-3 py-1.5 text-xs text-review-muted">No commentable diff line</span>`}
+          </div>`}
     </div>
   `;
 
@@ -1694,15 +1684,18 @@ function renderInsightForFinding(finding) {
     });
   });
   insightContentEl.querySelector("[data-finding-action='open-location']")?.addEventListener("click", () => openFirstFindingLocation(finding));
-  insightContentEl.querySelector("[data-finding-action='open-draft']")?.addEventListener("click", () => {
-    const draft = draftCommentForFinding(finding);
-    if (draft) openDraftCommentFromSummary(draft.id);
-  });
-  insightContentEl.querySelector("[data-finding-action='remove-draft']")?.addEventListener("click", () => removeDraftCommentForFinding(finding));
-  insightContentEl.querySelectorAll("[data-finding-status]").forEach((button) => {
-    button.addEventListener("click", () => setFindingStatus(finding, button.getAttribute("data-finding-status")));
-  });
-  insightContentEl.querySelector("[data-finding-action='create-draft']")?.addEventListener("click", () => createFirstDraftCommentFromFinding(finding));
+  bindCommentBlockActions(insightContentEl);
+  insightContentEl.querySelector("[data-finding-action='stage-comment']")?.addEventListener("click", () => createFirstDraftCommentFromFinding(finding));
+}
+
+function renderInsightForComment(comment) {
+  setInsightBreadcrumb(["Staged comment"]);
+  insightContentEl.innerHTML = `
+    <div class="space-y-3">
+      ${stagedCommentBlockHtml(comment)}
+    </div>
+  `;
+  bindCommentBlockActions(insightContentEl);
 }
 
 function renderInsightPanel() {
@@ -1718,6 +1711,13 @@ function renderInsightPanel() {
     const finding = getReviewFinding(state.activeInsight.id);
     if (finding) {
       renderInsightForFinding(finding);
+      return;
+    }
+  }
+  if (state.activeInsight.type === "comment") {
+    const comment = state.comments.find((item) => item.id === state.activeInsight.id);
+    if (comment) {
+      renderInsightForComment(comment);
       return;
     }
   }
@@ -1745,7 +1745,7 @@ function renderReviewMap() {
     const metaItems = [
       `<span>${(chapter.fileIds || []).length} file(s)</span>`,
       stats,
-      draftCommentCount > 0 ? `<span>${draftCommentCount} draft(s)</span>` : "",
+      draftCommentCount > 0 ? `<span>${draftCommentCount} staged</span>` : "",
       findingCount > 0 ? `<span>${findingCount} finding(s)</span>` : "",
     ].filter(Boolean).join("");
     const button = document.createElement("button");
@@ -1859,7 +1859,7 @@ function renderTree() {
     renderReviewMap();
     sidebarTitleEl.textContent = "Review plan";
     setSummary(
-      `${chapters.length} review areas • ${findings.length} findings • ${comments} drafts`,
+      `${chapters.length} review areas • ${findings.length} findings • ${comments} staged`,
       coverageDiffstatCounts(reviewData.analysis?.coverage),
     );
     updateToggleButtons();
@@ -1874,7 +1874,7 @@ function renderTree() {
     renderFindings();
     sidebarTitleEl.textContent = "Findings";
     setSummary(
-      `${findings.length} findings • ${newFindings} to review • ${comments} drafts`,
+      `${findings.length} findings • ${newFindings} to review • ${comments} staged`,
       coverageDiffstatCounts(reviewData.analysis?.coverage),
     );
     updateToggleButtons();
@@ -1902,7 +1902,7 @@ function renderTree() {
   sidebarTitleEl.textContent = scopeLabel(state.currentScope);
   const filteredSuffix = state.fileFilter.trim() ? ` • ${visibleFiles.length} shown` : "";
   setSummary(
-    `${scopedFiles.length} files • ${comments} drafts${filteredSuffix}`,
+    `${scopedFiles.length} files • ${comments} staged${filteredSuffix}`,
     state.currentScope === "all-files" ? null : scopedDiffstatCounts(scopedFiles, state.currentScope),
   );
   updateToggleButtons();
@@ -1961,18 +1961,18 @@ function showPublishGitHubModal() {
   if (state.aiReview.status === "running") return;
   syncCommentBodiesFromDOM();
   const submitPayload = buildSubmitPayload();
-  const draftCount = submitPayload.comments.length;
+  const stagedCount = submitPayload.comments.length;
   const findingCounts = findingStatusCounts();
   const backdrop = document.createElement("div");
   backdrop.className = "review-modal-backdrop";
   backdrop.innerHTML = `
     <div class="review-modal-card">
       <div class="mb-1 text-base font-semibold text-white">Submit review</div>
-      <div class="mb-4 text-sm leading-5 text-review-muted">Submit the review body with ${draftCount} draft comment(s). Submitted comments are not synced back into this window yet.</div>
+      <div class="mb-4 text-sm leading-5 text-review-muted">Submit the review body with ${stagedCount} staged comment(s). Submitted comments are not synced back into this window yet.</div>
       <div class="mb-4 grid grid-cols-3 gap-2">
         <div class="rounded-md border border-review-border bg-[#010409] px-3 py-2">
-          <div class="text-sm font-semibold text-white">${draftCount}</div>
-          <div class="text-[10px] uppercase tracking-wider text-review-muted">Draft comments</div>
+          <div class="text-sm font-semibold text-white">${stagedCount}</div>
+          <div class="text-[10px] uppercase tracking-wider text-review-muted">Staged comments</div>
         </div>
         <div class="rounded-md border border-review-border bg-[#010409] px-3 py-2">
           <div class="text-sm font-semibold text-[#58a6ff]">${findingCounts.open}</div>
@@ -1980,7 +1980,7 @@ function showPublishGitHubModal() {
         </div>
         <div class="rounded-md border border-review-border bg-[#010409] px-3 py-2">
           <div class="text-sm font-semibold text-[#3fb950]">${findingCounts.drafted}</div>
-          <div class="text-[10px] uppercase tracking-wider text-review-muted">Findings drafted</div>
+          <div class="text-[10px] uppercase tracking-wider text-review-muted">Findings staged</div>
         </div>
       </div>
       <label class="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-review-muted" for="github-review-event">Verdict</label>
@@ -2079,65 +2079,156 @@ function clearViewZones() {
   activeViewZones = [];
 }
 
-function renderCommentDOM(comment, onDelete) {
-  const container = document.createElement("div");
-  container.className = "view-zone-container";
+function aiFindingIdForComment(comment) {
+  const id = String(comment.id || "");
+  if (!id.startsWith("ai:")) return null;
+  return id.split(":")[1] || null;
+}
+
+function commentSourceTitle(comment) {
+  return aiFindingIdForComment(comment) ? "AI suggestion" : "Your comment";
+}
+
+function isCommentEditing(comment) {
+  return state.editingCommentIds.has(comment.id) || !String(comment.body || "").trim();
+}
+
+function focusCommentTextarea(commentId) {
+  const textarea = [...document.querySelectorAll("textarea[data-comment-id]")]
+    .find((node) => node.getAttribute("data-comment-id") === commentId);
+  if (textarea) textarea.focus();
+}
+
+function deleteComment(comment) {
+  state.comments = state.comments.filter((item) => item.id !== comment.id);
+  state.editingCommentIds.delete(comment.id);
+  const findingId = aiFindingIdForComment(comment);
+  if (findingId && state.findingStatuses[findingId] === "accepted-comment") {
+    state.findingStatuses[findingId] = "new";
+  }
+  updateCommentsUI();
+}
+
+function enterCommentEdit(comment) {
+  state.editingCommentIds.add(comment.id);
+  updateCommentsUI();
+  setTimeout(() => focusCommentTextarea(comment.id), 50);
+}
+
+function saveCommentEdit(comment, block) {
+  const textarea = block?.querySelector("textarea[data-comment-id]");
+  const nextBody = String(textarea?.value || "").trim();
+  if (!nextBody) {
+    deleteComment(comment);
+    return;
+  }
+  comment.body = nextBody;
+  state.editingCommentIds.delete(comment.id);
+  updateCommentsUI();
+  if (comment.side !== "file") {
+    setTimeout(() => focusDiffLine(comment.side, comment.startLine, comment.endLine ?? comment.startLine), 0);
+  }
+}
+
+function cancelCommentEdit(comment) {
+  if (!String(comment.body || "").trim()) {
+    deleteComment(comment);
+    return;
+  }
+  state.editingCommentIds.delete(comment.id);
+  updateCommentsUI();
+  if (comment.side !== "file") {
+    setTimeout(() => focusDiffLine(comment.side, comment.startLine, comment.endLine ?? comment.startLine), 0);
+  }
+}
+
+function bindCommentBlockActions(root = document) {
+  root.querySelectorAll("[data-comment-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const commentId = button.getAttribute("data-comment-id");
+      const comment = state.comments.find((item) => item.id === commentId);
+      if (!comment) return;
+      const action = button.getAttribute("data-comment-action");
+      const block = button.closest("[data-comment-block-id]");
+      if (action === "edit") enterCommentEdit(comment);
+      if (action === "delete") deleteComment(comment);
+      if (action === "save") saveCommentEdit(comment, block);
+      if (action === "cancel") cancelCommentEdit(comment);
+    });
+  });
+}
+
+function stagedCommentInnerHtml(comment) {
   const locationTitle = comment.side === "file"
     ? `File comment • ${scopeLabel(comment.scope)}`
     : `${comment.side === "original" ? "Original" : "Modified"} line ${comment.startLine} • ${scopeLabel(comment.scope)}`;
-  const sourceTitle = String(comment.id || "").startsWith("ai:")
-    ? "AI Suggested Draft"
-    : "Your Draft";
+  const sourceTitle = commentSourceTitle(comment);
+  const editing = isCommentEditing(comment);
+  const body = String(comment.body || "");
 
-  container.innerHTML = `
-    <div class="mb-2 flex items-center justify-between gap-3">
-      <div class="min-w-0">
-        <div class="text-xs font-semibold text-review-text">${escapeHtml(sourceTitle)}</div>
-        <div class="mt-0.5 truncate text-[11px] text-review-muted">${escapeHtml(locationTitle)}</div>
+  if (editing) {
+    return `
+      <div data-comment-block-id="${escapeHtml(comment.id)}">
+        <div class="mb-2 flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="rounded bg-[#238636]/15 px-1.5 py-0.5 text-[10px] font-medium text-[#3fb950]">Staged</span>
+              <span class="text-xs font-semibold text-review-text">${escapeHtml(sourceTitle)}</span>
+            </div>
+            <div class="mt-0.5 truncate text-[11px] text-review-muted">${escapeHtml(locationTitle)}</div>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            <button data-comment-action="cancel" data-comment-id="${escapeHtml(comment.id)}" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:bg-[#21262d]">Cancel</button>
+            <button data-comment-action="save" data-comment-id="${escapeHtml(comment.id)}" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Save</button>
+          </div>
+        </div>
+        <textarea data-comment-id="${escapeHtml(comment.id)}" data-comment-editing="true" class="scrollbar-thin min-h-[76px] w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="Write a review comment">${escapeHtml(body)}</textarea>
       </div>
-      <button data-action="delete" class="shrink-0 cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Delete</button>
+    `;
+  }
+
+  return `
+    <div data-comment-block-id="${escapeHtml(comment.id)}">
+      <div class="mb-2 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="rounded bg-[#238636]/15 px-1.5 py-0.5 text-[10px] font-medium text-[#3fb950]">Staged</span>
+            <span class="text-xs font-semibold text-review-text">${escapeHtml(sourceTitle)}</span>
+          </div>
+          <div class="mt-0.5 truncate text-[11px] text-review-muted">${escapeHtml(locationTitle)}</div>
+        </div>
+        <div class="flex shrink-0 items-center gap-2">
+          <button data-comment-action="edit" data-comment-id="${escapeHtml(comment.id)}" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:bg-[#21262d]">Edit</button>
+          <button data-comment-action="delete" data-comment-id="${escapeHtml(comment.id)}" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Delete</button>
+        </div>
+      </div>
+      <div class="whitespace-pre-wrap rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm leading-5 text-review-text">${escapeHtml(body)}</div>
     </div>
-    <textarea data-comment-id="${escapeHtml(comment.id)}" class="scrollbar-thin min-h-[76px] w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="Leave a comment"></textarea>
   `;
-  const textarea = container.querySelector("textarea");
-  const saveDraft = () => {
-    comment.body = textarea.value.trim();
-    if (!comment.body) {
-      onDelete();
-      return;
-    }
-    textarea.value = comment.body;
-    textarea.blur();
-    if (comment.side !== "file") {
-      setTimeout(() => focusDiffLine(comment.side, comment.startLine, comment.endLine ?? comment.startLine), 0);
-    }
-    scheduleSessionSave();
-  };
-  textarea.value = comment.body || "";
-  textarea.addEventListener("input", () => {
-    comment.body = textarea.value;
-    scheduleSessionSave();
-  });
-  textarea.addEventListener("keydown", (event) => {
+}
+
+function stagedCommentBlockHtml(comment) {
+  return `<div class="rounded-md border border-review-border bg-[#010409] p-3">${stagedCommentInnerHtml(comment)}</div>`;
+}
+
+function renderCommentDOM(comment) {
+  const container = document.createElement("div");
+  container.className = "view-zone-container";
+  container.innerHTML = stagedCommentInnerHtml(comment);
+  bindCommentBlockActions(container);
+  const textarea = container.querySelector("textarea[data-comment-id]");
+  if (textarea) textarea.addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       event.preventDefault();
-      saveDraft();
+      saveCommentEdit(comment, container.querySelector("[data-comment-block-id]"));
       return;
     }
     if (event.key === "Escape") {
       event.preventDefault();
-      if (!textarea.value.trim()) {
-        onDelete();
-        return;
-      }
-      textarea.blur();
-      if (comment.side !== "file") {
-        setTimeout(() => focusDiffLine(comment.side, comment.startLine, comment.endLine ?? comment.startLine), 0);
-      }
+      cancelCommentEdit(comment);
     }
   });
-  container.querySelector("[data-action='delete']").addEventListener("click", onDelete);
-  if (!comment.body) setTimeout(() => textarea.focus(), 50);
+  if (textarea && !comment.body) setTimeout(() => textarea.focus(), 50);
   return container;
 }
 
@@ -2214,15 +2305,6 @@ function draftCommentForFinding(finding) {
   return state.comments.find((comment) => String(comment.id || "").startsWith(`ai:${finding.id}:`)) || null;
 }
 
-function removeDraftCommentForFinding(finding) {
-  const draft = draftCommentForFinding(finding);
-  if (!draft) return;
-  state.comments = state.comments.filter((comment) => comment.id !== draft.id);
-  state.findingStatuses[finding.id] = "new";
-  state.activeInsight = { type: "finding", id: finding.id };
-  updateCommentsUI();
-}
-
 function renderAiFindingZoneDOM(finding, location) {
   const container = document.createElement("div");
   container.className = "view-zone-container ai-finding-zone";
@@ -2239,18 +2321,11 @@ function renderAiFindingZoneDOM(finding, location) {
     </div>
     <div class="text-sm font-medium leading-5 text-white">${escapeHtml(finding.title)}</div>
     <div class="mt-1 line-clamp-2 text-xs leading-5 text-review-muted">${escapeHtml(finding.explanation)}</div>
-    <div class="mt-2 flex items-center justify-end gap-2">
-      <button data-action="open" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:bg-[#21262d]">Open details</button>
-      <button data-action="dismiss" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Dismiss</button>
-      <button data-action="accept" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Apply suggestion</button>
+    <div class="mt-2 flex items-center justify-end">
+      <button data-action="stage-comment" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-3 py-1.5 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Stage Comment</button>
     </div>
   `;
-  container.querySelector("[data-action='open']").addEventListener("click", () => {
-    state.activeInsight = { type: "finding", id: finding.id };
-    renderTree();
-  });
-  container.querySelector("[data-action='dismiss']").addEventListener("click", () => setFindingStatus(finding, "dismissed"));
-  container.querySelector("[data-action='accept']").addEventListener("click", () => createDraftCommentFromFinding(finding, location));
+  container.querySelector("[data-action='stage-comment']").addEventListener("click", () => createDraftCommentFromFinding(finding, location));
   return container;
 }
 
@@ -2282,16 +2357,14 @@ function syncViewZones() {
 
   inlineComments.forEach((item) => {
     const editor = item.side === "original" ? originalEditor : modifiedEditor;
-    const domNode = renderCommentDOM(item, () => {
-      state.comments = state.comments.filter((comment) => comment.id !== item.id);
-      updateCommentsUI();
-    });
+    const domNode = renderCommentDOM(item);
 
     editor.changeViewZones((accessor) => {
       const lineCount = typeof item.body === "string" && item.body.length > 0 ? item.body.split("\n").length : 1;
+      const editing = isCommentEditing(item);
       const id = accessor.addZone({
         afterLineNumber: item.startLine,
-        heightInPx: Math.max(132, lineCount * 22 + 68),
+        heightInPx: editing ? Math.max(132, lineCount * 22 + 68) : Math.max(104, lineCount * 20 + 72),
         domNode,
       });
       activeViewZones.push({ id, editor });
@@ -2353,10 +2426,7 @@ function renderFileComments() {
 
   fileCommentsContainer.className = "border-b border-review-border bg-[#0d1117] px-4 py-4 space-y-4";
   fileComments.forEach((comment) => {
-    const dom = renderCommentDOM(comment, () => {
-      state.comments = state.comments.filter((item) => item.id !== comment.id);
-      updateCommentsUI();
-    });
+    const dom = renderCommentDOM(comment);
     dom.className = "rounded-lg border border-review-border bg-review-panel p-4";
     fileCommentsContainer.appendChild(dom);
   });
@@ -2440,6 +2510,7 @@ function mountFile(options = {}) {
 function syncCommentBodiesFromDOM() {
   const textareas = document.querySelectorAll("textarea[data-comment-id]");
   textareas.forEach((textarea) => {
+    if (textarea.getAttribute("data-comment-editing") === "true") return;
     const commentId = textarea.getAttribute("data-comment-id");
     const comment = state.comments.find((item) => item.id === commentId);
     if (comment) comment.body = textarea.value;
