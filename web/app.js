@@ -62,9 +62,17 @@ function hasFilesForScope(scope, commitSha) {
 const restoredCommitSha = typeof restoredSession.selectedCommitSha === "string" && reviewData.commits?.some((commit) => commit.sha === restoredSession.selectedCommitSha)
   ? restoredSession.selectedCommitSha
   : reviewData.commits?.[0]?.sha || null;
-const restoredScope = typeof restoredSession.currentScope === "string" && hasFilesForScope(restoredSession.currentScope, restoredCommitSha)
+const initialScope = defaultScope();
+const restoredScope = typeof restoredSession.currentScope === "string"
+  && (restoredSession.currentScope !== "all-files" || initialScope === "all-files")
+  && hasFilesForScope(restoredSession.currentScope, restoredCommitSha)
   ? restoredSession.currentScope
-  : defaultScope();
+  : initialScope;
+const restoredForCurrentDiff = reviewData.session?.status === "restored";
+const restoredAiReviewCompleted = restoredForCurrentDiff && (restoredSession.aiReviewCompleted === true || (reviewData.analysis?.findings || []).length > 0);
+const restoredAiReviewStatus = restoredForCurrentDiff && ["done", "failed"].includes(restoredSession.aiReviewStatus)
+  ? restoredSession.aiReviewStatus
+  : restoredAiReviewCompleted ? "done" : "idle";
 
 const state = {
   activeFileId: typeof restoredSession.activeFileId === "string" ? restoredSession.activeFileId : null,
@@ -92,10 +100,17 @@ const state = {
   pendingHunkFocus: null,
   pendingFindingFocus: null,
   editingCommentIds: new Set(),
+  collapsedCommentIds: new Set(),
+  expandedFindingIds: new Set(),
+  aiReviewCompleted: restoredAiReviewCompleted,
   aiReview: {
     requestId: null,
-    status: "idle",
-    message: "AI review has not run.",
+    status: restoredAiReviewStatus,
+    message: restoredAiReviewStatus === "failed"
+      ? reviewData.analysis?.message || "AI analysis failed."
+      : restoredAiReviewCompleted
+      ? reviewData.analysis?.message || "AI analysis complete."
+      : "AI analysis will run in the background.",
     progress: null,
     config: reviewData.aiReviewConfig || null,
   },
@@ -211,6 +226,8 @@ function buildSessionSnapshot() {
     hideUnchanged: state.hideUnchanged,
     wrapLines: state.wrapLines,
     sidebarCollapsed: state.sidebarCollapsed,
+    aiReviewCompleted: state.aiReviewCompleted,
+    aiReviewStatus: ["done", "failed"].includes(state.aiReview.status) ? state.aiReview.status : undefined,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -222,10 +239,10 @@ function setAutosaveStatus(status, message, detail = "") {
   autosaveStatusButton.title = detail || message;
   autosaveStatusButton.disabled = status !== "failed";
   autosaveStatusButton.className = {
-    saving: "cursor-default rounded-md px-2 py-1 text-[11px] font-medium text-review-muted",
-    saved: "cursor-default rounded-md px-2 py-1 text-[11px] font-medium text-[#3fb950]",
-    failed: "cursor-pointer rounded-md bg-[#f85149]/10 px-2 py-1 text-[11px] font-medium text-[#ff7b72] hover:bg-[#f85149]/15",
-  }[status] || "cursor-default rounded-md px-2 py-1 text-[11px] font-medium text-review-muted";
+    saving: "shrink-0 cursor-default rounded px-1.5 py-0.5 text-[10px] font-medium text-review-muted",
+    saved: "shrink-0 cursor-default rounded px-1.5 py-0.5 text-[10px] font-medium text-[#3fb950]",
+    failed: "shrink-0 cursor-pointer rounded bg-[#f85149]/10 px-1.5 py-0.5 text-[10px] font-medium text-[#ff7b72] hover:bg-[#f85149]/15",
+  }[status] || "shrink-0 cursor-default rounded px-1.5 py-0.5 text-[10px] font-medium text-review-muted";
 }
 
 function saveSessionNow(options = {}) {
@@ -353,7 +370,7 @@ function diffstatHtml(counts, options = {}) {
   const deleted = Math.max(0, Number(counts.deleted || 0));
   if (!options.showZero && added === 0 && deleted === 0) return "";
 
-  const blockCount = options.blocks || 5;
+  const blockCount = Number.isInteger(options.blocks) ? Math.max(0, options.blocks) : 5;
   const total = added + deleted;
   let addBlocks = 0;
   let delBlocks = 0;
@@ -388,16 +405,35 @@ function diffstatHtml(counts, options = {}) {
         <span class="diffstat-add">+${added}</span>
         <span class="diffstat-del">-${deleted}</span>
       </span>
-      <span class="diffstat-bars" aria-hidden="true">
+      ${blockCount > 0 ? `<span class="diffstat-bars" aria-hidden="true">
         ${blocks.map((className) => `<span class="${className}"></span>`).join("")}
-      </span>
+      </span>` : ""}
     </span>
   `;
 }
 
-function setSummary(summary, counts = null) {
+function setSummary(summary, counts = null, progress = null) {
   const stats = diffstatHtml(counts, { compact: true });
-  summaryEl.innerHTML = `${stats ? `${stats}<span class="mx-1 text-review-muted">•</span>` : ""}<span>${escapeHtml(summary)}</span>`;
+  if (!progress) {
+    summaryEl.innerHTML = `${stats ? `${stats}<span class="mx-1 text-review-muted">•</span>` : ""}<span>${escapeHtml(summary)}</span>`;
+    return;
+  }
+
+  const total = Math.max(0, Number(progress.total || 0));
+  const reviewed = Math.max(0, Math.min(total, Number(progress.reviewed || 0)));
+  const percent = total > 0 ? Math.round((reviewed / total) * 100) : 0;
+  const staged = Math.max(0, Number(progress.staged || 0));
+  summaryEl.innerHTML = `
+    <div class="flex min-w-0 items-center gap-2">
+      ${stats ? `<span class="shrink-0">${stats}</span>` : ""}
+      <span class="min-w-0 truncate">${escapeHtml(summary)}</span>
+      <span class="shrink-0 rounded bg-[#161b22] px-1.5 py-0.5 text-[10px] font-medium text-review-muted">${reviewed}/${total} reviewed</span>
+      <span class="shrink-0 rounded bg-[#161b22] px-1.5 py-0.5 text-[10px] font-medium text-review-muted">${staged} staged</span>
+      <span class="h-1 w-20 shrink-0 overflow-hidden rounded-full bg-[#30363d]" title="${reviewed}/${total} files reviewed">
+        <span class="block h-full rounded-full bg-[#58a6ff]" style="width: ${percent}%"></span>
+      </span>
+    </div>
+  `;
 }
 
 function chapterRangeLineCount(chapter, side) {
@@ -432,6 +468,20 @@ function severityTextClass(severity) {
       return "text-[#58a6ff]";
     default:
       return "text-review-muted";
+  }
+}
+
+function severityAccentColor(severity) {
+  switch (severity) {
+    case "critical":
+    case "high":
+      return "#f85149";
+    case "medium":
+      return "#d29922";
+    case "low":
+      return "#58a6ff";
+    default:
+      return "#d2a8ff";
   }
 }
 
@@ -586,6 +636,76 @@ function isFileReviewed(fileId) {
   return state.reviewedFiles[fileId] === true;
 }
 
+function uniqueFiles(files) {
+  const seen = new Set();
+  const result = [];
+  for (const file of files) {
+    if (!file || seen.has(file.id)) continue;
+    seen.add(file.id);
+    result.push(file);
+  }
+  return result;
+}
+
+function fileReviewProgress(files) {
+  const unique = uniqueFiles(files);
+  return {
+    reviewed: unique.filter((file) => isFileReviewed(file.id)).length,
+    total: unique.length,
+  };
+}
+
+function chapterReviewProgress(chapter) {
+  return fileReviewProgress(getChapterDisplayFiles(chapter));
+}
+
+function isChapterReviewed(chapter) {
+  const progress = chapterReviewProgress(chapter);
+  return progress.total > 0
+    ? progress.reviewed >= progress.total
+    : state.reviewedChapters[chapter.id] === true;
+}
+
+function chapterForFile(fileId) {
+  return getReviewChapters().find((chapter) => getChapterDisplayFiles(chapter).some((file) => file.id === fileId)) || null;
+}
+
+function getOrderedReviewFiles() {
+  const scopedFiles = getScopedFiles();
+  const scopedFileIds = new Set(scopedFiles.map((file) => file.id));
+  const planFiles = getReviewChapters()
+    .flatMap((chapter) => getChapterDisplayFiles(chapter))
+    .filter((file) => scopedFileIds.has(file.id));
+  return uniqueFiles([...planFiles, ...scopedFiles]);
+}
+
+function findNextUnreviewedFile(currentFileId) {
+  const files = getOrderedReviewFiles();
+  if (files.length === 0) return null;
+  const currentIndex = files.findIndex((file) => file.id === currentFileId);
+  const startIndex = currentIndex >= 0 ? currentIndex : -1;
+  const orderedCandidates = [
+    ...files.slice(startIndex + 1),
+    ...files.slice(0, Math.max(0, startIndex)),
+  ];
+  return orderedCandidates.find((file) => file.id !== currentFileId && !isFileReviewed(file.id)) || null;
+}
+
+function advanceToNextUnreviewedFile(currentFileId) {
+  const nextFile = findNextUnreviewedFile(currentFileId);
+  if (!nextFile) return false;
+
+  const nextChapter = chapterForFile(nextFile.id);
+  if (state.activeSidebarTab === "review-map" && nextChapter) {
+    state.activeInsight = { type: "chapter", id: nextChapter.id };
+  }
+  openFileWithPendingHunk(nextFile.id, 1);
+  requestAnimationFrame(() => {
+    focusDiffPane();
+  });
+  return true;
+}
+
 function isCommentInScope(comment, scope = state.currentScope) {
   return comment.scope === scope && (comment.scope !== "commit" || comment.commitSha === state.selectedCommitSha);
 }
@@ -603,6 +723,19 @@ function getDraftCommentsForChapter(chapter, scope = state.currentScope) {
   return state.comments.filter((comment) => fileIds.has(comment.fileId) && isCommentInScope(comment, scope));
 }
 
+function getFindingsForFile(fileId) {
+  return getReviewFindings().filter((finding) =>
+    (finding.locations || []).some((location) => location.fileId === fileId)
+  );
+}
+
+function getVisibleFindingsForFile(fileId) {
+  return getFindingsForFile(fileId).filter((finding) => {
+    const status = state.findingStatuses[finding.id] || "new";
+    return status === "new" || status === "accepted-comment";
+  });
+}
+
 function findingStatusCounts() {
   return getReviewFindings().reduce((counts, finding) => {
     const status = state.findingStatuses[finding.id] || "new";
@@ -612,6 +745,71 @@ function findingStatusCounts() {
     else counts.open += 1;
     return counts;
   }, { total: 0, open: 0, drafted: 0, dismissed: 0 });
+}
+
+function aiReviewChapterProgressById() {
+  return new Map((state.aiReview.progress?.chapters || []).map((chapter) => [chapter.chapterId, chapter]));
+}
+
+function runningAiReviewChapterProgress() {
+  return (state.aiReview.progress?.chapters || []).find((chapter) => chapter.status === "running") || null;
+}
+
+function aiReviewFileState(fileId) {
+  if (state.aiReview.status !== "running") return "idle";
+  const progressById = aiReviewChapterProgressById();
+  let hasQueued = false;
+  for (const chapter of getReviewChapters()) {
+    if (!(chapter.fileIds || []).includes(fileId)) continue;
+    const progress = progressById.get(chapter.id);
+    if (progress?.status === "running") return "running";
+    if (progress?.status === "queued") hasQueued = true;
+  }
+  return hasQueued ? "queued" : "idle";
+}
+
+function treeAiReviewState(node) {
+  if (node.kind === "file") return aiReviewFileState(node.file.id);
+  let hasQueued = false;
+  for (const child of node.children.values()) {
+    const stateName = treeAiReviewState(child);
+    if (stateName === "running") return "running";
+    if (stateName === "queued") hasQueued = true;
+  }
+  return hasQueued ? "queued" : "idle";
+}
+
+function aiReviewActiveTargetLabel() {
+  const running = runningAiReviewChapterProgress();
+  if (!running) return null;
+  const chapter = getReviewChapter(running.chapterId);
+  const firstFile = chapter ? getChapterDisplayFiles(chapter)[0] : null;
+  return firstFile
+    ? shortPathName(getScopeDisplayPath(firstFile, "git-diff") || firstFile.path)
+    : running.title;
+}
+
+function aiReviewStatusSummary() {
+  const counts = findingStatusCounts();
+  if (state.aiReview.status === "running") {
+    if (state.aiReview.progress?.phase === "scout") return "✦ Mapping PR...";
+    if (state.aiReview.progress?.phase === "validation") return "✦ Validating findings...";
+    if (state.aiReview.progress?.phase === "synthesis") return "✦ Preparing summary...";
+
+    const target = aiReviewActiveTargetLabel();
+    const chapters = state.aiReview.progress?.chapters || [];
+    const completed = chapters.filter((chapter) => chapter.status === "done" || chapter.status === "failed").length;
+    const total = chapters.length;
+    if (target && total > 0) return `✦ Scanning ${target} (${Math.min(completed + 1, total)}/${total})`;
+    return `✦ ${state.aiReview.message || "Scanning changed hunks..."}`;
+  }
+
+  if (state.aiReview.status === "failed") return "AI scan failed";
+  if (state.aiReview.status === "done" || state.aiReviewCompleted) {
+    return `✓ AI analysis complete • ${counts.open} finding${counts.open === 1 ? "" : "s"}`;
+  }
+
+  return window.glimpse?.send ? "✦ AI analysis queued" : "AI analysis ready";
 }
 
 function commentLocationLabel(comment) {
@@ -663,6 +861,7 @@ function openDraftCommentFromSummary(commentId) {
     state.activeDiffLine = comment.startLine;
   }
   state.activeInsight = { type: "comment", id: comment.id };
+  state.collapsedCommentIds.delete(comment.id);
   renderAll({ restoreFileScroll: true });
   ensureFileLoaded(file.id, comment.scope);
 
@@ -1111,6 +1310,60 @@ function focusHunk(direction) {
   return moveToAdjacentReviewFile(direction);
 }
 
+function scrollDiffCanvas(direction) {
+  if (!diffEditor) return false;
+  const editor = diffEditor.getModifiedEditor().hasTextFocus()
+    ? diffEditor.getModifiedEditor()
+    : diffEditor.getOriginalEditor().hasTextFocus()
+      ? diffEditor.getOriginalEditor()
+      : diffEditor.getModifiedEditor();
+  editor.setScrollTop(editor.getScrollTop() + direction * 180);
+  editor.focus();
+  return true;
+}
+
+function getCurrentInlineFindingEntry() {
+  const entries = getInlineAiFindingEntries(activeFile());
+  if (entries.length === 0) return null;
+  if (state.activeInsight.type === "finding") {
+    const active = entries.find((entry) => entry.finding.id === state.activeInsight.id);
+    if (active) return active;
+  }
+
+  const current = getCurrentDiffPosition();
+  const sameSide = entries.filter((entry) => entry.location.side === current.side);
+  const candidates = sameSide.length > 0 ? sameSide : entries;
+  const currentLine = current.line ?? 0;
+  return candidates
+    .filter((entry) => entry.location.line >= currentLine)
+    .sort((left, right) => left.location.line - right.location.line)[0]
+    ?? candidates.sort((left, right) => left.location.line - right.location.line)[0]
+    ?? null;
+}
+
+function stageCurrentFinding() {
+  const entry = getCurrentInlineFindingEntry();
+  if (!entry) return false;
+  state.activeInsight = { type: "finding", id: entry.finding.id };
+  createDraftCommentFromFinding(entry.finding, entry.location);
+  return true;
+}
+
+function dismissCurrentFinding() {
+  const entry = getCurrentInlineFindingEntry();
+  if (!entry) return false;
+  dismissFinding(entry.finding);
+  return true;
+}
+
+function editActiveComment() {
+  if (state.activeInsight.type !== "comment") return false;
+  const comment = state.comments.find((item) => item.id === state.activeInsight.id);
+  if (!comment) return false;
+  enterCommentEdit(comment);
+  return true;
+}
+
 function applyPendingHunkFocus() {
   const pending = state.pendingHunkFocus;
   if (!pending || pending.fileId !== state.activeFileId) return;
@@ -1135,6 +1388,37 @@ function pulseInlineFinding(findingId, location) {
     node.classList.add("is-pulsing");
     setTimeout(() => node.classList.remove("is-pulsing"), 1300);
   });
+}
+
+function isAiFindingExpanded(findingId) {
+  return state.expandedFindingIds.has(findingId) || (state.activeInsight.type === "finding" && state.activeInsight.id === findingId);
+}
+
+function findInlineFindingAtLine(side, line) {
+  return getInlineAiFindingEntries(activeFile())
+    .find((entry) => entry.location.side === side && Number(entry.location.line) === Number(line)) || null;
+}
+
+function toggleInlineFindingAtLine(side, line) {
+  const entry = findInlineFindingAtLine(side, line);
+  if (!entry) return false;
+
+  if (state.expandedFindingIds.has(entry.finding.id)) {
+    state.expandedFindingIds.delete(entry.finding.id);
+    if (state.activeInsight.type === "finding" && state.activeInsight.id === entry.finding.id) {
+      state.activeInsight = { type: "default", id: null };
+    }
+  } else {
+    state.expandedFindingIds.add(entry.finding.id);
+    state.activeInsight = { type: "finding", id: entry.finding.id };
+  }
+
+  syncViewZones();
+  updateDecorations();
+  renderTree();
+  focusDiffLine(side, line, line);
+  requestAnimationFrame(() => pulseInlineFinding(entry.finding.id, entry.location));
+  return true;
 }
 
 function queueFindingFocus(location, findingId = null) {
@@ -1162,8 +1446,228 @@ function applyPendingFindingFocus() {
   const focused = focusDiffLine(pending.side, pending.line, pending.endLine);
   if (!focused) return false;
   state.pendingFindingFocus = null;
+  if (pending.findingId) state.expandedFindingIds.add(pending.findingId);
+  syncViewZones();
+  updateDecorations();
   pulseInlineFinding(pending.findingId, pending);
   return true;
+}
+
+function treeReviewProgress(node) {
+  if (node.kind === "file") {
+    return {
+      reviewed: isFileReviewed(node.file.id) ? 1 : 0,
+      total: 1,
+    };
+  }
+
+  return [...node.children.values()].reduce((progress, child) => {
+    const childProgress = treeReviewProgress(child);
+    progress.reviewed += childProgress.reviewed;
+    progress.total += childProgress.total;
+    return progress;
+  }, { reviewed: 0, total: 0 });
+}
+
+function treeContainsFile(node, fileId) {
+  if (!fileId) return false;
+  if (node.kind === "file") return node.file.id === fileId;
+  return [...node.children.values()].some((child) => treeContainsFile(child, fileId));
+}
+
+function compactDirectoryNode(node) {
+  let compactNode = node;
+  const pathParts = [node.name];
+
+  while (compactNode.kind === "dir" && compactNode.children.size === 1) {
+    const onlyChild = [...compactNode.children.values()][0];
+    if (!onlyChild || onlyChild.kind !== "dir") break;
+    compactNode = onlyChild;
+    pathParts.push(onlyChild.name);
+  }
+
+  return {
+    node: compactNode,
+    name: pathParts.join("/"),
+  };
+}
+
+function fileNavIconHtml(file, options = {}) {
+  const requestState = getRequestState(file.id, state.currentScope);
+  const reviewed = isFileReviewed(file.id);
+  const loading = requestState.requestId != null && requestState.contents == null;
+  const errored = requestState.error != null;
+  const aiState = aiReviewFileState(file.id);
+
+  if (aiState === "running") {
+    return `<span class="review-scan-pulse" title="AI is scanning this file"></span>`;
+  }
+
+  const mutedClass = options.active ? "text-[#c9d1d9]" : "text-review-muted";
+  if (reviewed) return `<span class="mt-0.5 shrink-0 text-[12px] text-[#3fb950]">✓</span>`;
+  if (errored) return `<span class="mt-0.5 shrink-0 text-[12px] text-red-400">!</span>`;
+  if (loading || aiState === "queued") return `<span class="mt-0.5 shrink-0 text-[12px] text-[#58a6ff]">…</span>`;
+  return `
+    <svg aria-hidden="true" class="mt-0.5 h-3.5 w-3.5 shrink-0 ${mutedClass}" viewBox="0 0 16 16" fill="none">
+      <path d="M4.25 2.75h5.1l2.4 2.4v8.1h-7.5V2.75Z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"></path>
+      <path d="M9.25 2.95V5.4h2.35" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+  `;
+}
+
+function fileNavBadgesHtml(file) {
+  const findingCount = getVisibleFindingsForFile(file.id).length;
+  const commentCount = getDraftCommentsForFile(file.id).length;
+  const stats = diffstatHtml(fileDiffstatCounts(file), { compact: true, blocks: 0 });
+  return `
+    ${stats}
+    ${findingCount > 0 ? `<button type="button" data-finding-file-id="${escapeHtml(file.id)}" class="shrink-0 rounded px-1 py-0.5 text-[10px] font-semibold text-[#d2a8ff] hover:bg-[#8957e5]/12 focus:outline-none focus:ring-1 focus:ring-[#8957e5]/50" title="Jump to first AI finding in this file">● ${findingCount}</button>` : ""}
+    ${commentCount > 0 ? `<span class="shrink-0 rounded-full bg-[#238636]/14 px-1.5 py-0.5 text-[10px] font-semibold text-[#7ee787]" title="${commentCount} staged comment${commentCount === 1 ? "" : "s"}">✓ ${commentCount}</span>` : ""}
+  `;
+}
+
+function fileDisplayParts(file, label) {
+  const displayPath = String(label || getScopeDisplayPath(file, state.currentScope) || file.path || "");
+  const parts = displayPath.split("/").filter(Boolean);
+  if (parts.length <= 1) {
+    return { filename: displayPath || "Untitled file", directory: "" };
+  }
+  const filename = parts[parts.length - 1];
+  const directory = `${parts.slice(0, -1).join("/")}/`;
+  return { filename, directory };
+}
+
+function firstVisibleFindingForFile(fileId) {
+  return getVisibleFindingsForFile(fileId).find((finding) => firstExistingFindingLocation(finding)) || null;
+}
+
+function openFirstVisibleFindingForFile(fileId) {
+  const finding = firstVisibleFindingForFile(fileId);
+  if (!finding) return false;
+  openFirstFindingLocation(finding);
+  return true;
+}
+
+function bindFindingBadgeActions(container) {
+  container.querySelectorAll("[data-finding-file-id]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openFirstVisibleFindingForFile(button.getAttribute("data-finding-file-id"));
+    });
+  });
+}
+
+function renderFileRow(file, options = {}) {
+  const reviewed = isFileReviewed(file.id);
+  const active = file.id === state.activeFileId;
+  const label = options.label || getScopeDisplayPath(file, state.currentScope) || file.path;
+  const display = fileDisplayParts(file, label);
+  const row = document.createElement("div");
+  row.title = label;
+  row.className = [
+    "group flex w-full items-start justify-between gap-2 rounded px-2 py-1.5 text-left text-[13px]",
+    active ? "bg-[#373e47] text-white" : reviewed ? "text-[#c9d1d9] hover:bg-[#21262d]" : "text-[#8b949e] hover:bg-[#21262d] hover:text-[#c9d1d9]",
+  ].join(" ");
+  row.style.paddingLeft = `${options.indentPx ?? 24}px`;
+  row.innerHTML = `
+    <button type="button" class="flex min-w-0 flex-1 cursor-pointer items-start gap-1.5 text-left ${active ? "font-medium" : ""}" ${active ? "aria-current=\"true\"" : ""}>
+      ${fileNavIconHtml(file, { active })}
+      <span class="min-w-0 flex-1">
+        <span class="block truncate ${reviewed ? "line-through opacity-60" : ""}">${escapeHtml(display.filename)}</span>
+        ${display.directory ? `<span class="mt-0.5 block truncate text-[11px] font-normal text-review-muted/80">${escapeHtml(display.directory)}</span>` : ""}
+      </span>
+    </button>
+    <span class="flex w-[78px] shrink-0 items-center justify-end gap-1.5 pt-0.5">
+      ${fileNavBadgesHtml(file)}
+    </span>
+  `;
+  row.querySelector("button")?.addEventListener("click", () => openFile(file.id));
+  bindFindingBadgeActions(row);
+  fileTreeEl.appendChild(row);
+}
+
+function getReviewNavigationGroups(files) {
+  const scopedFileIds = new Set(files.map((file) => file.id));
+  const assignedIds = new Set();
+  const groups = [];
+
+  getReviewChapters().forEach((chapter, index) => {
+    const chapterFiles = uniqueFiles(getChapterFiles(chapter).filter((file) => scopedFileIds.has(file.id)));
+    if (chapterFiles.length === 0) return;
+    chapterFiles.forEach((file) => assignedIds.add(file.id));
+    groups.push({
+      id: `chapter:${chapter.id}`,
+      title: `${groups.length + 1}. ${chapter.title}`,
+      chapter,
+      files: chapterFiles,
+      order: index,
+    });
+  });
+
+  const remainingFiles = files.filter((file) => !assignedIds.has(file.id));
+  if (remainingFiles.length > 0) {
+    groups.push({
+      id: "chapter:other-changes",
+      title: "Other changes",
+      chapter: null,
+      files: remainingFiles,
+      order: groups.length,
+    });
+  }
+
+  return groups;
+}
+
+function renderReviewGroup(group) {
+  const progress = fileReviewProgress(group.files);
+  const complete = progress.total > 0 && progress.reviewed >= progress.total;
+  const active = group.files.some((file) => file.id === state.activeFileId);
+  if (complete && state.collapsedDirs[group.id] == null && !active) {
+    state.collapsedDirs[group.id] = true;
+  }
+  const collapsed = state.collapsedDirs[group.id] === true;
+  const running = group.files.some((file) => aiReviewFileState(file.id) === "running");
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = [
+    "group flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-[13px] hover:bg-[#21262d]",
+    active ? "bg-[#161b22] text-white" : complete ? "text-review-muted" : "text-[#c9d1d9]",
+  ].join(" ");
+  row.innerHTML = `
+    <svg class="h-4 w-4 shrink-0 text-[#8b949e] transition-transform ${collapsed ? "-rotate-90" : ""}" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M12.78 6.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 7.28a.749.749 0 0 1 1.06-1.06L8 9.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"></path>
+    </svg>
+    ${running
+      ? `<span class="review-scan-pulse" title="AI is scanning this review area"></span>`
+      : complete ? `<span class="shrink-0 text-[12px] text-[#3fb950]">✓</span>` : ""}
+    <span class="min-w-0 flex-1 truncate font-medium ${complete ? "line-through opacity-70" : ""}">${escapeHtml(group.title)}</span>
+    <span class="shrink-0 text-[11px] text-review-muted">${progress.reviewed}/${progress.total}${complete ? " ✓" : ""}</span>
+  `;
+  row.addEventListener("click", () => {
+    state.collapsedDirs[group.id] = !collapsed;
+    if (group.chapter) state.activeInsight = { type: "chapter", id: group.chapter.id };
+    renderTree();
+  });
+  fileTreeEl.appendChild(row);
+
+  if (!collapsed) {
+    group.files.forEach((file) => {
+      renderFileRow(file, {
+        label: getScopeDisplayPath(file, state.currentScope) || file.path,
+        indentPx: 25,
+      });
+    });
+  }
+}
+
+function renderReviewPlanTree(files) {
+  const groups = getReviewNavigationGroups(files);
+  if (groups.length === 0) {
+    renderTreeNode(buildTree(files), 0);
+    return;
+  }
+  groups.forEach(renderReviewGroup);
 }
 
 function renderTreeNode(node, depth) {
@@ -1176,93 +1680,55 @@ function renderTreeNode(node, depth) {
 
   for (const child of children) {
     if (child.kind === "dir") {
-      const collapsed = state.collapsedDirs[child.path] === true;
+      const compact = compactDirectoryNode(child);
+      const compactChild = compact.node;
+      const progress = treeReviewProgress(compactChild);
+      const complete = progress.total > 0 && progress.reviewed >= progress.total;
+      if (complete && state.collapsedDirs[compactChild.path] == null && !treeContainsFile(compactChild, state.activeFileId)) {
+        state.collapsedDirs[compactChild.path] = true;
+      }
+      const collapsed = state.collapsedDirs[compactChild.path] === true;
+      const aiState = treeAiReviewState(compactChild);
       const row = document.createElement("button");
       row.type = "button";
-      row.className = "group flex w-full items-center gap-1.5 px-2 py-1 text-left text-[13px] text-[#c9d1d9] hover:bg-[#21262d]";
+      row.className = [
+        "group flex w-full items-center gap-1.5 px-2 py-1 text-left text-[13px] hover:bg-[#21262d]",
+        complete ? "text-review-muted" : "text-[#c9d1d9]",
+      ].join(" ");
       row.style.paddingLeft = `${depth * indentPx + 8}px`;
       row.innerHTML = `
         <svg class="h-4 w-4 shrink-0 text-[#8b949e] transition-transform ${collapsed ? "-rotate-90" : ""}" viewBox="0 0 16 16" fill="currentColor">
           <path d="M12.78 6.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 7.28a.749.749 0 0 1 1.06-1.06L8 9.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"></path>
         </svg>
-        <span class="truncate">${escapeHtml(child.name)}</span>
+        ${aiState === "running"
+          ? `<span class="review-scan-pulse" title="AI is scanning this area"></span>`
+          : complete ? `<span class="shrink-0 text-[12px] text-[#3fb950]">✓</span>` : ""}
+        <span class="min-w-0 flex-1 truncate ${complete ? "opacity-70" : ""}">${escapeHtml(compact.name)}</span>
+        <span class="shrink-0 text-[11px] text-review-muted">${progress.reviewed}/${progress.total}</span>
       `;
       row.addEventListener("click", () => {
-        state.collapsedDirs[child.path] = !collapsed;
+        state.collapsedDirs[compactChild.path] = !collapsed;
         renderTree();
       });
       fileTreeEl.appendChild(row);
-      if (!collapsed) renderTreeNode(child, depth + 1);
+      if (!collapsed) renderTreeNode(compactChild, depth + 1);
       continue;
     }
 
-    const file = child.file;
-    const count = getDraftCommentsForFile(file.id).length;
-    const reviewed = isFileReviewed(file.id);
-    const requestState = getRequestState(file.id, state.currentScope);
-    const loading = requestState.requestId != null && requestState.contents == null;
-    const errored = requestState.error != null;
-    const status = getActiveStatus(file);
-    const stats = diffstatHtml(fileDiffstatCounts(file), { compact: true });
-    const button = document.createElement("button");
-    button.type = "button";
-    if (file.id === state.activeFileId) button.setAttribute("aria-current", "true");
-    button.className = [
-      "group flex w-full items-center justify-between gap-2 px-2 py-1 text-left text-[13px]",
-      file.id === state.activeFileId ? "bg-[#373e47] text-white" : reviewed ? "text-[#c9d1d9] hover:bg-[#21262d]" : "text-[#8b949e] hover:bg-[#21262d] hover:text-[#c9d1d9]",
-    ].join(" ");
-    button.style.paddingLeft = `${(depth * indentPx) + 26}px`;
-    button.innerHTML = `
-      <span class="flex min-w-0 items-center gap-1.5 truncate ${file.id === state.activeFileId ? "font-medium" : ""}">
-        <span class="shrink-0 text-[10px] ${reviewed ? "text-[#3fb950]" : errored ? "text-red-400" : loading ? "text-[#58a6ff]" : "text-transparent"}">${reviewed ? "●" : errored ? "!" : loading ? "…" : "●"}</span>
-        <span class="truncate">${escapeHtml(child.name)}</span>
-      </span>
-      <span class="flex shrink-0 items-center gap-1.5">
-        ${stats}
-        ${count > 0 ? `<span class="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[#1f2937] px-1 text-[10px] font-medium text-[#c9d1d9]">${count}</span>` : ""}
-        ${status ? `<span class="font-medium ${statusBadgeClass(status)}">${escapeHtml(statusLabel(status).charAt(0))}</span>` : ""}
-      </span>
-    `;
-    button.addEventListener("click", () => openFile(file.id));
-    fileTreeEl.appendChild(button);
+    renderFileRow(child.file, {
+      label: child.name,
+      indentPx: (depth * indentPx) + 26,
+    });
   }
 }
 
 function renderSearchResults(files) {
   files.forEach((file) => {
     const path = getFileSearchPath(file);
-    const baseName = getBaseName(path);
-    const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
-    const count = getDraftCommentsForFile(file.id).length;
-    const reviewed = isFileReviewed(file.id);
-    const requestState = getRequestState(file.id, state.currentScope);
-    const loading = requestState.requestId != null && requestState.contents == null;
-    const errored = requestState.error != null;
-    const status = getActiveStatus(file);
-    const stats = diffstatHtml(fileDiffstatCounts(file), { compact: true });
-    const button = document.createElement("button");
-    button.type = "button";
-    if (file.id === state.activeFileId) button.setAttribute("aria-current", "true");
-    button.className = [
-      "group flex w-full items-center justify-between gap-3 rounded-md px-2 py-2 text-left",
-      file.id === state.activeFileId ? "bg-[#373e47] text-white" : "text-[#c9d1d9] hover:bg-[#21262d]",
-    ].join(" ");
-    button.innerHTML = `
-      <span class="min-w-0 flex-1">
-        <span class="flex items-center gap-1.5">
-          <span class="shrink-0 text-[10px] ${reviewed ? "text-[#3fb950]" : errored ? "text-red-400" : loading ? "text-[#58a6ff]" : "text-transparent"}">${reviewed ? "●" : errored ? "!" : loading ? "…" : "●"}</span>
-          <span class="truncate text-[13px] ${file.id === state.activeFileId ? "font-medium" : ""}">${escapeHtml(baseName)}</span>
-        </span>
-        <span class="mt-0.5 block truncate pl-[14px] text-[11px] ${file.id === state.activeFileId ? "text-[#c9d1d9]" : "text-review-muted"}">${escapeHtml(parentPath || path)}</span>
-      </span>
-      <span class="flex shrink-0 items-center gap-1.5">
-        ${stats}
-        ${count > 0 ? `<span class="flex h-4 min-w-[16px] items-center justify-center rounded-full bg-[#1f2937] px-1 text-[10px] font-medium text-[#c9d1d9]">${count}</span>` : ""}
-        ${status ? `<span class="font-medium ${statusBadgeClass(status)}">${escapeHtml(statusLabel(status).charAt(0))}</span>` : ""}
-      </span>
-    `;
-    button.addEventListener("click", () => openFile(file.id));
-    fileTreeEl.appendChild(button);
+    renderFileRow(file, {
+      label: path,
+      indentPx: 8,
+    });
   });
 }
 
@@ -1282,17 +1748,26 @@ function setSidebarTab(tab) {
 }
 
 function updateSidebarTabs() {
-  const activeClasses = "rounded bg-[#8957e5]/15 px-2 py-1 text-[11px] font-medium text-[#d2a8ff]";
-  const inactiveClasses = "rounded px-2 py-1 text-[11px] font-medium text-review-muted hover:bg-[#21262d] hover:text-review-text";
-  tabReviewMapButton.className = state.activeSidebarTab === "review-map" ? activeClasses : inactiveClasses;
-  tabFilesButton.className = state.activeSidebarTab === "files" ? activeClasses : inactiveClasses;
-  tabFindingsButton.className = state.activeSidebarTab === "findings" ? activeClasses : inactiveClasses;
+  // The sidebar is a single navigation tree. These legacy tab buttons remain hidden
+  // in the DOM only to avoid breaking older sessions that restore tab state.
+}
+
+function updateFilterPlaceholder() {
+  const count = getScopedFiles().length;
+  const noun = count === 1 ? "file" : "files";
+  sidebarSearchInputEl.placeholder = state.currentScope === "all-files"
+    ? `Filter ${count} ${noun}...`
+    : `Filter ${count} changed ${noun}...`;
+  sidebarSearchInputEl.setAttribute("aria-label", sidebarSearchInputEl.placeholder.replace("...", ""));
 }
 
 function updateScopeButtons() {
-  scopeControlsEl.className = state.activeSidebarTab === "files"
-    ? "mb-3 flex flex-wrap items-center gap-2"
-    : "mb-3 hidden flex-wrap items-center gap-2";
+  scopeControlsEl.className = "hidden";
+  scopeControlsEl.setAttribute("aria-hidden", "true");
+  commitSelectEl.className = "hidden";
+  commitSelectEl.setAttribute("aria-hidden", "true");
+  commitSelectEl.tabIndex = -1;
+  updateFilterPlaceholder();
 
   const counts = {
     diff: reviewData.files.filter((file) => file.inGitDiff).length,
@@ -1319,38 +1794,43 @@ function updateScopeButtons() {
   applyButtonClasses(scopeLastCommitButton, state.currentScope === "last-commit", counts.lastCommit === 0);
   applyButtonClasses(scopeCommitButton, state.currentScope === "commit", !state.selectedCommitSha || counts.commit === 0);
   applyButtonClasses(scopeAllButton, state.currentScope === "all-files", counts.all === 0);
-
-  commitSelectEl.className = state.currentScope === "commit"
-    ? "mb-3 block w-full rounded-md border border-review-border bg-review-panel px-2 py-2 text-xs text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-    : "mb-3 hidden w-full rounded-md border border-review-border bg-review-panel px-2 py-2 text-xs text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500";
 }
 
 function updateAiReviewButton() {
   const running = state.aiReview.status === "running";
   document.querySelectorAll("[data-action='run-ai-review']").forEach((button) => {
     button.disabled = running;
-    button.textContent = running ? "..." : state.aiReview.status === "done" ? "Refresh" : "Run";
-    button.title = state.aiReview.status === "done" ? "Refresh AI review" : "Run AI review";
+    button.textContent = running ? "..." : "Refresh";
+    button.title = "Refresh AI analysis";
     button.className = running
       ? "shrink-0 cursor-default rounded px-2 py-1 text-[11px] font-medium text-review-muted opacity-70"
       : "shrink-0 cursor-pointer rounded px-2 py-1 text-[11px] font-medium text-review-muted hover:bg-[#21262d] hover:text-review-text";
   });
 }
 
+function toolbarButtonClass(active = false) {
+  return active
+    ? "cursor-pointer rounded-md border border-[#2ea043]/50 bg-[#238636] px-3 py-1 text-xs font-medium text-white hover:bg-[#2ea043]"
+    : "cursor-pointer rounded-md border border-transparent bg-transparent px-3 py-1 text-xs font-medium text-review-text hover:bg-[#21262d]";
+}
+
 function updateToggleButtons() {
   const file = activeFile();
   const reviewed = file ? isFileReviewed(file.id) : false;
-  toggleReviewedButton.textContent = reviewed ? "Reviewed" : "Mark reviewed";
-  toggleReviewedButton.className = reviewed
-    ? "cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-3 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25"
-    : "cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1 text-xs font-medium text-review-text hover:bg-[#21262d]";
-  toggleWrapButton.textContent = `Wrap lines: ${state.wrapLines ? "on" : "off"}`;
-  toggleUnchangedButton.textContent = state.hideUnchanged ? "Show full file" : "Show changed areas only";
+  toggleReviewedButton.setAttribute("aria-pressed", reviewed ? "true" : "false");
+  toggleReviewedButton.title = reviewed ? "Mark this file not reviewed" : "Mark this file reviewed and advance";
+  toggleReviewedButton.innerHTML = reviewed ? `<span class="mr-1">✓</span><span>Reviewed</span>` : "<span>Reviewed</span>";
+  toggleReviewedButton.className = toolbarButtonClass(reviewed);
+  toggleWrapButton.textContent = state.wrapLines ? "Wrap lines" : "No wrap";
+  toggleWrapButton.className = toolbarButtonClass(false);
+  toggleUnchangedButton.textContent = state.hideUnchanged ? "Full file" : "Changed areas";
+  toggleUnchangedButton.className = toolbarButtonClass(false);
   toggleUnchangedButton.style.display = activeFileShowsDiff() ? "inline-flex" : "none";
+  fileCommentButton.className = toolbarButtonClass(false);
   updateScopeButtons();
   updateAiReviewButton();
   modeHintEl.textContent = scopeHint(state.currentScope);
-  submitButton.disabled = state.aiReview.status === "running";
+  submitButton.disabled = false;
 }
 
 function findPreferredScopeForFile(file) {
@@ -1383,7 +1863,8 @@ function openFileFromAnalysis(fileId) {
 }
 
 function firstExistingChapterFileId(chapter) {
-  return getChapterDisplayFiles(chapter)[0]?.id ?? null;
+  const files = getChapterDisplayFiles(chapter);
+  return files.find((file) => !isFileReviewed(file.id))?.id ?? files[0]?.id ?? null;
 }
 
 function firstDraftableFindingLocation(finding) {
@@ -1404,133 +1885,6 @@ function firstLocationLabel(finding) {
   return `${location.path}${location.line != null ? `:${location.line}` : ""}`;
 }
 
-function insightActionButtonClass(active) {
-  return active
-    ? "cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-3 py-1.5 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25"
-    : "cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#21262d]";
-}
-
-function insightNavHtml(items) {
-  return `
-    <div class="flex flex-wrap items-center gap-1.5 text-xs text-review-muted">
-      ${items.map((item, index) => `
-        ${index > 0 ? `<span class="text-review-muted">/</span>` : ""}
-        ${item.id ? `
-          <button data-insight-nav="${escapeHtml(item.id)}" class="cursor-pointer rounded px-1.5 py-1 text-review-muted hover:bg-[#21262d] hover:text-review-text">${escapeHtml(item.label)}</button>
-        ` : `<span class="px-1.5 py-1 text-review-text">${escapeHtml(item.label)}</span>`}
-      `).join("")}
-    </div>
-  `;
-}
-
-function bindInsightNav(chapterId = null) {
-  insightContentEl.querySelector("[data-insight-nav='overview']")?.addEventListener("click", () => {
-    state.activeInsight = { type: "default", id: null };
-    renderTree();
-  });
-  insightContentEl.querySelector("[data-insight-nav='chapter']")?.addEventListener("click", () => {
-    if (!chapterId) return;
-    state.activeInsight = { type: "chapter", id: chapterId };
-    renderTree();
-  });
-}
-
-function bindAiReviewControls() {
-  insightContentEl.querySelectorAll("[data-action='run-ai-review']").forEach((button) => {
-    button.addEventListener("click", runAiReviewFromUi);
-  });
-  updateAiReviewButton();
-}
-
-function aiReviewConfigHtml(config) {
-  if (!config) return "";
-  const warnings = Array.isArray(config.warnings) ? config.warnings : [];
-  return warnings.length > 0
-    ? `<div class="relative mt-2 rounded bg-[#d29922]/10 px-2 py-1.5 text-[11px] leading-4 text-[#e3b341]">${warnings.map(escapeHtml).join("<br>")}</div>`
-    : "";
-}
-
-function aiReviewPanelHtml(chapterId = null) {
-  const progress = state.aiReview.progress;
-  const config = progress?.config || state.aiReview.config || reviewData.aiReviewConfig || null;
-  const running = progress?.status === "running";
-  const buttonLabel = running ? "..." : progress?.status === "done" ? "Refresh" : "Run";
-  if (!progress) {
-    return `
-      <div class="rounded-md border border-[#30363d]/70 bg-[#010409] px-2.5 py-2">
-        <div class="flex items-center justify-between gap-2">
-          <div class="min-w-0 truncate text-xs text-review-muted"><span class="font-medium text-[#d2a8ff]">AI</span> idle · ready to scan changed hunks</div>
-          <button data-action="run-ai-review" title="Run AI review" class="shrink-0 cursor-pointer rounded px-2 py-1 text-[11px] font-medium text-[#d2a8ff] hover:bg-[#8957e5]/15">${buttonLabel}</button>
-        </div>
-        ${aiReviewConfigHtml(config)}
-      </div>
-    `;
-  }
-
-  const chapters = chapterId
-    ? progress.chapters.filter((chapter) => chapter.chapterId === chapterId)
-    : progress.chapters;
-  const completedCount = progress.chapters.filter((chapter) => chapter.status === "done").length;
-  const failedCount = progress.chapters.filter((chapter) => chapter.status === "failed").length;
-  const totalFindings = progress.chapters.reduce((total, chapter) => total + chapter.findingCount, 0);
-  const currentChapter = chapterId ? chapters[0] : null;
-  const statusText = currentChapter
-    ? `${humanizeToken(currentChapter.status)} · ${currentChapter.findingCount} finding(s)`
-    : `${humanizeToken(progress.status)} · ${completedCount}/${progress.chapters.length} area(s) · ${totalFindings} finding(s)`;
-
-  return `
-    <div class="rounded-md border border-[#30363d]/70 bg-[#010409] px-2.5 py-2" data-running="${running ? "true" : "false"}">
-      <div class="flex items-center justify-between gap-2">
-        <div class="flex min-w-0 items-center gap-2 text-xs text-review-muted">
-          <span class="font-medium text-[#d2a8ff]">AI</span>
-          ${running ? `<span class="flex items-center gap-1" aria-hidden="true"><span class="ai-pulse-dot"></span><span class="ai-pulse-dot"></span><span class="ai-pulse-dot"></span></span>` : ""}
-          <span class="min-w-0 truncate ${aiReviewStepClass(progress.status)}">${escapeHtml(statusText)}</span>
-        </div>
-        <button data-action="run-ai-review" title="${progress.status === "done" ? "Refresh AI review" : "Run AI review"}" class="shrink-0 cursor-pointer rounded px-2 py-1 text-[11px] font-medium text-review-muted hover:bg-[#21262d] hover:text-review-text">${buttonLabel}</button>
-      </div>
-      ${failedCount > 0 ? `<div class="mt-1 text-[11px] text-[#f85149]">${failedCount} area(s) failed</div>` : ""}
-      ${aiReviewConfigHtml(config)}
-      ${running && progress.scoutSummary ? `<div class="mt-1 line-clamp-1 text-[11px] text-review-muted">${escapeHtml(progress.scoutSummary)}</div>` : ""}
-    </div>
-  `;
-}
-
-function renderDefaultInsight() {
-  setInsightBreadcrumb(["Summary"]);
-  const packet = reviewData.analysis?.approvalPacket;
-  const draftComments = getDraftComments();
-  const findingCounts = findingStatusCounts();
-  const coverage = reviewData.analysis?.coverage;
-  const coverageText = coverage ? coverageSummaryLabel(coverage) : "";
-  const summary = packet?.summary || "Select a review area or run AI review to build the summary.";
-  const verdict = packet?.suggestedVerdict ? humanizeToken(packet.suggestedVerdict) : "Comment";
-
-  insightContentEl.innerHTML = `
-    <div class="space-y-3">
-      <div class="rounded-md bg-[#010409] p-3">
-        <div class="text-base font-semibold leading-6 text-white">${escapeHtml(workflowTitle.title)}</div>
-        <div class="mt-1 text-sm leading-5 text-review-text">${escapeHtml(summary)}</div>
-        <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-review-muted">
-          ${coverage ? diffstatHtml(coverageDiffstatCounts(coverage), { showZero: true }) : ""}
-          ${coverageText ? `<span>${escapeHtml(coverageText)}</span>` : ""}
-        </div>
-        <div class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-review-muted">
-          <span>${findingCounts.total} AI finding(s)</span>
-          <span>${draftComments.length} staged</span>
-          <span>Suggested verdict: <span class="font-medium text-review-text">${escapeHtml(verdict)}</span></span>
-        </div>
-      </div>
-      ${aiReviewPanelHtml()}
-      ${draftComments.length > 0 ? `<div>
-        <div class="text-xs font-medium text-review-muted">Staged comments</div>
-        <div class="mt-2">${commentSummaryHtml(draftComments, "No staged comments yet.")}</div>
-      </div>` : ""}
-    </div>
-  `;
-  bindCommentSummaryLinks();
-  bindAiReviewControls();
-}
-
 function getChapterFiles(chapter) {
   return (chapter.fileIds || []).map(getFileById).filter(Boolean);
 }
@@ -1539,116 +1893,6 @@ function getChapterDisplayFiles(chapter) {
   const files = getChapterFiles(chapter);
   const diffFiles = files.filter((file) => file.inGitDiff);
   return diffFiles.length > 0 ? diffFiles : files;
-}
-
-function renderInsightForChapter(chapter) {
-  setInsightBreadcrumb([chapter.title]);
-  const reviewed = state.reviewedChapters[chapter.id] === true;
-  const files = getChapterDisplayFiles(chapter);
-  const visibleFiles = files.slice(0, 60);
-  const hiddenFileCount = Math.max(0, files.length - visibleFiles.length);
-  const findings = (chapter.findingIds || []).map(getReviewFinding).filter(Boolean);
-  const draftComments = getDraftCommentsForChapter(chapter);
-  const chapterFindingCounts = findings.reduce((counts, finding) => {
-    const status = state.findingStatuses[finding.id] || "new";
-    if (status === "accepted-comment") counts.drafted += 1;
-    else if (status === "dismissed" || status === "accepted-risk") counts.dismissed += 1;
-    else counts.open += 1;
-    return counts;
-  }, { open: 0, drafted: 0, dismissed: 0 });
-
-  insightContentEl.innerHTML = `
-    <div class="space-y-4">
-      ${aiReviewPanelHtml(chapter.id)}
-      <div>
-        <div class="text-base font-semibold leading-6 text-white">${escapeHtml(chapter.title)}</div>
-        <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(chapter.summary)}</div>
-        <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-review-muted">
-          ${diffstatHtml(chapterDiffstatCounts(chapter), { showZero: true })}
-          <span>${(chapter.fileIds || []).length} file(s)</span>
-          <span>${draftComments.length} staged comment(s)</span>
-          <span>${chapterFindingCounts.open} finding(s) to review</span>
-        </div>
-      </div>
-      <button id="chapter-reviewed-toggle" class="${insightActionButtonClass(reviewed)}">${reviewed ? "Mark not reviewed" : "Mark area reviewed"}</button>
-      <div>
-        <div class="flex items-center justify-between gap-3">
-          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Files</div>
-          <div class="text-[11px] text-review-muted">${files.length} in area</div>
-        </div>
-        <div class="mt-2 space-y-1">
-          ${visibleFiles.length === 0 ? `<div class="text-sm text-review-muted">No files linked.</div>` : visibleFiles.map((file) => {
-            const status = file.gitDiff?.status ?? file.worktreeStatus;
-            const stats = diffstatHtml(diffstatCountsFromComparison(file.gitDiff), { compact: true });
-            const active = file.id === state.activeFileId;
-            const commentCount = getDraftCommentsForFile(file.id).length;
-            return `
-              <button
-                data-file-id="${escapeHtml(file.id)}"
-                ${active ? `aria-current="true"` : ""}
-                class="block w-full rounded-md border px-2 py-1.5 text-left text-xs ${active ? "border-[#2ea043]/40 bg-[#238636]/10 text-white" : "border-transparent text-review-text hover:bg-[#21262d]"}"
-              >
-                <span class="flex min-w-0 items-center gap-2">
-                  ${status ? `<span class="shrink-0 font-medium ${statusBadgeClass(status)}">${escapeHtml(statusLabel(status).charAt(0))}</span>` : ""}
-                  <span class="min-w-0 flex-1 truncate ${active ? "font-medium" : ""}">${escapeHtml(file.path)}</span>
-                  ${commentCount > 0 ? `<span class="shrink-0 rounded-full bg-[#1f2937] px-1.5 py-0.5 text-[10px] font-medium text-[#c9d1d9]">${commentCount} comment(s)</span>` : ""}
-                  ${stats}
-                </span>
-              </button>
-            `;
-          }).join("")}
-          ${hiddenFileCount > 0 ? `<div class="px-2 py-1 text-xs text-review-muted">${hiddenFileCount} more file(s) hidden. Use the Files tab to browse all files.</div>` : ""}
-        </div>
-      </div>
-      ${draftComments.length > 0 ? `<div>
-        <div class="text-xs font-medium text-review-muted">Staged comments</div>
-        <div class="mt-2">${commentSummaryHtml(draftComments, "No staged comments in this area.")}</div>
-      </div>` : ""}
-      ${findings.length > 0 ? `<div>
-        <div class="flex items-center justify-between gap-3">
-          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Findings</div>
-          <div class="text-[11px] text-review-muted">${chapterFindingCounts.open} open • ${chapterFindingCounts.drafted} staged • ${chapterFindingCounts.dismissed} closed</div>
-        </div>
-        <div class="mt-2 space-y-2">
-          ${findings.map((finding) => `
-            <button data-finding-id="${escapeHtml(finding.id)}" class="block w-full rounded-md border border-review-border bg-[#010409] p-2 text-left hover:bg-[#161b22]">
-              <div class="flex items-center justify-between gap-2 text-[11px]">
-                <span class="${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
-                <span class="${findingStatusClass(state.findingStatuses[finding.id] || "new")}">${escapeHtml(findingStatusLabel(state.findingStatuses[finding.id] || "new"))}</span>
-              </div>
-              <div class="mt-1 text-xs font-medium text-review-text">${escapeHtml(finding.title)}</div>
-            </button>
-          `).join("")}
-        </div>
-      </div>` : ""}
-    </div>
-  `;
-
-  insightContentEl.querySelector("#chapter-reviewed-toggle")?.addEventListener("click", () => {
-    state.reviewedChapters[chapter.id] = !reviewed;
-    state.activeInsight = { type: "chapter", id: chapter.id };
-    renderTree();
-  });
-  bindInsightNav(chapter.id);
-  bindCommentSummaryLinks();
-  bindAiReviewControls();
-  insightContentEl.querySelectorAll("[data-file-id]").forEach((button) => {
-    button.addEventListener("click", () => openFileFromAnalysis(button.getAttribute("data-file-id")));
-  });
-  insightContentEl.querySelectorAll("[data-finding-id]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const finding = getReviewFinding(button.getAttribute("data-finding-id"));
-      if (!finding) return;
-      state.activeInsight = { type: "finding", id: finding.id };
-      const location = firstExistingFindingLocation(finding);
-      if (location) openFirstFindingLocation(finding);
-      else renderTree();
-    });
-  });
-}
-
-function chapterForFinding(finding) {
-  return getReviewChapters().find((chapter) => (chapter.findingIds || []).includes(finding.id)) || null;
 }
 
 function openFindingLocation(location, options = {}) {
@@ -1673,201 +1917,10 @@ function firstExistingFindingLocation(finding) {
 
 function openFirstFindingLocation(finding) {
   const location = firstExistingFindingLocation(finding);
-  if (location) openFindingLocation(location, { findingId: finding.id });
-}
-
-function renderInsightForFinding(finding) {
-  const chapter = chapterForFinding(finding);
-  setInsightBreadcrumb([...(chapter ? [chapter.title] : []), "Finding"]);
-  const status = state.findingStatuses[finding.id] || "new";
-  const canCreateDraft = firstDraftableFindingLocation(finding) != null;
-  const draftComment = draftCommentForFinding(finding);
-  const isDrafted = status === "accepted-comment" && draftComment != null;
-
-  insightContentEl.innerHTML = `
-    <div class="space-y-4">
-      <div class="rounded-md bg-[#010409] p-3">
-        <div class="mb-2 flex flex-wrap items-center gap-2">
-          <span class="rounded bg-[#30363d]/50 px-2 py-0.5 text-[11px] font-medium text-review-muted">${escapeHtml(humanizeToken(finding.kind))}</span>
-          <span class="${severityBadgeClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
-          <span class="rounded bg-[#30363d]/50 px-2 py-0.5 text-[11px] font-medium text-review-muted">${escapeHtml(humanizeToken(finding.confidence))} confidence</span>
-        </div>
-        <div class="text-base font-semibold leading-6 text-white">${escapeHtml(finding.title)}</div>
-        <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(finding.explanation)}</div>
-        <div class="mt-3 flex flex-wrap items-center gap-2">
-          <span class="rounded bg-[#30363d]/50 px-2 py-1 text-xs ${findingStatusClass(status)}">${escapeHtml(findingStatusLabel(status))}</span>
-          ${chapter ? `<span class="rounded bg-[#30363d]/50 px-2 py-1 text-xs text-review-muted">${escapeHtml(chapter.title)}</span>` : ""}
-        </div>
-      </div>
-      <div>
-        <div class="flex items-center justify-between gap-3">
-          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Locations</div>
-          ${(finding.locations || []).length > 0 ? `<button data-finding-action="open-location" class="cursor-pointer text-[11px] font-medium text-[#58a6ff] hover:text-[#79c0ff]">Open first</button>` : ""}
-        </div>
-        <div class="mt-2 space-y-1">
-          ${(finding.locations || []).length === 0 ? `<div class="text-sm text-review-muted">No locations linked.</div>` : finding.locations.map((location, index) => `
-            <button data-location-index="${index}" class="block w-full rounded-md px-2 py-1.5 text-left text-xs text-review-text hover:bg-[#21262d]">
-              <span class="block truncate">${escapeHtml(location.path)}${location.line != null ? `:${escapeHtml(location.line)}` : ""}</span>
-              <span class="text-review-muted">${escapeHtml(humanizeToken(location.side))}</span>
-            </button>
-          `).join("")}
-        </div>
-      </div>
-      ${isDrafted
-        ? stagedCommentBlockHtml(draftComment)
-        : `<div class="flex flex-wrap gap-2">
-            ${canCreateDraft
-              ? `<button data-finding-action="stage-comment" class="${insightActionButtonClass(false)}">Stage Comment</button>`
-              : `<span class="rounded-md border border-review-border bg-[#010409] px-3 py-1.5 text-xs text-review-muted">No commentable diff line</span>`}
-          </div>`}
-    </div>
-  `;
-
-  bindInsightNav(chapter?.id || null);
-  insightContentEl.querySelectorAll("[data-location-index]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const index = Number(button.getAttribute("data-location-index"));
-      const location = (finding.locations || [])[index];
-      if (location) openFindingLocation(location, { findingId: finding.id });
-    });
-  });
-  insightContentEl.querySelector("[data-finding-action='open-location']")?.addEventListener("click", () => openFirstFindingLocation(finding));
-  bindCommentBlockActions(insightContentEl);
-  insightContentEl.querySelector("[data-finding-action='stage-comment']")?.addEventListener("click", () => createFirstDraftCommentFromFinding(finding));
-}
-
-function renderInsightForComment(comment) {
-  setInsightBreadcrumb(["Staged comment"]);
-  insightContentEl.innerHTML = `
-    <div class="space-y-3">
-      ${stagedCommentBlockHtml(comment)}
-    </div>
-  `;
-  bindCommentBlockActions(insightContentEl);
-}
-
-function renderInsightPanel() {
-  insightPanelEl.dataset.activeInsight = state.activeInsight.type;
-  if (state.activeInsight.type === "chapter") {
-    const chapter = getReviewChapter(state.activeInsight.id);
-    if (chapter) {
-      renderInsightForChapter(chapter);
-      return;
-    }
+  if (location) {
+    state.expandedFindingIds.add(finding.id);
+    openFindingLocation(location, { findingId: finding.id });
   }
-  if (state.activeInsight.type === "finding") {
-    const finding = getReviewFinding(state.activeInsight.id);
-    if (finding) {
-      renderInsightForFinding(finding);
-      return;
-    }
-  }
-  if (state.activeInsight.type === "comment") {
-    const comment = state.comments.find((item) => item.id === state.activeInsight.id);
-    if (comment) {
-      renderInsightForComment(comment);
-      return;
-    }
-  }
-  renderDefaultInsight();
-}
-
-function renderReviewMap() {
-  const chapters = getReviewChapters();
-  if (chapters.length === 0) {
-    fileTreeEl.innerHTML = `
-      <div class="px-3 py-4 text-sm text-review-muted">
-        No review map available.
-      </div>
-    `;
-    return;
-  }
-
-  chapters.forEach((chapter, index) => {
-    const reviewed = state.reviewedChapters[chapter.id] === true;
-    const active = state.activeInsight.type === "chapter" && state.activeInsight.id === chapter.id;
-    const stats = diffstatHtml(chapterDiffstatCounts(chapter), { compact: true, showZero: true });
-    const draftCommentCount = getDraftCommentsForChapter(chapter).length;
-    const findingCount = (chapter.findingIds || []).length;
-    const previewFiles = getChapterDisplayFiles(chapter).slice(0, 2);
-    const metaItems = [
-      `<span>${(chapter.fileIds || []).length} file(s)</span>`,
-      stats,
-      draftCommentCount > 0 ? `<span>${draftCommentCount} staged</span>` : "",
-      findingCount > 0 ? `<span>${findingCount} finding(s)</span>` : "",
-    ].filter(Boolean).join("");
-    const button = document.createElement("button");
-    button.type = "button";
-    if (active) button.setAttribute("aria-current", "true");
-    button.className = [
-      "mb-2 block w-full rounded-md border px-2.5 py-2.5 text-left",
-      active ? "border-[#8957e5]/70 bg-[#8957e5]/10" : "border-[#27313c] bg-[#0b1118] hover:bg-[#111923]",
-    ].join(" ");
-    button.innerHTML = `
-      <div class="mb-1.5 flex items-start justify-between gap-2">
-        <div class="flex min-w-0 items-center gap-2">
-          <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-[#30363d]/60 text-[10px] font-semibold text-review-muted">${index + 1}</span>
-          <span class="min-w-0 truncate text-sm font-semibold leading-5 text-white">${escapeHtml(chapter.title)}</span>
-        </div>
-        <span class="${reviewed ? reviewStatusBadgeClass(true) : chapterPriorityBadgeClass(chapter.priority)}">${reviewed ? "Reviewed" : chapterPriorityLabel(chapter.priority)}</span>
-      </div>
-      <div class="line-clamp-2 text-xs leading-5 text-review-muted">${escapeHtml(chapter.summary)}</div>
-      ${(chapter.attentionTags || []).length > 0 ? `<div class="mt-2 flex flex-wrap items-center gap-1">${attentionTagsHtml(chapter)}</div>` : ""}
-      ${previewFiles.length > 0 ? `<div class="mt-2 space-y-1">
-        ${previewFiles.map((file) => `<div class="truncate text-[11px] text-review-muted">${escapeHtml(file.path)}</div>`).join("")}
-      </div>` : ""}
-      <div class="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-review-muted">
-        ${metaItems}
-      </div>
-    `;
-    button.addEventListener("click", () => {
-      state.activeInsight = { type: "chapter", id: chapter.id };
-      const fileId = firstExistingChapterFileId(chapter);
-      if (fileId) openFileFromAnalysis(fileId);
-      else renderTree();
-    });
-    fileTreeEl.appendChild(button);
-  });
-}
-
-function renderFindings() {
-  const findings = getReviewFindings();
-  if (findings.length === 0) {
-    fileTreeEl.innerHTML = `
-      <div class="px-3 py-4 text-sm text-review-muted">
-        No AI findings for this diff.
-      </div>
-    `;
-    return;
-  }
-
-  findings.forEach((finding) => {
-    const status = state.findingStatuses[finding.id] || "new";
-    const active = state.activeInsight.type === "finding" && state.activeInsight.id === finding.id;
-    const button = document.createElement("button");
-    button.type = "button";
-    if (active) button.setAttribute("aria-current", "true");
-    button.className = [
-      "mb-2 block w-full rounded-md border p-3 text-left",
-      active ? "border-[#2ea043]/40 bg-[#238636]/10" : "border-review-border bg-[#010409] hover:bg-[#161b22]",
-    ].join(" ");
-    button.innerHTML = `
-      <div class="mb-2 flex items-center justify-between gap-2 text-[11px] font-medium">
-        <span class="${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.kind))} • ${escapeHtml(humanizeToken(finding.severity))}</span>
-        <span class="${findingStatusClass(status)}">${escapeHtml(findingStatusLabel(status))}</span>
-      </div>
-      <div class="text-sm font-semibold leading-5 text-white">${escapeHtml(finding.title)}</div>
-      <div class="mt-1 line-clamp-3 text-xs leading-5 text-review-muted">${escapeHtml(finding.explanation)}</div>
-      <div class="mt-2 truncate text-[11px] text-review-muted">${escapeHtml(firstLocationLabel(finding))}</div>
-    `;
-    button.addEventListener("click", () => {
-      state.activeInsight = { type: "finding", id: finding.id };
-      const location = firstExistingFindingLocation(finding);
-      if (location) openFirstFindingLocation(finding);
-      else renderTree();
-    });
-    fileTreeEl.appendChild(button);
-  });
 }
 
 function applyEditorOptions() {
@@ -1901,36 +1954,6 @@ function renderTree() {
   const scopedFiles = getScopedFiles();
   const comments = getDraftComments().length;
 
-  if (state.activeSidebarTab === "review-map") {
-    const chapters = getReviewChapters();
-    const findings = getReviewFindings();
-    renderReviewMap();
-    sidebarTitleEl.textContent = "Review plan";
-    setSummary(
-      `${chapters.length} review areas • ${findings.length} findings • ${comments} staged`,
-      coverageDiffstatCounts(reviewData.analysis?.coverage),
-    );
-    updateToggleButtons();
-    updateSidebarLayout();
-    renderInsightPanel();
-    return;
-  }
-
-  if (state.activeSidebarTab === "findings") {
-    const findings = getReviewFindings();
-    const newFindings = findings.filter((finding) => (state.findingStatuses[finding.id] || "new") === "new").length;
-    renderFindings();
-    sidebarTitleEl.textContent = "Findings";
-    setSummary(
-      `${findings.length} findings • ${newFindings} to review • ${comments} staged`,
-      coverageDiffstatCounts(reviewData.analysis?.coverage),
-    );
-    updateToggleButtons();
-    updateSidebarLayout();
-    renderInsightPanel();
-    return;
-  }
-
   const visibleFiles = getFilteredFiles();
   if (visibleFiles.length === 0) {
     const message = state.fileFilter.trim()
@@ -1944,18 +1967,23 @@ function renderTree() {
   } else if (state.fileFilter.trim()) {
     renderSearchResults(visibleFiles);
   } else {
-    renderTreeNode(buildTree(visibleFiles), 0);
+    renderReviewPlanTree(visibleFiles);
   }
 
-  sidebarTitleEl.textContent = scopeLabel(state.currentScope);
+  sidebarTitleEl.textContent = "";
   const filteredSuffix = state.fileFilter.trim() ? ` • ${visibleFiles.length} shown` : "";
+  const reviewProgress = fileReviewProgress(scopedFiles);
   setSummary(
-    `${scopedFiles.length} files • ${comments} staged${filteredSuffix}`,
+    `${aiReviewStatusSummary()}${filteredSuffix}`,
     state.currentScope === "all-files" ? null : scopedDiffstatCounts(scopedFiles, state.currentScope),
+    {
+      reviewed: reviewProgress.reviewed,
+      total: reviewProgress.total,
+      staged: comments,
+    },
   );
   updateToggleButtons();
   updateSidebarLayout();
-  renderInsightPanel();
 }
 
 function showTextModal(options) {
@@ -2005,18 +2033,42 @@ function suggestedGitHubReviewEvent() {
   return "COMMENT";
 }
 
+function openCheckoutDrawer(title, html) {
+  insightPanelTitleEl.textContent = title;
+  insightContentEl.innerHTML = html;
+  insightPanelEl.className = "review-checkout-drawer flex min-h-0 shrink-0 flex-col border-l border-review-border bg-[#0d1117]";
+  requestAnimationFrame(() => {
+    layoutEditor();
+    setTimeout(layoutEditor, 50);
+  });
+}
+
+function closeCheckoutDrawer() {
+  insightPanelEl.className = "hidden min-h-0 shrink-0 flex-col border-l border-review-border bg-[#0d1117] review-checkout-drawer";
+  insightPanelTitleEl.textContent = "Submit review";
+  insightContentEl.innerHTML = "";
+  insightPanelEl.onkeydown = null;
+  requestAnimationFrame(() => {
+    layoutEditor();
+    setTimeout(layoutEditor, 50);
+  });
+}
+
+function isCheckoutDrawerOpen() {
+  return !insightPanelEl.classList.contains("hidden");
+}
+
 function showPublishGitHubModal() {
-  if (state.aiReview.status === "running") return;
   syncCommentBodiesFromDOM();
   const submitPayload = buildSubmitPayload();
   const stagedCount = submitPayload.comments.length;
   const findingCounts = findingStatusCounts();
-  const backdrop = document.createElement("div");
-  backdrop.className = "review-modal-backdrop";
-  backdrop.innerHTML = `
-    <div class="review-modal-card">
-      <div class="mb-1 text-base font-semibold text-white">Submit review</div>
-      <div class="mb-4 text-sm leading-5 text-review-muted">Submit the review body with ${stagedCount} staged comment(s). Submitted comments are not synced back into this window yet.</div>
+  openCheckoutDrawer("Submit review", `
+    <div class="space-y-4">
+      <div>
+        <div class="text-base font-semibold text-white">Submit review</div>
+        <div class="mt-1 text-sm leading-5 text-review-muted">Review the final body while keeping the diff visible.</div>
+      </div>
       <div class="mb-4 grid grid-cols-3 gap-2">
         <div class="rounded-md border border-review-border bg-[#010409] px-3 py-2">
           <div class="text-sm font-semibold text-white">${stagedCount}</div>
@@ -2031,24 +2083,26 @@ function showPublishGitHubModal() {
           <div class="text-[10px] uppercase tracking-wider text-review-muted">Findings staged</div>
         </div>
       </div>
-      <label class="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-review-muted" for="github-review-event">Verdict</label>
-      <select id="github-review-event" class="mb-4 w-full rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
-        <option value="COMMENT">Comment</option>
-        <option value="REQUEST_CHANGES">Request changes</option>
-        <option value="APPROVE">Approve</option>
-      </select>
-      <label class="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-review-muted" for="github-review-body">Review body</label>
-      <textarea id="github-review-body" class="scrollbar-thin min-h-40 w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm leading-6 text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">${escapeHtml(reviewData.analysis?.approvalPacket?.body || "")}</textarea>
-      <div class="mt-4 flex justify-end gap-2">
+      <div>
+        <label class="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-review-muted" for="github-review-event">Verdict</label>
+        <select id="github-review-event" class="w-full rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+          <option value="COMMENT">Comment</option>
+          <option value="REQUEST_CHANGES">Request changes</option>
+          <option value="APPROVE">Approve</option>
+        </select>
+      </div>
+      <div>
+        <label class="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-review-muted" for="github-review-body">Review body</label>
+        <textarea id="github-review-body" class="scrollbar-thin min-h-[260px] max-h-[56vh] w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 font-mono text-sm leading-6 text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">${escapeHtml(reviewData.analysis?.approvalPacket?.body || "")}</textarea>
+      </div>
+      <div class="flex justify-end gap-2">
         <button id="github-publish-cancel" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-sm font-medium text-review-text hover:bg-[#21262d]">Back</button>
-        <button id="github-publish-submit" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#388bfd]">Submit review</button>
+        <button id="github-publish-submit" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#388bfd]">Submit review <span class="text-[11px] opacity-70">⌘↵</span></button>
       </div>
     </div>
-  `;
-  document.body.appendChild(backdrop);
-  const eventSelect = backdrop.querySelector("#github-review-event");
-  const textarea = backdrop.querySelector("#github-review-body");
-  const close = () => backdrop.remove();
+  `);
+  const eventSelect = insightContentEl.querySelector("#github-review-event");
+  const textarea = insightContentEl.querySelector("#github-review-body");
   const publish = () => {
     syncCommentBodiesFromDOM();
     window.glimpse.send({
@@ -2057,26 +2111,23 @@ function showPublishGitHubModal() {
       body: textarea.value.trim(),
       submit: buildSubmitPayload(),
     });
-    close();
+    closeCheckoutDrawer();
   };
 
   eventSelect.value = suggestedGitHubReviewEvent();
-  backdrop.querySelector("#github-publish-cancel").addEventListener("click", close);
-  backdrop.querySelector("#github-publish-submit").addEventListener("click", publish);
-  backdrop.addEventListener("keydown", (event) => {
+  insightContentEl.querySelector("#github-publish-cancel").addEventListener("click", closeCheckoutDrawer);
+  insightContentEl.querySelector("#github-publish-submit").addEventListener("click", publish);
+  insightPanelEl.onkeydown = (event) => {
     if (event.key === "Escape") {
       event.preventDefault();
-      close();
+      closeCheckoutDrawer();
       return;
     }
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       event.preventDefault();
       publish();
     }
-  });
-  backdrop.addEventListener("click", (event) => {
-    if (event.target === backdrop) close();
-  });
+  };
   textarea.focus();
 }
 
@@ -2100,7 +2151,7 @@ function showFileCommentModal() {
         endLine: null,
         body: value,
       });
-      submitButton.disabled = state.aiReview.status === "running";
+      submitButton.disabled = false;
       updateCommentsUI();
     },
   });
@@ -2133,11 +2184,45 @@ function aiFindingIdForComment(comment) {
   return id.split(":")[1] || null;
 }
 
+function commentLifecycleState(comment) {
+  const id = String(comment.id || "");
+  const status = String(comment.status || "");
+  const hasGithubLink = typeof comment.githubUrl === "string" || typeof comment.githubThreadId === "string" || typeof comment.githubCommentId === "string";
+  return comment.published === true || comment.isPublished === true || status === "published" || hasGithubLink || id.startsWith("github:") || id.startsWith("published:")
+    ? "published"
+    : "staged";
+}
+
+function commentLifecycleLabel(comment) {
+  return commentLifecycleState(comment) === "published" ? "Published" : "Staged";
+}
+
+function commentLifecycleBadgeClass(comment) {
+  return commentLifecycleState(comment) === "published"
+    ? "rounded bg-[#30363d]/50 px-1.5 py-0.5 text-[10px] font-medium text-review-muted"
+    : "rounded bg-[#238636]/15 px-1.5 py-0.5 text-[10px] font-medium text-[#3fb950]";
+}
+
+function commentGlyphClassName(comment) {
+  return commentLifecycleState(comment) === "published" ? "review-comment-glyph-published" : "review-comment-glyph-staged";
+}
+
+function commentRailClassName(comment) {
+  return commentLifecycleState(comment) === "published" ? "review-comment-rail-published" : "review-comment-rail-staged";
+}
+
+function commentMarkerTooltip(comment) {
+  const stateLabel = commentLifecycleState(comment) === "published" ? "GitHub published thread" : "Local staged comment";
+  return `[${commentLifecycleState(comment) === "published" ? "◌" : "●"}] ${stateLabel} · ${commentSourceTitle(comment)}`;
+}
+
 function commentSourceTitle(comment) {
+  if (commentLifecycleState(comment) === "published") return "GitHub thread";
   return aiFindingIdForComment(comment) ? "AI suggestion" : "Your comment";
 }
 
 function isCommentEditing(comment) {
+  if (commentLifecycleState(comment) === "published") return false;
   return state.editingCommentIds.has(comment.id) || !String(comment.body || "").trim();
 }
 
@@ -2147,9 +2232,55 @@ function focusCommentTextarea(commentId) {
   if (textarea) textarea.focus();
 }
 
+function insertTextareaText(textarea, text) {
+  const start = textarea.selectionStart ?? textarea.value.length;
+  const end = textarea.selectionEnd ?? start;
+  textarea.value = `${textarea.value.slice(0, start)}${text}${textarea.value.slice(end)}`;
+  textarea.selectionStart = start + text.length;
+  textarea.selectionEnd = start + text.length;
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
+function updatePlainTextEditorMetrics(textarea) {
+  textarea.style.height = "auto";
+  const maxHeight = 12 * 22 + 24;
+  textarea.style.height = `${Math.min(textarea.scrollHeight, maxHeight)}px`;
+  textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+
+  const counter = textarea.closest("[data-comment-block-id]")?.querySelector("[data-comment-counter]");
+  if (counter) {
+    const value = textarea.value || "";
+    const lines = value.length === 0 ? 1 : value.split("\n").length;
+    counter.textContent = `${lines} line${lines === 1 ? "" : "s"} • ${value.length} chars`;
+  }
+}
+
+function bindPlainTextCommentEditor(textarea, comment, container) {
+  updatePlainTextEditorMetrics(textarea);
+  textarea.addEventListener("input", () => updatePlainTextEditorMetrics(textarea));
+  textarea.addEventListener("keydown", (event) => {
+    if (event.key === "Tab") {
+      event.preventDefault();
+      insertTextareaText(textarea, "    ");
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      cancelCommentEdit(comment);
+      return;
+    }
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      saveCommentEdit(comment, container.querySelector("[data-comment-block-id]"));
+    }
+  });
+}
+
 function deleteComment(comment) {
+  if (commentLifecycleState(comment) === "published") return;
   state.comments = state.comments.filter((item) => item.id !== comment.id);
   state.editingCommentIds.delete(comment.id);
+  state.collapsedCommentIds.delete(comment.id);
   const findingId = aiFindingIdForComment(comment);
   if (findingId && state.findingStatuses[findingId] === "accepted-comment") {
     state.findingStatuses[findingId] = "new";
@@ -2158,6 +2289,8 @@ function deleteComment(comment) {
 }
 
 function enterCommentEdit(comment) {
+  if (commentLifecycleState(comment) === "published") return;
+  state.collapsedCommentIds.delete(comment.id);
   state.editingCommentIds.add(comment.id);
   updateCommentsUI();
   setTimeout(() => focusCommentTextarea(comment.id), 50);
@@ -2211,6 +2344,9 @@ function stagedCommentInnerHtml(comment) {
     ? `File comment • ${scopeLabel(comment.scope)}`
     : `${comment.side === "original" ? "Original" : "Modified"} line ${comment.startLine} • ${scopeLabel(comment.scope)}`;
   const sourceTitle = commentSourceTitle(comment);
+  const lifecycleLabel = commentLifecycleLabel(comment);
+  const lifecycleBadgeClass = commentLifecycleBadgeClass(comment);
+  const published = commentLifecycleState(comment) === "published";
   const editing = isCommentEditing(comment);
   const body = String(comment.body || "");
 
@@ -2220,35 +2356,36 @@ function stagedCommentInnerHtml(comment) {
         <div class="mb-2 flex items-center justify-between gap-3">
           <div class="min-w-0">
             <div class="flex flex-wrap items-center gap-2">
-              <span class="rounded bg-[#238636]/15 px-1.5 py-0.5 text-[10px] font-medium text-[#3fb950]">Staged</span>
+              <span class="${lifecycleBadgeClass}">${escapeHtml(lifecycleLabel)}</span>
               <span class="text-xs font-semibold text-review-text">${escapeHtml(sourceTitle)}</span>
             </div>
             <div class="mt-0.5 truncate text-[11px] text-review-muted">${escapeHtml(locationTitle)}</div>
           </div>
           <div class="flex shrink-0 items-center gap-2">
-            <button data-comment-action="cancel" data-comment-id="${escapeHtml(comment.id)}" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:bg-[#21262d]">Cancel</button>
-            <button data-comment-action="save" data-comment-id="${escapeHtml(comment.id)}" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Save</button>
+            <button data-comment-action="cancel" data-comment-id="${escapeHtml(comment.id)}" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:bg-[#21262d]">Cancel <span class="text-[10px] opacity-70">Esc</span></button>
+            <button data-comment-action="save" data-comment-id="${escapeHtml(comment.id)}" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Save <span class="text-[10px] opacity-70">Enter</span></button>
           </div>
         </div>
-        <textarea data-comment-id="${escapeHtml(comment.id)}" data-comment-editing="true" class="scrollbar-thin min-h-[76px] w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="Write a review comment">${escapeHtml(body)}</textarea>
+        <textarea data-comment-id="${escapeHtml(comment.id)}" data-comment-editing="true" class="scrollbar-thin min-h-[76px] w-full resize-none rounded-md border border-review-border bg-[#010409] px-3 py-2 font-mono text-sm leading-[22px] text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="Write a review comment">${escapeHtml(body)}</textarea>
+        <div class="mt-1 text-right text-[10px] text-review-muted" data-comment-counter></div>
       </div>
     `;
   }
 
   return `
     <div data-comment-block-id="${escapeHtml(comment.id)}">
-      <div class="mb-2 flex items-center justify-between gap-3">
-        <div class="min-w-0">
-          <div class="flex flex-wrap items-center gap-2">
-            <span class="rounded bg-[#238636]/15 px-1.5 py-0.5 text-[10px] font-medium text-[#3fb950]">Staged</span>
+        <div class="mb-2 flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+            <span class="${lifecycleBadgeClass}">${escapeHtml(lifecycleLabel)}</span>
             <span class="text-xs font-semibold text-review-text">${escapeHtml(sourceTitle)}</span>
           </div>
           <div class="mt-0.5 truncate text-[11px] text-review-muted">${escapeHtml(locationTitle)}</div>
         </div>
-        <div class="flex shrink-0 items-center gap-2">
+        ${published ? `<div class="shrink-0 text-[11px] text-review-muted">Read only</div>` : `<div class="flex shrink-0 items-center gap-2">
           <button data-comment-action="edit" data-comment-id="${escapeHtml(comment.id)}" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:bg-[#21262d]">Edit</button>
           <button data-comment-action="delete" data-comment-id="${escapeHtml(comment.id)}" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Delete</button>
-        </div>
+        </div>`}
       </div>
       <div class="whitespace-pre-wrap rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm leading-5 text-review-text">${escapeHtml(body)}</div>
     </div>
@@ -2263,19 +2400,12 @@ function renderCommentDOM(comment) {
   const container = document.createElement("div");
   container.className = "view-zone-container";
   container.innerHTML = stagedCommentInnerHtml(comment);
+  container.addEventListener("click", () => {
+    state.activeInsight = { type: "comment", id: comment.id };
+  });
   bindCommentBlockActions(container);
   const textarea = container.querySelector("textarea[data-comment-id]");
-  if (textarea) textarea.addEventListener("keydown", (event) => {
-    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-      event.preventDefault();
-      saveCommentEdit(comment, container.querySelector("[data-comment-block-id]"));
-      return;
-    }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      cancelCommentEdit(comment);
-    }
-  });
+  if (textarea) bindPlainTextCommentEditor(textarea, comment, container);
   if (textarea && !comment.body) setTimeout(() => textarea.focus(), 50);
   return container;
 }
@@ -2309,15 +2439,9 @@ function createDraftCommentFromFinding(finding, location) {
     renderTree();
     return;
   }
-  const duplicate = state.comments.some((comment) =>
-    comment.fileId === location.fileId &&
-    comment.scope === state.currentScope &&
-    comment.side === location.side &&
-    comment.startLine === commentRange.startLine &&
-    comment.body.trim() === body
-  );
-  if (!duplicate) {
-    state.comments.push({
+  let comment = state.comments.find((item) => String(item.id || "").startsWith(`ai:${finding.id}:`)) || null;
+  if (!comment) {
+    comment = {
       id: `ai:${finding.id}:${Date.now()}:${Math.random().toString(16).slice(2)}`,
       fileId: location.fileId,
       scope: state.currentScope,
@@ -2326,11 +2450,26 @@ function createDraftCommentFromFinding(finding, location) {
       startLine: commentRange.startLine,
       endLine: commentRange.endLine,
       body,
-    });
+    };
+    state.comments.push(comment);
   }
   state.findingStatuses[finding.id] = "accepted-comment";
   delete state.acceptedFindingComments[finding.id];
+  state.expandedFindingIds.delete(finding.id);
+  state.collapsedCommentIds.delete(comment.id);
+  state.editingCommentIds.add(comment.id);
   state.activeInsight = { type: "finding", id: finding.id };
+  updateCommentsUI();
+  setTimeout(() => focusCommentTextarea(comment.id), 50);
+}
+
+function dismissFinding(finding) {
+  state.findingStatuses[finding.id] = "dismissed";
+  delete state.acceptedFindingComments[finding.id];
+  state.expandedFindingIds.delete(finding.id);
+  if (state.activeInsight.type === "finding" && state.activeInsight.id === finding.id) {
+    state.activeInsight = { type: "default", id: null };
+  }
   updateCommentsUI();
 }
 
@@ -2356,6 +2495,7 @@ function draftCommentForFinding(finding) {
 function renderAiFindingZoneDOM(finding, location) {
   const container = document.createElement("div");
   container.className = "view-zone-container ai-finding-zone";
+  container.style.borderLeftColor = severityAccentColor(finding.severity);
   container.setAttribute("data-ai-finding-id", finding.id);
   container.setAttribute("data-ai-finding-side", location.side);
   container.setAttribute("data-ai-finding-line", String(location.line));
@@ -2365,15 +2505,19 @@ function renderAiFindingZoneDOM(finding, location) {
         <span class="rounded bg-[#8957e5]/15 px-1.5 py-0.5 text-[10px] text-[#d2a8ff]">AI</span>
         <span class="truncate">Review item • ${escapeHtml(humanizeToken(finding.kind))}</span>
       </div>
-      <span class="shrink-0 text-[11px] ${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
     </div>
     <div class="text-sm font-medium leading-5 text-white">${escapeHtml(finding.title)}</div>
     <div class="mt-1 line-clamp-2 text-xs leading-5 text-review-muted">${escapeHtml(finding.explanation)}</div>
-    <div class="mt-2 flex items-center justify-end">
-      <button data-action="stage-comment" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-3 py-1.5 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Stage Comment</button>
+    <div class="mt-2 flex items-center justify-end gap-2 border-t border-review-border pt-2">
+      <button data-action="dismiss-finding" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:bg-[#21262d]">Dismiss <kbd class="ml-2 rounded bg-[#30363d]/70 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-review-muted">X</kbd></button>
+      <button data-action="stage-comment" class="cursor-pointer rounded-md border border-[#2ea043]/40 bg-[#238636]/15 px-2.5 py-1 text-xs font-medium text-[#3fb950] hover:bg-[#238636]/25">Stage comment <kbd class="ml-2 rounded bg-[#238636]/25 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[#7ee787]">S</kbd></button>
     </div>
   `;
+  container.addEventListener("click", () => {
+    state.activeInsight = { type: "finding", id: finding.id };
+  });
   container.querySelector("[data-action='stage-comment']").addEventListener("click", () => createDraftCommentFromFinding(finding, location));
+  container.querySelector("[data-action='dismiss-finding']").addEventListener("click", () => dismissFinding(finding));
   return container;
 }
 
@@ -2393,6 +2537,39 @@ function isActiveFileReady() {
   return requestState.contents != null && requestState.error == null;
 }
 
+function getInlineCommentsForFile(file = activeFile()) {
+  return file
+    ? state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope && (comment.scope !== "commit" || comment.commitSha === state.selectedCommitSha) && comment.side !== "file")
+    : [];
+}
+
+function findInlineCommentAtLine(side, line) {
+  return getInlineCommentsForFile()
+    .filter((comment) => comment.side === side && comment.startLine === line)
+    .sort((left, right) => {
+      const leftPublished = commentLifecycleState(left) === "published" ? 1 : 0;
+      const rightPublished = commentLifecycleState(right) === "published" ? 1 : 0;
+      return leftPublished - rightPublished;
+    })[0] || null;
+}
+
+function toggleInlineCommentAtLine(side, line) {
+  const comment = findInlineCommentAtLine(side, line);
+  if (!comment) return false;
+
+  if (state.collapsedCommentIds.has(comment.id)) {
+    state.collapsedCommentIds.delete(comment.id);
+  } else {
+    state.collapsedCommentIds.add(comment.id);
+  }
+  state.activeInsight = { type: "comment", id: comment.id };
+  syncViewZones();
+  updateDecorations();
+  renderTree();
+  focusDiffLine(side, line, comment.endLine ?? line);
+  return true;
+}
+
 function syncViewZones() {
   clearViewZones();
   if (!diffEditor || !isActiveFileReady()) return;
@@ -2401,9 +2578,11 @@ function syncViewZones() {
 
   const originalEditor = diffEditor.getOriginalEditor();
   const modifiedEditor = diffEditor.getModifiedEditor();
-  const inlineComments = state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope && (comment.scope !== "commit" || comment.commitSha === state.selectedCommitSha) && comment.side !== "file");
+  const inlineComments = getInlineCommentsForFile(file);
 
   inlineComments.forEach((item) => {
+    if (isCommentEditing(item)) state.collapsedCommentIds.delete(item.id);
+    if (state.collapsedCommentIds.has(item.id)) return;
     const editor = item.side === "original" ? originalEditor : modifiedEditor;
     const domNode = renderCommentDOM(item);
 
@@ -2419,37 +2598,68 @@ function syncViewZones() {
     });
   });
 
-  getInlineAiFindingEntries(file).forEach(({ finding, location }) => {
-    const editor = location.side === "original" ? originalEditor : modifiedEditor;
-    const domNode = renderAiFindingZoneDOM(finding, location);
-    editor.changeViewZones((accessor) => {
-      const id = accessor.addZone({
-        afterLineNumber: location.line,
-        heightInPx: 118,
-        domNode,
+  getInlineAiFindingEntries(file)
+    .filter(({ finding }) => isAiFindingExpanded(finding.id))
+    .forEach(({ finding, location }) => {
+      const editor = location.side === "original" ? originalEditor : modifiedEditor;
+      const domNode = renderAiFindingZoneDOM(finding, location);
+      editor.changeViewZones((accessor) => {
+        const id = accessor.addZone({
+          afterLineNumber: location.line,
+          heightInPx: 142,
+          domNode,
+        });
+        activeViewZones.push({ id, editor });
       });
-      activeViewZones.push({ id, editor });
     });
-  });
 }
 
 function updateDecorations() {
   if (!diffEditor || !monacoApi) return;
-  const file = activeFile();
-  const comments = file ? state.comments.filter((comment) => comment.fileId === file.id && comment.scope === state.currentScope && (comment.scope !== "commit" || comment.commitSha === state.selectedCommitSha) && comment.side !== "file") : [];
+  const comments = getInlineCommentsForFile();
+  const findings = getInlineAiFindingEntries(activeFile());
   const originalRanges = [];
   const modifiedRanges = [];
+  const commentedLines = new Set();
 
   for (const comment of comments) {
+    commentedLines.add(`${comment.side}:${comment.startLine}`);
     const range = {
       range: new monacoApi.Range(comment.startLine, 1, comment.startLine, 1),
       options: {
         isWholeLine: true,
-        className: comment.side === "original" ? "review-comment-line-original" : "review-comment-line-modified",
-        glyphMarginClassName: comment.side === "original" ? "review-comment-glyph-original" : "review-comment-glyph-modified",
+        className: commentRailClassName(comment),
+        glyphMarginClassName: commentGlyphClassName(comment),
+        glyphMarginHoverMessage: { value: commentMarkerTooltip(comment) },
       },
     };
     if (comment.side === "original") originalRanges.push(range);
+    else modifiedRanges.push(range);
+  }
+
+  for (const { finding, location } of findings) {
+    if (commentedLines.has(`${location.side}:${location.line}`)) continue;
+    const expanded = isAiFindingExpanded(finding.id);
+    const overviewLane = monacoApi.editor.OverviewRulerLane?.Right ?? 4;
+    const minimapPosition = monacoApi.editor.MinimapPosition?.Inline ?? 1;
+    const range = {
+      range: new monacoApi.Range(location.line, 1, location.line, 1),
+      options: {
+        isWholeLine: expanded,
+        className: expanded ? "review-ai-finding-rail-active" : "",
+        glyphMarginClassName: expanded ? "review-ai-finding-glyph-active" : "review-ai-finding-glyph",
+        glyphMarginHoverMessage: { value: `AI finding: ${finding.title}` },
+        overviewRuler: {
+          color: "rgba(210, 168, 255, 0.78)",
+          position: overviewLane,
+        },
+        minimap: {
+          color: "rgba(210, 168, 255, 0.72)",
+          position: minimapPosition,
+        },
+      },
+    };
+    if (location.side === "original") originalRanges.push(range);
     else modifiedRanges.push(range);
   }
 
@@ -2519,10 +2729,12 @@ function mountFile(options = {}) {
   const scrollState = preserveScroll ? captureScrollState() : null;
   const language = inferLanguage(getScopeFilePath(file) || file.path);
   const contents = getMountedContents(file, state.currentScope);
+  const reviewed = isFileReviewed(file.id);
 
   clearViewZones();
   currentFileLabelEl.innerHTML = `
-    <span class="flex min-w-0 items-center gap-2">
+    <span class="flex min-w-0 items-center gap-2 ${reviewed ? "opacity-70" : ""}">
+      ${reviewed ? `<span class="shrink-0 text-[12px] text-[#3fb950]">✓</span>` : ""}
       <span class="min-w-0 truncate">${escapeHtml(getScopeDisplayPath(file, state.currentScope))}</span>
       ${diffstatHtml(fileDiffstatCounts(file), { compact: true })}
     </span>
@@ -2574,7 +2786,7 @@ function updateCommentsUI() {
 
 function renderAll(options = {}) {
   renderTree();
-  submitButton.disabled = state.aiReview.status === "running";
+  submitButton.disabled = false;
   if (diffEditor && monacoApi) {
     mountFile(options);
     requestAnimationFrame(() => {
@@ -2593,7 +2805,7 @@ function addInlineComment(side, startLine, endLine = startLine) {
   const commentRange = clampRangeToCommentable(startLine, endLine, ranges);
   if (!commentRange) return false;
 
-  state.comments.push({
+  const comment = {
     id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
     fileId: file.id,
     scope: state.currentScope,
@@ -2602,7 +2814,10 @@ function addInlineComment(side, startLine, endLine = startLine) {
     startLine: commentRange.startLine,
     endLine: commentRange.endLine,
     body: "",
-  });
+  };
+  state.comments.push(comment);
+  state.collapsedCommentIds.delete(comment.id);
+  state.activeInsight = { type: "comment", id: comment.id };
   updateCommentsUI();
   focusDiffLine(side, commentRange.startLine, commentRange.endLine);
   return true;
@@ -2624,6 +2839,8 @@ function createGlyphHoverActions(editor, side) {
   let hoverDecoration = [];
 
   function openDraftAtLine(line) {
+    if (toggleInlineFindingAtLine(side, line)) return;
+    if (toggleInlineCommentAtLine(side, line)) return;
     addInlineComment(side, line, line);
   }
 
@@ -2638,6 +2855,10 @@ function createGlyphHoverActions(editor, side) {
     if (target.type === monacoApi.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || target.type === monacoApi.editor.MouseTargetType.GUTTER_LINE_NUMBERS) {
       const line = target.position?.lineNumber;
       if (!line) return;
+      if (findInlineCommentAtLine(side, line) || findInlineFindingAtLine(side, line)) {
+        hoverDecoration = editor.deltaDecorations(hoverDecoration, []);
+        return;
+      }
       hoverDecoration = editor.deltaDecorations(hoverDecoration, [{
         range: new monacoApi.Range(line, 1, line, 1),
         options: { glyphMarginClassName: "review-glyph-plus" },
@@ -2712,6 +2933,7 @@ window.__reviewReceive = function (message) {
   if (message.type === "ai-review-result") {
     if (message.requestId !== state.aiReview.requestId) return;
     applyAiReviewAnalysis(message.analysis);
+    state.aiReviewCompleted = ["done", "failed"].includes(message.progress?.status || "done");
     state.aiReview = {
       requestId: message.requestId,
       status: message.progress?.status || "done",
@@ -2725,6 +2947,7 @@ window.__reviewReceive = function (message) {
 
   if (message.type === "ai-review-error") {
     if (message.requestId !== state.aiReview.requestId) return;
+    state.aiReviewCompleted = true;
     state.aiReview = {
       requestId: message.requestId,
       status: "failed",
@@ -2867,23 +3090,47 @@ function applyAiReviewAnalysis(analysis) {
   state.acceptedFindingComments = Object.fromEntries(
     Object.entries(previousAcceptedComments).filter(([findingId]) => findingIds.has(findingId)),
   );
+  state.expandedFindingIds = new Set([...state.expandedFindingIds].filter((findingId) => findingIds.has(findingId)));
 
   if (state.activeInsight.type === "finding" && !findingIds.has(state.activeInsight.id)) {
     state.activeInsight = { type: "default", id: null };
   }
 }
 
-function runAiReviewFromUi() {
+function shouldAutoStartAiReview() {
+  return Boolean(window.glimpse?.send)
+    && state.aiReview.status === "idle"
+    && !state.aiReviewCompleted
+    && state.currentScope !== "all-files"
+    && getReviewChapters().length > 0;
+}
+
+function maybeStartAiReview() {
+  if (!shouldAutoStartAiReview()) return;
+  runAiReviewFromUi({ auto: true });
+}
+
+function runAiReviewFromUi(options = {}) {
   if (state.aiReview.status === "running") return;
+  if (!window.glimpse?.send) {
+    state.aiReview = {
+      ...state.aiReview,
+      status: "failed",
+      message: "AI review is only available inside the review app.",
+    };
+    renderTree();
+    return;
+  }
   const requestId = `ai-review:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+  state.aiReviewCompleted = false;
   state.aiReview = {
     requestId,
     status: "running",
-    message: "Starting AI review.",
+    message: options.auto ? "Mapping PR..." : "Refreshing AI analysis.",
     progress: {
       status: "running",
       phase: "scout",
-      message: "Starting AI review.",
+      message: options.auto ? "Mapping PR..." : "Refreshing AI analysis.",
       scoutSummary: "",
       config: state.aiReview.config,
       chapters: getReviewChapters().map((chapter) => ({
@@ -2920,7 +3167,6 @@ function buildSubmitPayload() {
 }
 
 function finishReview() {
-  if (state.aiReview.status === "running") return;
   syncCommentBodiesFromDOM();
   saveSessionNow();
   window.glimpse.send(buildSubmitPayload());
@@ -2928,7 +3174,6 @@ function finishReview() {
 }
 
 function submitReview() {
-  if (state.aiReview.status === "running") return;
   if (reviewData.source?.canPublishGitHubReview) {
     showPublishGitHubModal();
     return;
@@ -2959,7 +3204,15 @@ function toggleWrapLines() {
 function toggleCurrentFileReviewed() {
   const file = activeFile();
   if (!file) return;
-  state.reviewedFiles[file.id] = !isFileReviewed(file.id);
+  const nextReviewed = !isFileReviewed(file.id);
+  state.reviewedFiles[file.id] = nextReviewed;
+  const chapter = chapterForFile(file.id);
+  if (chapter) {
+    state.reviewedChapters[chapter.id] = isChapterReviewed(chapter);
+  }
+  if (nextReviewed && advanceToNextUnreviewedFile(file.id)) {
+    return;
+  }
   renderTree();
 }
 
@@ -2967,8 +3220,16 @@ function toggleCurrentChapterReviewed() {
   const chapters = getReviewChapters();
   const chapter = chapters[getCurrentChapterIndex()];
   if (!chapter) return;
-  state.reviewedChapters[chapter.id] = !state.reviewedChapters[chapter.id];
+  const files = getChapterDisplayFiles(chapter);
+  const markReviewed = !isChapterReviewed(chapter);
+  files.forEach((file) => {
+    state.reviewedFiles[file.id] = markReviewed;
+  });
+  state.reviewedChapters[chapter.id] = markReviewed;
   state.activeInsight = { type: "chapter", id: chapter.id };
+  if (markReviewed && advanceToNextUnreviewedFile(state.activeFileId)) {
+    return;
+  }
   renderTree();
 }
 
@@ -2999,6 +3260,10 @@ function focusDiffPane() {
 }
 
 function focusInsightPane() {
+  if (insightPanelEl.classList.contains("hidden")) {
+    submitReview();
+    return;
+  }
   insightPanelEl.focus();
   setTimeout(() => {
     const target = insightContentEl.querySelector("[aria-current='true'], button, textarea");
@@ -3027,8 +3292,14 @@ function trackEditorCursor(editor, side) {
 function isTextEntryTarget(target) {
   if (!(target instanceof HTMLElement)) return false;
   if (target.closest(".review-modal-card")) return true;
+  if (target.tagName === "TEXTAREA") return true;
   if (target.matches("textarea[data-comment-id], #sidebar-search-input, input, select, [contenteditable='true']")) return true;
-  return target.tagName === "TEXTAREA" && target.hasAttribute("data-comment-id");
+  return false;
+}
+
+function isReviewCanvasTarget(target) {
+  if (target === document.body) return true;
+  return target instanceof HTMLElement && mainPaneEl.contains(target);
 }
 
 function shortcutAction(id, label, shortcut, run, options = {}) {
@@ -3050,6 +3321,10 @@ function getKeyboardActions() {
     if (!!options.shift !== event.shiftKey) return false;
     return event.key.toLowerCase() === expected.toLowerCase();
   };
+  const toggleReviewedKey = (event) => {
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return false;
+    return event.key.toLowerCase() === "f" || (event.key === " " && isReviewCanvasTarget(event.target));
+  };
 
   return [
     shortcutAction("help", "Show keyboard shortcuts", "?", showKeyboardShortcutsModal, {
@@ -3060,36 +3335,47 @@ function getKeyboardActions() {
       keywords: "command palette",
       match: key("k", { metaOrCtrl: true }),
     }),
-    shortcutAction("run-ai-review", state.aiReview.status === "done" ? "Refresh AI review" : "Run AI review", "", runAiReviewFromUi, {
-      keywords: "ai review findings",
+    shortcutAction("run-ai-review", state.aiReview.status === "running" ? "AI review running" : "Refresh AI analysis", "Cmd/Ctrl+R", () => runAiReviewFromUi({ force: true }), {
+      keywords: "ai review findings refresh rerun",
       enabled: () => state.aiReview.status !== "running",
+      match: key("r", { metaOrCtrl: true }),
     }),
     shortcutAction("focus-sidebar", "Focus review map or files", "1", focusSidebarPane, { match: key("1") }),
     shortcutAction("focus-diff", "Focus diff", "2", focusDiffPane, { match: key("2") }),
-    shortcutAction("focus-context", "Focus review summary", "3", focusInsightPane, { match: key("3") }),
+    shortcutAction("focus-context", "Open review checkout", "3", focusInsightPane, { match: key("3") }),
     shortcutAction("search-files", "Search files", "/", focusFileSearch, { match: key("/") }),
-    shortcutAction("next-chapter", "Next review area", "]", () => moveChapter(1), { match: key("]") }),
-    shortcutAction("previous-chapter", "Previous review area", "[", () => moveChapter(-1), { match: key("[") }),
-    shortcutAction("next-file", "Next file", "Shift+J", () => moveFile(1), { match: key("j", { shift: true }) }),
-    shortcutAction("previous-file", "Previous file", "Shift+K", () => moveFile(-1), { match: key("k", { shift: true }) }),
-    shortcutAction("next-hunk", "Next changed hunk", "J", () => focusHunk(1), { match: key("j") }),
-    shortcutAction("previous-hunk", "Previous changed hunk", "K", () => focusHunk(-1), { match: key("k") }),
+    shortcutAction("next-file", "Next file", "]", () => moveFile(1), { match: key("]") }),
+    shortcutAction("previous-file", "Previous file", "[", () => moveFile(-1), { match: key("[") }),
+    shortcutAction("scroll-down", "Scroll diff down", "J / ↓", () => scrollDiffCanvas(1), {
+      match: (event) => key("j")(event) || (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "ArrowDown"),
+    }),
+    shortcutAction("scroll-up", "Scroll diff up", "K / ↑", () => scrollDiffCanvas(-1), {
+      match: (event) => key("k")(event) || (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "ArrowUp"),
+    }),
     shortcutAction("comment-line", "Add line comment", "C", addInlineCommentAtCursor, {
       enabled: () => activeFileShowsDiff(),
       match: key("c"),
     }),
     shortcutAction("comment-file", "Add file comment", "Shift+C", showFileCommentModal, { match: key("c", { shift: true }) }),
-    shortcutAction("mark-file-reviewed", "Mark file reviewed", "R", toggleCurrentFileReviewed, { match: key("r") }),
-    shortcutAction("mark-chapter-reviewed", "Mark review area reviewed", "Shift+R", toggleCurrentChapterReviewed, { match: key("r", { shift: true }) }),
+    shortcutAction("mark-file-reviewed", "Toggle file reviewed and advance", "F / Space", toggleCurrentFileReviewed, { match: toggleReviewedKey }),
+    shortcutAction("mark-chapter-reviewed", "Toggle review area files", "Shift+F", toggleCurrentChapterReviewed, { match: key("f", { shift: true }) }),
+    shortcutAction("stage-finding", "Stage AI finding", "S", stageCurrentFinding, {
+      enabled: () => activeFileShowsDiff(),
+      match: key("s"),
+    }),
+    shortcutAction("dismiss-finding", "Dismiss AI finding", "X / D", dismissCurrentFinding, {
+      enabled: () => activeFileShowsDiff(),
+      match: (event) => key("x")(event) || key("d")(event),
+    }),
+    shortcutAction("edit-comment", "Edit staged note", "Enter", editActiveComment, {
+      match: (event) => !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "Enter",
+    }),
     shortcutAction("toggle-changed-only", "Toggle changed areas only", "U", toggleChangedAreasOnly, {
       enabled: () => activeFileShowsDiff(),
       match: key("u"),
     }),
     shortcutAction("toggle-wrap", "Toggle line wrap", "W", toggleWrapLines, { match: key("w") }),
-    shortcutAction("submit-review", "Submit review", "P", submitReview, {
-      enabled: () => state.aiReview.status !== "running",
-      match: key("p"),
-    }),
+    shortcutAction("submit-review", "Submit review", "Cmd/Ctrl+Enter", submitReview, { match: key("Enter", { metaOrCtrl: true }) }),
   ];
 }
 
@@ -3215,6 +3501,11 @@ function showCommandPalette() {
 function handleGlobalShortcut(event) {
   if (isTextEntryTarget(event.target)) return;
   if (document.querySelector(".review-modal-backdrop")) return;
+  if (event.key === "Escape" && isCheckoutDrawerOpen()) {
+    event.preventDefault();
+    closeCheckoutDrawer();
+    return;
+  }
   const action = getKeyboardActions().find((candidate) => candidate.enabled() && candidate.match(event));
   if (!action) return;
   event.preventDefault();
@@ -3304,3 +3595,4 @@ renderTree();
 renderFileComments();
 updateSidebarLayout();
 setupMonaco();
+setTimeout(maybeStartAiReview, 250);

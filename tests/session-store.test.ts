@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { createFallbackAnalysis } from "../src/analysis.js";
 import {
   buildReviewDiffFingerprint,
   buildReviewSessionRecord,
   resolveReviewSession,
+  resetReviewSession,
 } from "../src/session-store.js";
 import type { ReviewDataset } from "../src/sources/types.js";
 
@@ -155,4 +160,20 @@ test("session resolution refreshes a matching session with invalid cached analys
 
   assert.equal(resolution.status, "refreshed");
   assert.equal(resolution.analysis, null);
+});
+
+test("reset review session removes only the selected review metadata directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-diff-review-session-"));
+  const selectedPath = join(root, "reviews", "selected", "session.json");
+  const siblingPath = join(root, "reviews", "sibling", "session.json");
+  await mkdir(join(root, "reviews", "selected"), { recursive: true });
+  await mkdir(join(root, "reviews", "sibling"), { recursive: true });
+  await writeFile(selectedPath, "selected", "utf8");
+  await writeFile(siblingPath, "sibling", "utf8");
+
+  await resetReviewSession(selectedPath);
+
+  assert.equal(existsSync(selectedPath), false);
+  assert.equal(existsSync(join(root, "reviews", "selected")), false);
+  assert.equal(existsSync(siblingPath), true);
 });

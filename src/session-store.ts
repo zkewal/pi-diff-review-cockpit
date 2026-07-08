@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { parseReviewAnalysisJson } from "./analysis.js";
@@ -197,6 +197,10 @@ export async function loadReviewSession(storagePath: string): Promise<ReviewSess
   } catch {
     return null;
   }
+}
+
+export async function resetReviewSession(storagePath: string): Promise<void> {
+  await rm(dirname(storagePath), { recursive: true, force: true });
 }
 
 export async function saveReviewSession(storagePath: string, record: ReviewSessionRecord): Promise<void> {

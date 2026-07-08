@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 type PackageJson = {
+  bin?: Record<string, string>;
   name?: string;
   scripts?: Record<string, string>;
 };
@@ -13,8 +14,18 @@ test("package metadata is wired for local development", () => {
   ) as PackageJson;
 
   assert.equal(packageJson.name, "pi-diff-review-cockpit");
+  assert.equal(packageJson.bin?.["pi-diff-review"], "./bin/pi-diff-review.mjs");
+  assert.equal(typeof packageJson.scripts?.cli, "string");
   assert.equal(typeof packageJson.scripts?.check, "string");
   assert.equal(typeof packageJson.scripts?.test, "string");
+});
+
+test("readme documents direct cli invocation and ref-based PR reviews", () => {
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+  assert.equal(readme.includes("pi-diff-review pr https://github.com/owner/repo/pull/123"), true);
+  assert.equal(readme.includes("isolated review worktree"), false);
+  assert.equal(readme.includes("detached cache worktree"), true);
 });
 
 test("right-panel UI avoids duplicated review text and dead progress affordances", () => {
@@ -32,7 +43,7 @@ test("right-panel UI avoids duplicated review text and dead progress affordances
   assert.equal(appJs.includes("Open inline"), false);
   assert.equal(appJs.includes("Remove draft"), false);
   assert.equal(appJs.includes("Apply suggestion"), false);
-  assert.equal(appJs.includes("Stage Comment"), true);
+  assert.equal(appJs.includes("Stage comment"), true);
   assert.equal(appJs.includes("Staged"), true);
   assert.equal(appJs.includes("data-comment-action=\"edit\""), true);
   assert.equal(appJs.includes("data-comment-action=\"save\""), true);
@@ -48,5 +59,87 @@ test("finding cards focus and pulse the selected inline finding", () => {
   assert.equal(appJs.includes("openFirstFindingLocation(finding"), true);
   assert.equal(appJs.includes("pulseInlineFinding"), true);
   assert.equal(appJs.includes("data-ai-finding-id"), true);
+  assert.equal(appJs.includes("toggleInlineFindingAtLine"), true);
+  assert.equal(appJs.includes("review-ai-finding-glyph"), true);
+  assert.equal(appJs.includes("filter(({ finding }) => isAiFindingExpanded(finding.id))"), true);
   assert.equal(html.includes("ai-finding-pulse"), true);
+  assert.equal(html.includes("review-ai-finding-glyph"), true);
+});
+
+test("review progress is file-first and keyboard friendly", () => {
+  const appJs = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
+
+  assert.equal(appJs.includes("advanceToNextUnreviewedFile"), true);
+  assert.equal(appJs.includes("findNextUnreviewedFile"), true);
+  assert.equal(appJs.includes("chapterReviewProgress"), true);
+  assert.equal(appJs.includes("treeReviewProgress"), true);
+  assert.equal(appJs.includes("F / Space"), true);
+  assert.equal(appJs.includes("Shift+F"), true);
+  assert.equal(appJs.includes("fileDisplayParts"), true);
+  assert.equal(appJs.includes("toolbarButtonClass"), true);
+  assert.equal(appJs.includes("reviewed ? \"✓\" : \"□\""), false);
+  assert.equal(appJs.includes("line-through opacity-60"), true);
+  assert.equal(html.includes("aria-pressed=\"false\""), true);
+  assert.equal(html.includes("Mark this file reviewed and advance"), true);
+});
+
+test("review workspace is consolidated around one sidebar and checkout drawer", () => {
+  const appJs = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
+
+  assert.equal(html.includes("<div class=\"hidden\">\n        <button id=\"tab-review-map-button\""), true);
+  assert.equal(html.includes("Fuzzy filter"), false);
+  assert.equal(html.includes("placeholder=\"Filter changed files...\""), true);
+  assert.equal(html.includes("<div id=\"scope-controls\" class=\"hidden\""), true);
+  assert.equal(html.includes(">All files</button>"), false);
+  assert.equal(appJs.includes("updateFilterPlaceholder"), true);
+  assert.equal(appJs.includes("Filter ${count} changed ${noun}..."), true);
+  assert.equal(appJs.includes("restoredSession.currentScope !== \"all-files\" || initialScope === \"all-files\""), true);
+  assert.equal(html.includes("review-checkout-drawer"), true);
+  assert.equal(appJs.includes("renderFileNavChildren"), false);
+  assert.equal(appJs.includes("renderReviewPlanTree"), true);
+  assert.equal(appJs.includes("renderReviewGroup"), true);
+  assert.equal(appJs.includes("getReviewNavigationGroups"), true);
+  assert.equal(appJs.includes("fileNavBadgesHtml"), true);
+  assert.equal(appJs.includes("getVisibleFindingsForFile(file.id).length"), true);
+  assert.equal(appJs.includes("data-finding-file-id"), true);
+  assert.equal(appJs.includes("openFirstVisibleFindingForFile"), true);
+  assert.equal(appJs.includes("overviewRuler"), true);
+  assert.equal(appJs.includes("minimap"), true);
+  assert.equal(html.includes("review-scan-pulse"), true);
+  assert.equal(appJs.includes("openCheckoutDrawer"), true);
+  assert.equal(appJs.includes("closeCheckoutDrawer"), true);
+  assert.equal(appJs.includes("renderInsightPanel();"), false);
+  assert.equal(appJs.includes("Use the Files tab"), false);
+});
+
+test("inline findings and comment editors expose home-row actions", () => {
+  const appJs = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
+
+  assert.equal(appJs.includes("Stage comment <kbd"), true);
+  assert.equal(appJs.includes("Dismiss <kbd"), true);
+  assert.equal(appJs.includes("severityAccentColor"), true);
+  assert.equal(appJs.includes("stageCurrentFinding"), true);
+  assert.equal(appJs.includes("dismissCurrentFinding"), true);
+  assert.equal(appJs.includes("Refresh AI analysis"), true);
+  assert.equal(appJs.includes("maybeStartAiReview"), true);
+  assert.equal(appJs.includes("aiReviewStatusSummary"), true);
+  assert.equal(appJs.includes("aiReviewCompleted"), true);
+  assert.equal(appJs.includes("restoredForCurrentDiff"), true);
+  assert.equal(appJs.includes("Cmd/Ctrl+Enter"), true);
+  assert.equal(appJs.includes("Cmd/Ctrl+R"), true);
+  assert.equal(appJs.includes("insertTextareaText(textarea, \"    \")"), true);
+  assert.equal(appJs.includes("Save <span"), true);
+  assert.equal(appJs.includes("Cancel <span"), true);
+  assert.equal(appJs.includes("toggleInlineCommentAtLine"), true);
+  assert.equal(appJs.includes("glyphMarginHoverMessage"), true);
+  assert.equal(appJs.includes("commentLifecycleState"), true);
+  assert.equal(appJs.includes("findInlineCommentAtLine(side, line)"), true);
+  assert.equal(html.includes("review-comment-glyph-staged"), true);
+  assert.equal(html.includes("review-comment-glyph-published"), true);
+  assert.equal(html.includes("review-comment-rail-staged"), true);
+  assert.equal(html.includes("review-comment-line-original"), false);
+  assert.equal(html.includes("review-comment-line-modified"), false);
 });

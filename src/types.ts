@@ -125,6 +125,8 @@ export interface ReviewSessionSnapshot {
   hideUnchanged?: boolean;
   wrapLines?: boolean;
   sidebarCollapsed?: boolean;
+  aiReviewCompleted?: boolean;
+  aiReviewStatus?: AiReviewRunStatus;
   updatedAt?: string;
 }
 

@@ -3,7 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "bin": {
+    "pi-diff-review": "./bin/pi-diff-review.mjs"
+  },
   "scripts": {
+    "cli": "node ./bin/pi-diff-review.mjs",
     "check": "tsgo --noEmit",
     "test": "tsx --test tests/**/*.test.ts"
   },

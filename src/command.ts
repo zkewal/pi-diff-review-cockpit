@@ -1,19 +1,39 @@
 export type DiffReviewCommand =
-  | { mode: "local" }
-  | { mode: "github-pr"; url: string };
+  | { mode: "local"; resetReview: boolean }
+  | { mode: "github-pr"; url: string; resetReview: boolean };
+
+const RESET_REVIEW_FLAGS = new Set(["--reset-review", "--fresh"]);
+
+function usage(): string {
+  return "Usage: /diff-review [--reset-review] or /diff-review [--reset-review] pr <github-pr-url>";
+}
 
 export function parseDiffReviewArgs(args: string[]): DiffReviewCommand {
-  if (args.length === 0) {
-    return { mode: "local" };
+  const positionals: string[] = [];
+  let resetReview = false;
+
+  for (const arg of args) {
+    if (RESET_REVIEW_FLAGS.has(arg)) {
+      resetReview = true;
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      throw new Error(`Unsupported diff-review option "${arg}". ${usage()}`);
+    }
+    positionals.push(arg);
   }
 
-  const [source, value] = args;
+  if (positionals.length === 0) {
+    return { mode: "local", resetReview };
+  }
+
+  const [source, value] = positionals;
   if (source === "pr") {
     if (!value) {
-      throw new Error("Usage: /diff-review pr <github-pr-url>");
+      throw new Error(usage());
     }
-    return { mode: "github-pr", url: value };
+    return { mode: "github-pr", url: value, resetReview };
   }
 
-  throw new Error(`Unsupported diff-review source "${source}". Use /diff-review or /diff-review pr <github-pr-url>.`);
+  throw new Error(`Unsupported diff-review source "${source}". ${usage()}`);
 }

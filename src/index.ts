@@ -18,6 +18,7 @@ import {
   getReviewSessionDescriptor,
   loadReviewSession,
   resolveReviewSession,
+  resetReviewSession,
   saveReviewSession,
 } from "./session-store.js";
 import type {
@@ -222,6 +223,10 @@ export default function (pi: ExtensionAPI) {
 
     ctx.ui.notify("Preparing review session.", "info");
     const sessionDescriptor = await getReviewSessionDescriptor(pi, dataset);
+    if (command.resetReview) {
+      await resetReviewSession(sessionDescriptor.storagePath);
+      ctx.ui.notify("Reset saved review metadata for this source.", "info");
+    }
     const fingerprint = await buildReviewDiffFingerprint(pi, dataset, loadFilePatch);
     const storedSession = await loadReviewSession(sessionDescriptor.storagePath);
     const sessionResolution = resolveReviewSession({

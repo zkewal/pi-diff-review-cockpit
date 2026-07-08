@@ -1,6 +1,6 @@
 # pi-diff-review-cockpit
 
-`pi-diff-review-cockpit` is a review cockpit for Pi. It supports local working tree review and GitHub PR review with isolated PR worktrees, AI-generated review maps, findings triage, approval packets, and explicit GitHub review publishing.
+`pi-diff-review-cockpit` is a review cockpit for Pi. It supports local working tree review and GitHub PR review with AI-generated review maps, findings triage, staged comments, and explicit GitHub review submission.
 
 ## Install
 
@@ -14,7 +14,31 @@ For local development:
 pi install /Users/kewalzanzmeria/Desktop/ho-repos/pi-diff-review-cockpit
 ```
 
+To put the direct CLI on your shell `PATH` during local development:
+
+```bash
+npm install
+npm link
+```
+
+Without linking, run the CLI through npm:
+
+```bash
+npm run cli -- pr https://github.com/owner/repo/pull/123
+```
+
 ## Commands
+
+From a terminal:
+
+```bash
+pi-diff-review
+pi-diff-review pr https://github.com/owner/repo/pull/123
+pi-diff-review --reset-review pr https://github.com/owner/repo/pull/123
+pi-diff-review --repo /path/to/repo pr https://github.com/owner/repo/pull/123
+```
+
+Inside Pi:
 
 ```text
 /diff-review
@@ -28,7 +52,16 @@ pi install /Users/kewalzanzmeria/Desktop/ho-repos/pi-diff-review-cockpit
 /diff-review pr https://github.com/owner/repo/pull/123
 ```
 
-`/diff-review pr <url>` loads GitHub PR metadata, prepares an isolated review worktree under `~/.cache/pi-diff-review-cockpit/github/`, and opens the cockpit review window for the PR diff.
+`/diff-review pr <url>` loads GitHub PR metadata, fetches private base/head review refs, and opens the cockpit review window for the PR diff without creating a detached cache worktree.
+
+Use `--reset-review` to clear saved cockpit metadata for the selected local diff or PR before opening the review again:
+
+```bash
+pi-diff-review --reset-review pr https://github.com/owner/repo/pull/123
+pi-diff-review pr https://github.com/owner/repo/pull/123 --reset-review
+```
+
+This removes the saved review map, AI findings, staged local comments, and review progress for that one review source. It does not reset Git files, branches, refs, or worktrees. `--fresh` is accepted as a short alias, but `--reset-review` is the preferred spelling.
 
 ## PI Review Configuration
 

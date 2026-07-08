@@ -57,6 +57,13 @@
     padding: 20px;
   }
 
+  .review-checkout-drawer {
+    width: min(420px, 40vw);
+    min-width: 360px;
+    max-width: 460px;
+    box-shadow: -16px 0 42px rgba(0, 0, 0, 0.28);
+  }
+
   #editor-container {
     height: 100%;
     min-height: 0;
@@ -82,30 +89,72 @@
     overflow: visible;
   }
 
-  .monaco-editor .review-comment-line-original {
-    background: rgba(245, 158, 11, 0.15);
+  .monaco-editor .review-comment-rail-staged {
+    background: transparent !important;
+    box-shadow: inset 2px 0 0 rgba(210, 168, 255, 0.82);
   }
 
-  .monaco-editor .review-comment-line-modified {
-    background: rgba(88, 166, 255, 0.15);
+  .monaco-editor .review-comment-rail-published {
+    background: transparent !important;
+    box-shadow: none;
   }
 
-  .monaco-editor .review-comment-glyph-original,
-  .monaco-editor .review-comment-glyph-modified {
-    border-radius: 999px;
-    width: 8px !important;
-    height: 8px !important;
-    margin-left: 6px;
-    margin-top: 5px;
+  .monaco-editor .review-comment-glyph-staged,
+  .monaco-editor .review-comment-glyph-published {
+    align-items: center;
+    background: transparent;
+    display: flex;
+    height: 18px !important;
+    justify-content: center;
+    margin-left: 2px;
+    margin-top: 1px;
+    width: 18px !important;
     cursor: pointer;
+    line-height: 18px;
   }
 
-  .monaco-editor .review-comment-glyph-original {
-    background: #d29922;
+  .monaco-editor .review-comment-glyph-staged::before {
+    color: #d2a8ff;
+    content: "●";
+    font-size: 12px;
+    text-shadow: 0 0 8px rgba(210, 168, 255, 0.46);
   }
 
-  .monaco-editor .review-comment-glyph-modified {
-    background: #58a6ff;
+  .monaco-editor .review-comment-glyph-published::before {
+    color: #8b949e;
+    content: "◌";
+    font-size: 13px;
+  }
+
+  .monaco-editor .review-ai-finding-rail-active {
+    background: transparent !important;
+    box-shadow: inset 2px 0 0 rgba(210, 168, 255, 0.72);
+  }
+
+  .monaco-editor .review-ai-finding-glyph,
+  .monaco-editor .review-ai-finding-glyph-active {
+    align-items: center;
+    background: transparent;
+    cursor: pointer;
+    display: flex;
+    height: 18px !important;
+    justify-content: center;
+    line-height: 18px;
+    margin-left: 2px;
+    margin-top: 1px;
+    width: 18px !important;
+  }
+
+  .monaco-editor .review-ai-finding-glyph::before,
+  .monaco-editor .review-ai-finding-glyph-active::before {
+    color: #d2a8ff;
+    content: "✦";
+    font-size: 12px;
+    text-shadow: 0 0 8px rgba(210, 168, 255, 0.35);
+  }
+
+  .monaco-editor .review-ai-finding-glyph-active::before {
+    color: #ffffff;
   }
 
   .monaco-editor .review-keyboard-line {
@@ -193,6 +242,11 @@
     50% { transform: scale(1); opacity: 1; }
   }
 
+  @keyframes scan-pulse {
+    0%, 100% { opacity: 0.36; transform: scaleX(0.72); }
+    50% { opacity: 1; transform: scaleX(1); }
+  }
+
   @keyframes ai-finding-pulse {
     0% {
       border-left-color: rgba(210, 168, 255, 0.95);
@@ -225,6 +279,17 @@
     animation-delay: 240ms;
   }
 
+  .review-scan-pulse {
+    display: inline-block;
+    width: 11px;
+    height: 7px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(88, 166, 255, 0.25), rgba(210, 168, 255, 0.95), rgba(88, 166, 255, 0.25));
+    box-shadow: 0 0 10px rgba(210, 168, 255, 0.28);
+    transform-origin: center;
+    animation: scan-pulse 1.1s ease-in-out infinite;
+  }
+
   .ai-finding-zone {
     border-left: 2px solid rgba(210, 168, 255, 0.72);
     border-top-color: rgba(137, 87, 229, 0.26);
@@ -238,6 +303,7 @@
 
   @media (prefers-reduced-motion: reduce) {
     .ai-pulse-dot,
+    .review-scan-pulse,
     .ai-finding-zone.is-pulsing {
       animation: none;
     }
@@ -251,36 +317,35 @@
       <button id="toggle-sidebar-button" class="cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium text-review-muted hover:bg-[#161b22] hover:text-review-text">Review plan</button>
       <div class="min-w-0">
         <div id="window-title" class="truncate text-sm font-semibold text-white">Diff review</div>
-        <div id="repo-root" class="truncate text-[11px] text-review-muted"></div>
+        <div class="flex min-w-0 items-center gap-2">
+          <div id="repo-root" class="truncate text-[11px] text-review-muted"></div>
+          <button id="autosave-status" type="button" disabled aria-live="polite" class="shrink-0 cursor-default rounded px-1.5 py-0.5 text-[10px] font-medium text-[#3fb950]">Saved</button>
+        </div>
       </div>
     </div>
     <div class="flex min-w-0 items-center gap-2">
-      <div id="summary" class="hidden max-w-[26rem] truncate text-[11px] text-review-muted xl:block"></div>
-      <button id="autosave-status" type="button" disabled aria-live="polite" class="cursor-default rounded-md px-2 py-1 text-[11px] font-medium text-review-muted">Saved</button>
+      <div id="summary" class="hidden min-w-0 max-w-[34rem] text-[11px] text-review-muted xl:block"></div>
       <button id="submit-button" class="cursor-pointer rounded-md border border-[#1f6feb]/40 bg-[#1f6feb] px-4 py-1.5 text-xs font-semibold text-white shadow-[0_0_0_1px_rgba(255,255,255,0.04)] hover:bg-[#388bfd] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-[#1f6feb]">Submit review</button>
     </div>
   </div>
 
   <div id="content-layout" class="flex min-h-0 flex-1">
     <aside id="sidebar" tabindex="-1" class="flex min-h-0 shrink-0 flex-col border-r border-review-border bg-[#0d1117]" style="width: 280px; min-width: 280px; flex-basis: 280px; overflow: hidden;">
-    <div class="border-b border-review-border px-4 py-3">
-      <div class="mb-2 flex items-center justify-between gap-2">
-        <div id="sidebar-title" class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review plan</div>
-        <div class="text-[10px] text-review-muted">Fuzzy filter</div>
-      </div>
-      <div class="mb-3 grid grid-cols-3 gap-1 rounded-md border border-review-border bg-[#010409] p-1">
+    <div class="border-b border-review-border px-3 py-3">
+      <div id="sidebar-title" class="hidden"></div>
+      <div class="hidden">
         <button id="tab-review-map-button" class="rounded px-2 py-1 text-[11px] font-medium text-review-text">Map</button>
         <button id="tab-files-button" class="rounded px-2 py-1 text-[11px] font-medium text-review-muted">Files</button>
         <button id="tab-findings-button" class="rounded px-2 py-1 text-[11px] font-medium text-review-muted">Findings</button>
       </div>
-      <div id="scope-controls" class="mb-3 hidden flex-wrap items-center gap-2">
-        <button id="scope-diff-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Git diff</button>
-        <button id="scope-last-commit-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Last commit</button>
-        <button id="scope-commit-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Commits</button>
-        <button id="scope-all-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">All files</button>
+      <div id="scope-controls" class="hidden" aria-hidden="true">
+        <button id="scope-diff-button" type="button" tabindex="-1"></button>
+        <button id="scope-last-commit-button" type="button" tabindex="-1"></button>
+        <button id="scope-commit-button" type="button" tabindex="-1"></button>
+        <button id="scope-all-button" type="button" tabindex="-1"></button>
       </div>
-      <select id="commit-select" class="mb-3 hidden w-full rounded-md border border-review-border bg-review-panel px-2 py-2 text-xs text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"></select>
-      <input id="sidebar-search-input" type="text" spellcheck="false" autocomplete="off" placeholder="Search" class="w-full rounded-md border border-review-border bg-review-panel px-3 py-2 text-sm text-review-text outline-none placeholder:text-review-muted focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
+      <select id="commit-select" class="hidden" tabindex="-1" aria-hidden="true"></select>
+      <input id="sidebar-search-input" type="text" spellcheck="false" autocomplete="off" placeholder="Filter changed files..." aria-label="Filter changed files" class="w-full rounded-lg border border-review-border bg-review-panel px-3.5 py-2.5 text-sm text-review-text outline-none placeholder:text-review-muted focus:border-blue-500 focus:ring-1 focus:ring-blue-500">
     </div>
     <div id="file-tree" class="scrollbar-thin min-h-0 flex-1 overflow-auto px-2 pb-2"></div>
   </aside>
@@ -291,19 +356,19 @@
         <div id="current-file-label" class="truncate text-sm font-semibold text-white"></div>
         <div id="mode-hint" class="mt-0.5 text-[11px] text-review-muted"></div>
       </div>
-      <div class="flex items-center gap-3">
-        <button id="toggle-reviewed-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1 text-xs font-medium text-review-text hover:bg-[#21262d]">Mark reviewed</button>
-        <button id="toggle-wrap-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1 text-xs font-medium text-review-text hover:bg-[#21262d]">Wrap lines: on</button>
-        <button id="toggle-unchanged-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1 text-xs font-medium text-review-text hover:bg-[#21262d]">Show changed areas only</button>
-        <button id="file-comment-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1 text-xs font-medium text-review-text hover:bg-[#21262d]">Add file comment</button>
+      <div class="flex items-center gap-1 rounded-lg border border-review-border bg-[#010409] p-1">
+        <button id="toggle-wrap-button" class="cursor-pointer rounded-md border border-transparent bg-transparent px-3 py-1 text-xs font-medium text-review-text hover:bg-[#21262d]">Wrap lines</button>
+        <button id="toggle-unchanged-button" class="cursor-pointer rounded-md border border-transparent bg-transparent px-3 py-1 text-xs font-medium text-review-text hover:bg-[#21262d]">Changed areas</button>
+        <button id="file-comment-button" class="cursor-pointer rounded-md border border-transparent bg-transparent px-3 py-1 text-xs font-medium text-review-text hover:bg-[#21262d]">Add comment</button>
+        <button id="toggle-reviewed-button" aria-pressed="false" title="Mark this file reviewed and advance" class="cursor-pointer rounded-md border border-transparent bg-transparent px-3 py-1 text-xs font-medium text-review-text hover:bg-[#21262d]">Reviewed</button>
       </div>
     </div>
     <div id="file-comments-container" class="hidden border-b border-review-border bg-[#0d1117] px-4 py-0"></div>
     <div id="editor-container" class="min-h-0 min-w-0 flex-1"></div>
     </main>
-    <aside id="insight-panel" tabindex="-1" class="flex min-h-0 w-[340px] shrink-0 flex-col border-l border-review-border bg-[#0d1117]">
+    <aside id="insight-panel" tabindex="-1" class="hidden min-h-0 shrink-0 flex-col border-l border-review-border bg-[#0d1117] review-checkout-drawer">
       <div class="border-b border-review-border px-4 py-2">
-        <div id="insight-panel-title" class="truncate text-xs font-medium text-review-muted">Review summary</div>
+        <div id="insight-panel-title" class="truncate text-xs font-medium text-review-muted">Submit review</div>
         <div id="source-label" class="hidden"></div>
         <div id="analysis-status" class="hidden"></div>
       </div>
