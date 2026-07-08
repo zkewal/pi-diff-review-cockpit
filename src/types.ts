@@ -80,6 +80,10 @@ export interface ReviewCancelPayload {
   type: "cancel";
 }
 
+export interface ReviewSaveClosePayload {
+  type: "save-close";
+}
+
 export interface ReviewRequestFilePayload {
   type: "request-file";
   requestId: string;
@@ -133,7 +137,7 @@ export interface ReviewSaveSessionPayload {
   snapshot: ReviewSessionSnapshot;
 }
 
-export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewPublishPayload | ReviewRunAiReviewPayload | ReviewSaveSessionPayload;
+export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewSaveClosePayload | ReviewRequestFilePayload | ReviewPublishPayload | ReviewRunAiReviewPayload | ReviewSaveSessionPayload;
 
 export interface ReviewFileDataMessage {
   type: "file-data";

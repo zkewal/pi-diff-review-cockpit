@@ -66,11 +66,11 @@ export function composeReviewPrompt(files: ReviewFile[], payload: ReviewSubmitPa
     });
   }
 
-  const packetBody = payload.approvalPacket.body.trim();
-  if (packetBody.length > 0) {
-    lines.push("Approval packet");
+  const summaryBody = payload.approvalPacket.body.trim();
+  if (summaryBody.length > 0) {
+    lines.push("Review summary");
     lines.push("");
-    lines.push(packetBody);
+    lines.push(summaryBody);
     lines.push("");
   }
 

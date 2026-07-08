@@ -111,6 +111,7 @@ const scopeDiffButton = document.getElementById("scope-diff-button");
 const scopeLastCommitButton = document.getElementById("scope-last-commit-button");
 const scopeCommitButton = document.getElementById("scope-commit-button");
 const scopeAllButton = document.getElementById("scope-all-button");
+const scopeControlsEl = document.getElementById("scope-controls");
 const commitSelectEl = document.getElementById("commit-select");
 const windowTitleEl = document.getElementById("window-title");
 const repoRootEl = document.getElementById("repo-root");
@@ -126,11 +127,7 @@ const insightContentEl = document.getElementById("insight-content");
 const sourceLabelEl = document.getElementById("source-label");
 const analysisStatusEl = document.getElementById("analysis-status");
 const submitButton = document.getElementById("submit-button");
-const cancelButton = document.getElementById("cancel-button");
-const publishGitHubButton = document.getElementById("publish-github-button");
-const runAiReviewButton = document.getElementById("run-ai-review-button");
-const overallCommentButton = document.getElementById("overall-comment-button");
-const approvalPacketButton = document.getElementById("approval-packet-button");
+const saveCloseButton = document.getElementById("save-close-button");
 const fileCommentButton = document.getElementById("file-comment-button");
 const toggleReviewedButton = document.getElementById("toggle-reviewed-button");
 const toggleUnchangedButton = document.getElementById("toggle-unchanged-button");
@@ -162,9 +159,6 @@ const workflowTitle = workflowTitleParts();
 repoRootEl.textContent = workflowTitle.subtitle;
 windowTitleEl.textContent = workflowTitle.title;
 document.title = workflowTitle.documentTitle;
-if (reviewData.source?.canPublishGitHubReview) {
-  publishGitHubButton.classList.remove("hidden");
-}
 
 let monacoApi = null;
 let diffEditor = null;
@@ -409,6 +403,26 @@ function severityTextClass(severity) {
     default:
       return "text-review-muted";
   }
+}
+
+function riskBadgeClass(risk) {
+  switch (risk) {
+    case "critical":
+    case "high":
+      return "shrink-0 whitespace-nowrap rounded bg-[#f85149]/10 px-2 py-0.5 text-[11px] font-medium text-[#ff7b72]";
+    case "medium":
+      return "shrink-0 whitespace-nowrap rounded bg-[#d29922]/10 px-2 py-0.5 text-[11px] font-medium text-[#e3b341]";
+    case "low":
+      return "shrink-0 whitespace-nowrap rounded bg-[#58a6ff]/10 px-2 py-0.5 text-[11px] font-medium text-[#79c0ff]";
+    default:
+      return "shrink-0 whitespace-nowrap rounded bg-[#30363d]/50 px-2 py-0.5 text-[11px] font-medium text-review-muted";
+  }
+}
+
+function reviewStatusBadgeClass(done) {
+  return done
+    ? "shrink-0 whitespace-nowrap rounded bg-[#238636]/15 px-2 py-0.5 text-[11px] font-medium text-[#3fb950]"
+    : "shrink-0 whitespace-nowrap rounded bg-[#30363d]/50 px-2 py-0.5 text-[11px] font-medium text-review-muted";
 }
 
 function findingStatusLabel(status) {
@@ -1106,7 +1120,7 @@ function updateSidebarLayout() {
   sidebarEl.style.flexBasis = collapsed ? "0px" : "280px";
   sidebarEl.style.borderRightWidth = collapsed ? "0px" : "1px";
   sidebarEl.style.pointerEvents = collapsed ? "none" : "auto";
-  toggleSidebarButton.textContent = collapsed ? "Show map" : "Sidebar";
+  toggleSidebarButton.textContent = collapsed ? "Show plan" : "Review plan";
 }
 
 function setSidebarTab(tab) {
@@ -1115,7 +1129,7 @@ function setSidebarTab(tab) {
 }
 
 function updateSidebarTabs() {
-  const activeClasses = "rounded bg-[#238636]/15 px-2 py-1 text-[11px] font-medium text-[#3fb950]";
+  const activeClasses = "rounded bg-[#8957e5]/15 px-2 py-1 text-[11px] font-medium text-[#d2a8ff]";
   const inactiveClasses = "rounded px-2 py-1 text-[11px] font-medium text-review-muted hover:bg-[#21262d] hover:text-review-text";
   tabReviewMapButton.className = state.activeSidebarTab === "review-map" ? activeClasses : inactiveClasses;
   tabFilesButton.className = state.activeSidebarTab === "files" ? activeClasses : inactiveClasses;
@@ -1123,6 +1137,10 @@ function updateSidebarTabs() {
 }
 
 function updateScopeButtons() {
+  scopeControlsEl.className = state.activeSidebarTab === "files"
+    ? "mb-3 flex flex-wrap items-center gap-2"
+    : "mb-3 hidden flex-wrap items-center gap-2";
+
   const counts = {
     diff: reviewData.files.filter((file) => file.inGitDiff).length,
     lastCommit: reviewData.files.filter((file) => file.inLastCommit).length,
@@ -1156,11 +1174,13 @@ function updateScopeButtons() {
 
 function updateAiReviewButton() {
   const running = state.aiReview.status === "running";
-  runAiReviewButton.disabled = running;
-  runAiReviewButton.textContent = running ? "PI reviewing..." : state.aiReview.status === "done" ? "Rerun PI review" : "Run PI review";
-  runAiReviewButton.className = running
-    ? "cursor-default rounded-md border border-[#8957e5]/30 bg-[#8957e5]/10 px-2.5 py-1 text-[11px] font-medium text-[#d2a8ff] opacity-70"
-    : "cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-2.5 py-1 text-[11px] font-medium text-[#d2a8ff] hover:bg-[#8957e5]/25";
+  document.querySelectorAll("[data-action='run-ai-review']").forEach((button) => {
+    button.disabled = running;
+    button.textContent = running ? "Reviewing..." : state.aiReview.status === "done" ? "Rerun AI review" : "Run AI review";
+    button.className = running
+      ? "cursor-default rounded-md border border-[#8957e5]/25 bg-[#8957e5]/10 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] opacity-70"
+      : "cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] hover:bg-[#8957e5]/20";
+  });
 }
 
 function updateToggleButtons() {
@@ -1177,7 +1197,7 @@ function updateToggleButtons() {
   updateAiReviewButton();
   modeHintEl.textContent = scopeHint(state.currentScope);
   submitButton.disabled = state.aiReview.status === "running";
-  publishGitHubButton.disabled = state.aiReview.status === "running";
+  saveCloseButton.disabled = false;
 }
 
 function findPreferredScopeForFile(file) {
@@ -1268,46 +1288,39 @@ function bindInsightNav(chapterId = null) {
   });
 }
 
+function bindAiReviewControls() {
+  insightContentEl.querySelectorAll("[data-action='run-ai-review']").forEach((button) => {
+    button.addEventListener("click", runAiReviewFromUi);
+  });
+  updateAiReviewButton();
+}
+
 function aiReviewConfigHtml(config) {
   if (!config) return "";
   const warnings = Array.isArray(config.warnings) ? config.warnings : [];
-  const phaseSummary = ["scout", "chapter", "validation", "synthesis"]
-    .map((phase) => {
-      const phaseConfig = config.phases?.[phase];
-      if (!phaseConfig) return "";
-      return `${phase}: ${phaseConfig.model || "active model"} (${phaseConfig.reasoning || "off"})`;
-    })
-    .filter(Boolean)
-    .join("\n");
-  return `
-    <div class="relative mt-3">
-      <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-review-muted" title="${escapeHtml(phaseSummary)}">
-        <span>Depth: <span class="text-review-text">${escapeHtml(humanizeToken(config.depth || "standard"))}</span></span>
-        <span>${Number(config.parallelChapterReviews || 0)} parallel agent(s)</span>
-        <span>cap ${Number(config.maxFindingsPerChapter || 0)} finding(s)/chapter</span>
-      </div>
-      ${warnings.length > 0 ? `<div class="mt-2 rounded border border-[#d29922]/30 bg-[#d29922]/10 px-2 py-1.5 text-[11px] leading-4 text-[#e3b341]">${warnings.map(escapeHtml).join("<br>")}</div>` : ""}
-    </div>
-  `;
+  return warnings.length > 0
+    ? `<div class="relative mt-2 rounded bg-[#d29922]/10 px-2 py-1.5 text-[11px] leading-4 text-[#e3b341]">${warnings.map(escapeHtml).join("<br>")}</div>`
+    : "";
 }
 
 function aiReviewPanelHtml(chapterId = null) {
   const progress = state.aiReview.progress;
   const config = progress?.config || state.aiReview.config || reviewData.aiReviewConfig || null;
-  const title = chapterId ? "PI chapter review" : "PI review";
+  const title = chapterId ? "AI review for this area" : "AI review";
   const running = progress?.status === "running";
   if (!progress) {
     return `
-      <div class="ai-review-card rounded-md border p-3" data-running="false">
+      <div class="ai-review-card rounded-md border border-[#8957e5]/20 p-3" data-running="false">
         <div class="relative flex items-center justify-between gap-2">
           <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-review-muted">
-            <span class="rounded border border-[#58a6ff]/30 bg-[#58a6ff]/10 px-1.5 py-0.5 text-[#79c0ff]">PI</span>
+            <span class="rounded bg-[#8957e5]/15 px-1.5 py-0.5 text-[#d2a8ff]">AI</span>
             <span>${title}</span>
           </div>
           <span class="text-[11px] text-review-muted">Idle</span>
         </div>
-        <div class="relative mt-2 text-sm text-review-text">Ready for parallel patch review.</div>
+        <div class="relative mt-2 text-sm text-review-text">Ready to review changed hunks and suggest findings.</div>
         ${aiReviewConfigHtml(config)}
+        <button data-action="run-ai-review" class="mt-3 cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] hover:bg-[#8957e5]/20">Run AI review</button>
       </div>
     `;
   }
@@ -1327,7 +1340,7 @@ function aiReviewPanelHtml(chapterId = null) {
     <div class="ai-review-card rounded-md border p-3" data-running="${running ? "true" : "false"}">
       <div class="relative flex items-center justify-between gap-2">
         <div class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-review-muted">
-          <span class="rounded border border-[#58a6ff]/30 bg-[#58a6ff]/10 px-1.5 py-0.5 text-[#79c0ff]">PI</span>
+          <span class="rounded bg-[#8957e5]/15 px-1.5 py-0.5 text-[#d2a8ff]">AI</span>
           <span>${title}</span>
           ${running ? `<span class="flex items-center gap-1" aria-hidden="true"><span class="ai-pulse-dot"></span><span class="ai-pulse-dot"></span><span class="ai-pulse-dot"></span></span>` : ""}
         </div>
@@ -1338,7 +1351,7 @@ function aiReviewPanelHtml(chapterId = null) {
         <div class="h-full rounded-full bg-[#58a6ff]" style="width: ${progressPercent}%"></div>
       </div>
       <div class="relative mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-review-muted">
-        <span>${completedCount}/${progress.chapters.length} subagent(s)</span>
+        <span>${completedCount}/${progress.chapters.length} area(s)</span>
         ${failedCount > 0 ? `<span class="text-[#f85149]">${failedCount} failed</span>` : ""}
         <span>${totalFindings} finding(s)</span>
       </div>
@@ -1357,88 +1370,48 @@ function aiReviewPanelHtml(chapterId = null) {
             </div>
           </div>
         `).join("")}
-        ${hiddenCount > 0 ? `<div class="px-2 text-xs text-review-muted">${hiddenCount} more chapter agent(s).</div>` : ""}
+        ${hiddenCount > 0 ? `<div class="px-2 text-xs text-review-muted">${hiddenCount} more review area(s).</div>` : ""}
       </div>` : ""}
+      <button data-action="run-ai-review" class="relative mt-3 cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-3 py-1.5 text-xs font-medium text-[#d2a8ff] hover:bg-[#8957e5]/20">${state.aiReview.status === "done" ? "Rerun AI review" : "Run AI review"}</button>
     </div>
   `;
 }
 
 function renderDefaultInsight() {
-  insightPanelTitleEl.textContent = "Review assistant";
+  insightPanelTitleEl.textContent = "Review summary";
   const packet = reviewData.analysis?.approvalPacket;
   const draftComments = getDraftComments();
   const findingCounts = findingStatusCounts();
-  const reviewQueueHtml = `
-    <div class="rounded-md border border-review-border bg-[#010409] p-3">
-      <div class="flex items-center justify-between gap-3">
-        <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Findings queue</div>
-        <span class="text-[11px] text-review-muted">${findingCounts.total} total</span>
-      </div>
-      <div class="mt-3 grid grid-cols-3 gap-2">
-        <div class="rounded border border-[#58a6ff]/30 bg-[#58a6ff]/10 px-2 py-1.5">
-          <div class="text-sm font-semibold text-[#79c0ff]">${findingCounts.open}</div>
-          <div class="text-[10px] uppercase tracking-wider text-review-muted">To review</div>
-        </div>
-        <div class="rounded border border-[#2ea043]/30 bg-[#238636]/10 px-2 py-1.5">
-          <div class="text-sm font-semibold text-[#3fb950]">${findingCounts.drafted}</div>
-          <div class="text-[10px] uppercase tracking-wider text-review-muted">Drafted</div>
-        </div>
-        <div class="rounded border border-review-border bg-review-panel px-2 py-1.5">
-          <div class="text-sm font-semibold text-review-text">${findingCounts.dismissed}</div>
-          <div class="text-[10px] uppercase tracking-wider text-review-muted">Closed</div>
-        </div>
-      </div>
-      <div class="mt-3 text-xs leading-5 text-review-muted">
-        Drafted findings become normal local comments and publish with the review.
-      </div>
-    </div>
-  `;
-  if (!packet) {
-    insightContentEl.innerHTML = `
-      <div class="space-y-4">
-        ${aiReviewPanelHtml()}
-        ${reviewQueueHtml}
-        <div class="space-y-3 text-sm text-review-muted">
-          <div>No analysis context available.</div>
-          <div>Select a chapter or finding to inspect details.</div>
-        </div>
-        <div>
-          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Local draft comments</div>
-          <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments yet.")}</div>
-        </div>
-      </div>
-    `;
-    bindCommentSummaryLinks();
-    return;
-  }
+  const coverage = reviewData.analysis?.coverage;
+  const coverageText = coverage ? coverageSummaryLabel(coverage) : "";
+  const summary = packet?.summary || "Select a review area or run AI review to build the summary.";
+  const verdict = packet?.suggestedVerdict ? humanizeToken(packet.suggestedVerdict) : "Comment";
 
   insightContentEl.innerHTML = `
-    <div class="space-y-4">
-      ${aiReviewPanelHtml()}
-      ${reviewQueueHtml}
-      <div>
-        <div class="flex items-center justify-between gap-3">
-          <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review packet</div>
-          <button data-action="edit-packet" class="cursor-pointer text-[11px] font-medium text-[#58a6ff] hover:text-[#79c0ff]">Edit</button>
+    <div class="space-y-3">
+      <div class="rounded-md bg-[#010409] p-3">
+        <div class="text-base font-semibold leading-6 text-white">${escapeHtml(workflowTitle.title)}</div>
+        <div class="mt-1 text-sm leading-5 text-review-text">${escapeHtml(summary)}</div>
+        <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-review-muted">
+          ${coverage ? diffstatHtml(coverageDiffstatCounts(coverage), { showZero: true }) : ""}
+          ${coverageText ? `<span>${escapeHtml(coverageText)}</span>` : ""}
         </div>
-        <div class="mt-2 text-sm font-medium leading-5 text-white">${escapeHtml(packet.summary)}</div>
-        ${reviewData.analysis?.coverage ? `
-          <div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-review-muted">
-            ${diffstatHtml(coverageDiffstatCounts(reviewData.analysis.coverage), { showZero: true })}
-            <span>${escapeHtml(coverageSummaryLabel(reviewData.analysis.coverage))}</span>
-          </div>
-        ` : ""}
-        <div class="mt-2 text-[11px] text-review-muted">Suggested verdict: <span class="font-medium text-review-text">${escapeHtml(humanizeToken(packet.suggestedVerdict))}</span></div>
+        <div class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-review-muted">
+          <span>${findingCounts.total} AI finding(s)</span>
+          <span>${draftComments.length} draft(s)</span>
+          <span>Suggested verdict: <span class="font-medium text-review-text">${escapeHtml(verdict)}</span></span>
+        </div>
       </div>
-      <div>
+      ${aiReviewPanelHtml()}
+      ${draftComments.length > 0 ? `<div>
         <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Local draft comments</div>
         <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments yet.")}</div>
-        <div class="mt-2 text-xs text-review-muted">Draft comments autosave locally until you finish the review or publish to GitHub.</div>
-      </div>
+        <div class="mt-2 text-xs text-review-muted">Draft comments autosave locally and are included when you submit the review.</div>
+      </div>` : ""}
     </div>
   `;
-  insightContentEl.querySelector("[data-action='edit-packet']")?.addEventListener("click", showApprovalPacketModal);
   bindCommentSummaryLinks();
+  bindAiReviewControls();
 }
 
 function getChapterFiles(chapter) {
@@ -1452,7 +1425,7 @@ function getChapterDisplayFiles(chapter) {
 }
 
 function renderInsightForChapter(chapter) {
-  insightPanelTitleEl.textContent = "Chapter queue";
+  insightPanelTitleEl.textContent = "Review area";
   const reviewed = state.reviewedChapters[chapter.id] === true;
   const files = getChapterDisplayFiles(chapter);
   const visibleFiles = files.slice(0, 60);
@@ -1469,13 +1442,12 @@ function renderInsightForChapter(chapter) {
 
   insightContentEl.innerHTML = `
     <div class="space-y-4">
-      ${insightNavHtml([{ id: "overview", label: "PI review" }, { label: chapter.title }])}
+      ${insightNavHtml([{ id: "overview", label: "Review summary" }, { label: chapter.title }])}
       ${aiReviewPanelHtml(chapter.id)}
       <div>
-        <div class="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider">
-          <span class="${severityTextClass(chapter.risk)}">${escapeHtml(humanizeToken(chapter.risk))} risk</span>
-          <span class="text-review-muted">•</span>
-          <span class="${reviewed ? "text-[#3fb950]" : "text-review-muted"}">${reviewed ? "Reviewed" : "Not reviewed"}</span>
+        <div class="mb-2 flex items-center gap-2">
+          <span class="${riskBadgeClass(chapter.risk)}">${escapeHtml(humanizeToken(chapter.risk))} risk</span>
+          <span class="${reviewStatusBadgeClass(reviewed)}">${reviewed ? "Reviewed" : "Not reviewed"}</span>
         </div>
         <div class="text-base font-semibold leading-6 text-white">${escapeHtml(chapter.title)}</div>
         <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(chapter.summary)}</div>
@@ -1486,11 +1458,11 @@ function renderInsightForChapter(chapter) {
           <span>${chapterFindingCounts.open} finding(s) to review</span>
         </div>
       </div>
-      <button id="chapter-reviewed-toggle" class="${insightActionButtonClass(reviewed)}">${reviewed ? "Mark not reviewed" : "Mark chapter reviewed"}</button>
+      <button id="chapter-reviewed-toggle" class="${insightActionButtonClass(reviewed)}">${reviewed ? "Mark not reviewed" : "Mark area reviewed"}</button>
       <div>
         <div class="flex items-center justify-between gap-3">
           <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Files</div>
-          <div class="text-[11px] text-review-muted">${files.length} in chapter</div>
+          <div class="text-[11px] text-review-muted">${files.length} in area</div>
         </div>
         <div class="mt-2 space-y-1">
           ${visibleFiles.length === 0 ? `<div class="text-sm text-review-muted">No files linked.</div>` : visibleFiles.map((file) => {
@@ -1518,7 +1490,7 @@ function renderInsightForChapter(chapter) {
       </div>
       <div>
         <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Local draft comments</div>
-        <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments in this chapter.")}</div>
+        <div class="mt-2">${commentSummaryHtml(draftComments, "No draft comments in this area.")}</div>
       </div>
       <div>
         <div class="flex items-center justify-between gap-3">
@@ -1526,7 +1498,7 @@ function renderInsightForChapter(chapter) {
           <div class="text-[11px] text-review-muted">${chapterFindingCounts.open} open • ${chapterFindingCounts.drafted} drafted • ${chapterFindingCounts.dismissed} closed</div>
         </div>
         <div class="mt-2 space-y-2">
-          ${findings.length === 0 ? `<div class="text-sm text-review-muted">No AI findings linked to this chapter.</div>` : findings.map((finding) => `
+          ${findings.length === 0 ? `<div class="text-sm text-review-muted">No AI findings linked to this area.</div>` : findings.map((finding) => `
             <button data-finding-id="${escapeHtml(finding.id)}" class="block w-full rounded-md border border-review-border bg-[#010409] p-2 text-left hover:bg-[#161b22]">
               <div class="flex items-center justify-between gap-2 text-[11px]">
                 <span class="${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
@@ -1547,6 +1519,7 @@ function renderInsightForChapter(chapter) {
   });
   bindInsightNav(chapter.id);
   bindCommentSummaryLinks();
+  bindAiReviewControls();
   insightContentEl.querySelectorAll("[data-file-id]").forEach((button) => {
     button.addEventListener("click", () => openFileFromAnalysis(button.getAttribute("data-file-id")));
   });
@@ -1605,21 +1578,21 @@ function renderInsightForFinding(finding) {
   insightContentEl.innerHTML = `
     <div class="space-y-4">
       ${insightNavHtml([
-        { id: "overview", label: "PI review" },
+        { id: "overview", label: "Review summary" },
         ...(chapter ? [{ id: "chapter", label: chapter.title }] : []),
         { label: "Finding" },
       ])}
-      <div class="rounded-md border border-review-border bg-[#010409] p-3">
-        <div class="mb-2 flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-wider">
-          <span class="text-review-muted">${escapeHtml(humanizeToken(finding.kind))}</span>
-          <span class="${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
-          <span class="text-review-muted">Confidence ${escapeHtml(humanizeToken(finding.confidence))}</span>
+      <div class="rounded-md bg-[#010409] p-3">
+        <div class="mb-2 flex flex-wrap items-center gap-2">
+          <span class="rounded bg-[#30363d]/50 px-2 py-0.5 text-[11px] font-medium text-review-muted">${escapeHtml(humanizeToken(finding.kind))}</span>
+          <span class="${riskBadgeClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
+          <span class="rounded bg-[#30363d]/50 px-2 py-0.5 text-[11px] font-medium text-review-muted">${escapeHtml(humanizeToken(finding.confidence))} confidence</span>
         </div>
         <div class="text-base font-semibold leading-6 text-white">${escapeHtml(finding.title)}</div>
         <div class="mt-2 text-sm leading-5 text-review-text">${escapeHtml(finding.explanation)}</div>
         <div class="mt-3 flex flex-wrap items-center gap-2">
-          <span class="rounded-md border border-review-border bg-review-panel px-2 py-1 text-xs ${findingStatusClass(status)}">${escapeHtml(findingStatusLabel(status))}</span>
-          ${chapter ? `<span class="rounded-md border border-review-border bg-review-panel px-2 py-1 text-xs text-review-muted">${escapeHtml(chapter.title)}</span>` : ""}
+          <span class="rounded bg-[#30363d]/50 px-2 py-1 text-xs ${findingStatusClass(status)}">${escapeHtml(findingStatusLabel(status))}</span>
+          ${chapter ? `<span class="rounded bg-[#30363d]/50 px-2 py-1 text-xs text-review-muted">${escapeHtml(chapter.title)}</span>` : ""}
         </div>
       </div>
       <div>
@@ -1639,7 +1612,7 @@ function renderInsightForFinding(finding) {
       <div>
         <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Suggested comment</div>
         <div class="mt-2 whitespace-pre-wrap rounded-md border border-review-border bg-[#010409] p-3 text-xs leading-5 text-review-text">${escapeHtml(finding.suggestedComment || "No suggested comment.")}</div>
-        ${isDrafted ? `<div class="mt-2 text-xs text-[#3fb950]">A normal draft comment was created in the diff and will be published with the review.</div>` : ""}
+        ${isDrafted ? `<div class="mt-2 text-xs text-[#3fb950]">A draft comment was created in the diff and will be included when you submit the review.</div>` : ""}
       </div>
       <div class="flex flex-wrap gap-2">
         ${isDrafted
@@ -1703,6 +1676,7 @@ function renderReviewMap() {
     const stats = diffstatHtml(chapterDiffstatCounts(chapter), { compact: true, showZero: true });
     const draftCommentCount = getDraftCommentsForChapter(chapter).length;
     const findingCount = (chapter.findingIds || []).length;
+    const previewFiles = getChapterDisplayFiles(chapter).slice(0, 2);
     const metaItems = [
       `<span>${(chapter.fileIds || []).length} file(s)</span>`,
       stats,
@@ -1713,18 +1687,21 @@ function renderReviewMap() {
     button.type = "button";
     if (active) button.setAttribute("aria-current", "true");
     button.className = [
-      "mb-1.5 block w-full rounded-md border px-2.5 py-2 text-left",
-      active ? "border-[#2ea043]/40 bg-[#238636]/10" : "border-review-border bg-[#010409] hover:bg-[#161b22]",
+      "mb-2 block w-full rounded-md border px-2.5 py-2.5 text-left",
+      active ? "border-[#8957e5]/70 bg-[#8957e5]/10" : "border-[#27313c] bg-[#0b1118] hover:bg-[#111923]",
     ].join(" ");
     button.innerHTML = `
       <div class="mb-1.5 flex items-start justify-between gap-2">
         <div class="flex min-w-0 items-center gap-2">
-          <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded border border-review-border bg-review-panel text-[10px] font-semibold text-review-muted">${index + 1}</span>
+          <span class="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-[#30363d]/60 text-[10px] font-semibold text-review-muted">${index + 1}</span>
           <span class="min-w-0 truncate text-sm font-semibold leading-5 text-white">${escapeHtml(chapter.title)}</span>
         </div>
-        <span class="shrink-0 text-[10px] font-semibold uppercase tracking-wider ${reviewed ? "text-[#3fb950]" : severityTextClass(chapter.risk)}">${reviewed ? "Done" : humanizeToken(chapter.risk)}</span>
+        <span class="${reviewed ? reviewStatusBadgeClass(true) : riskBadgeClass(chapter.risk)}">${reviewed ? "Reviewed" : `${humanizeToken(chapter.risk)} risk`}</span>
       </div>
       <div class="line-clamp-2 text-xs leading-5 text-review-muted">${escapeHtml(chapter.summary)}</div>
+      ${previewFiles.length > 0 ? `<div class="mt-2 space-y-1">
+        ${previewFiles.map((file) => `<div class="truncate text-[11px] text-review-muted">${escapeHtml(file.path)}</div>`).join("")}
+      </div>` : ""}
       <div class="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-review-muted">
         ${metaItems}
       </div>
@@ -1814,9 +1791,9 @@ function renderTree() {
     const chapters = getReviewChapters();
     const findings = getReviewFindings();
     renderReviewMap();
-    sidebarTitleEl.textContent = "Review map";
+    sidebarTitleEl.textContent = "Review plan";
     setSummary(
-      `${chapters.length} chapters • ${findings.length} findings • ${comments} drafts${state.overallComment ? " • note" : ""}`,
+      `${chapters.length} review areas • ${findings.length} findings • ${comments} drafts`,
       coverageDiffstatCounts(reviewData.analysis?.coverage),
     );
     updateToggleButtons();
@@ -1831,7 +1808,7 @@ function renderTree() {
     renderFindings();
     sidebarTitleEl.textContent = "Findings";
     setSummary(
-      `${findings.length} findings • ${newFindings} to review • ${comments} drafts${state.overallComment ? " • note" : ""}`,
+      `${findings.length} findings • ${newFindings} to review • ${comments} drafts`,
       coverageDiffstatCounts(reviewData.analysis?.coverage),
     );
     updateToggleButtons();
@@ -1859,7 +1836,7 @@ function renderTree() {
   sidebarTitleEl.textContent = scopeLabel(state.currentScope);
   const filteredSuffix = state.fileFilter.trim() ? ` • ${visibleFiles.length} shown` : "";
   setSummary(
-    `${scopedFiles.length} files • ${comments} drafts${state.overallComment ? " • note" : ""}${filteredSuffix}`,
+    `${scopedFiles.length} files • ${comments} drafts${filteredSuffix}`,
     state.currentScope === "all-files" ? null : scopedDiffstatCounts(scopedFiles, state.currentScope),
   );
   updateToggleButtons();
@@ -1907,35 +1884,6 @@ function showTextModal(options) {
   textarea.focus();
 }
 
-function showOverallCommentModal() {
-  showTextModal({
-    title: "Overall review note",
-    description: "This note is prepended to the generated prompt above the inline comments.",
-    initialValue: state.overallComment,
-    saveLabel: "Save note",
-    onSave: (value) => {
-      state.overallComment = value;
-      renderTree();
-    },
-  });
-}
-
-function showApprovalPacketModal() {
-  const packet = reviewData.analysis?.approvalPacket;
-  showTextModal({
-    title: "Review packet",
-    description: "Edit the review body before finishing or publishing.",
-    initialValue: packet?.body || "",
-    saveLabel: "Save packet",
-    onSave: (value) => {
-      if (reviewData.analysis?.approvalPacket) {
-        reviewData.analysis.approvalPacket.body = value;
-      }
-      renderTree();
-    },
-  });
-}
-
 function suggestedGitHubReviewEvent() {
   const verdict = reviewData.analysis?.approvalPacket?.suggestedVerdict;
   if (verdict === "request-changes") return "REQUEST_CHANGES";
@@ -1953,8 +1901,8 @@ function showPublishGitHubModal() {
   backdrop.className = "review-modal-backdrop";
   backdrop.innerHTML = `
     <div class="review-modal-card">
-      <div class="mb-1 text-base font-semibold text-white">Publish GitHub review</div>
-      <div class="mb-4 text-sm leading-5 text-review-muted">Send the review body and ${draftCount} local draft comment(s) to GitHub. Published comments are not synced back into this window yet.</div>
+      <div class="mb-1 text-base font-semibold text-white">Submit review</div>
+      <div class="mb-4 text-sm leading-5 text-review-muted">Submit the review body with ${draftCount} draft comment(s). Submitted comments are not synced back into this window yet.</div>
       <div class="mb-4 grid grid-cols-3 gap-2">
         <div class="rounded-md border border-review-border bg-[#010409] px-3 py-2">
           <div class="text-sm font-semibold text-white">${draftCount}</div>
@@ -1978,8 +1926,8 @@ function showPublishGitHubModal() {
       <label class="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-review-muted" for="github-review-body">Review body</label>
       <textarea id="github-review-body" class="scrollbar-thin min-h-40 w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm leading-6 text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">${escapeHtml(reviewData.analysis?.approvalPacket?.body || "")}</textarea>
       <div class="mt-4 flex justify-end gap-2">
-        <button id="github-publish-cancel" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-sm font-medium text-review-text hover:bg-[#21262d]">Cancel</button>
-        <button id="github-publish-submit" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#388bfd]">Publish review</button>
+        <button id="github-publish-cancel" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-sm font-medium text-review-text hover:bg-[#21262d]">Back</button>
+        <button id="github-publish-submit" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#388bfd]">Submit review</button>
       </div>
     </div>
   `;
@@ -2079,7 +2027,7 @@ function renderCommentDOM(comment, onDelete) {
     </div>
     <textarea data-comment-id="${escapeHtml(comment.id)}" class="scrollbar-thin min-h-[76px] w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 text-sm text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500" placeholder="Leave a comment"></textarea>
     <div class="mt-2 flex items-center justify-between gap-3">
-      <div class="text-xs text-review-muted">Autosaves locally. Publish to GitHub sends non-empty drafts.</div>
+      <div class="text-xs text-review-muted">Autosaves locally. Submit review includes non-empty drafts.</div>
       <button data-action="delete" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-xs font-medium text-review-muted hover:border-red-500/30 hover:bg-red-500/10 hover:text-red-400">Delete</button>
     </div>
   `;
@@ -2200,7 +2148,7 @@ function renderAiFindingZoneDOM(finding, location) {
   container.innerHTML = `
     <div class="mb-2 flex items-center justify-between gap-3">
       <div class="flex min-w-0 items-center gap-2 text-xs font-semibold text-review-text">
-        <span class="rounded border border-[#58a6ff]/30 bg-[#58a6ff]/10 px-1.5 py-0.5 text-[10px] text-[#79c0ff]">PI</span>
+        <span class="rounded bg-[#8957e5]/15 px-1.5 py-0.5 text-[10px] text-[#d2a8ff]">AI</span>
         <span class="truncate">Review item • ${escapeHtml(humanizeToken(finding.kind))}</span>
       </div>
       <span class="shrink-0 text-[11px] ${severityTextClass(finding.severity)}">${escapeHtml(humanizeToken(finding.severity))}</span>
@@ -2536,7 +2484,7 @@ window.__reviewReceive = function (message) {
     state.aiReview = {
       requestId: message.requestId,
       status: message.progress?.status || "running",
-      message: message.progress?.message || "PI subagent results are streaming.",
+      message: message.progress?.message || "AI review results are streaming.",
       progress: message.progress,
       config: message.progress?.config || state.aiReview.config,
     };
@@ -2619,8 +2567,10 @@ function setupMonaco() {
       rules: [],
       colors: {
         "editor.background": "#0d1117",
-        "diffEditor.insertedTextBackground": "#2ea04326",
-        "diffEditor.removedTextBackground": "#f8514926",
+        "diffEditor.insertedLineBackground": "#2ea04314",
+        "diffEditor.removedLineBackground": "#f8514914",
+        "diffEditor.insertedTextBackground": "#2ea04320",
+        "diffEditor.removedTextBackground": "#f8514920",
       },
     });
     monacoApi.editor.setTheme("review-dark");
@@ -2763,10 +2713,19 @@ function finishReview() {
   window.glimpse.close();
 }
 
-function cancelReview() {
+function saveAndCloseReview() {
   saveSessionNow();
-  window.glimpse.send({ type: "cancel" });
+  window.glimpse.send({ type: "save-close" });
   window.glimpse.close();
+}
+
+function submitReview() {
+  if (state.aiReview.status === "running") return;
+  if (reviewData.source?.canPublishGitHubReview) {
+    showPublishGitHubModal();
+    return;
+  }
+  finishReview();
 }
 
 function toggleChangedAreasOnly() {
@@ -2893,16 +2852,16 @@ function getKeyboardActions() {
       keywords: "command palette",
       match: key("k", { metaOrCtrl: true }),
     }),
-    shortcutAction("run-ai-review", state.aiReview.status === "done" ? "Rerun PI review" : "Run PI review", "", runAiReviewFromUi, {
-      keywords: "ai review scout chapter agents findings",
+    shortcutAction("run-ai-review", state.aiReview.status === "done" ? "Rerun AI review" : "Run AI review", "", runAiReviewFromUi, {
+      keywords: "ai review findings",
       enabled: () => state.aiReview.status !== "running",
     }),
     shortcutAction("focus-sidebar", "Focus review map or files", "1", focusSidebarPane, { match: key("1") }),
     shortcutAction("focus-diff", "Focus diff", "2", focusDiffPane, { match: key("2") }),
-    shortcutAction("focus-context", "Focus review assistant", "3", focusInsightPane, { match: key("3") }),
+    shortcutAction("focus-context", "Focus review summary", "3", focusInsightPane, { match: key("3") }),
     shortcutAction("search-files", "Search files", "/", focusFileSearch, { match: key("/") }),
-    shortcutAction("next-chapter", "Next chapter", "]", () => moveChapter(1), { match: key("]") }),
-    shortcutAction("previous-chapter", "Previous chapter", "[", () => moveChapter(-1), { match: key("[") }),
+    shortcutAction("next-chapter", "Next review area", "]", () => moveChapter(1), { match: key("]") }),
+    shortcutAction("previous-chapter", "Previous review area", "[", () => moveChapter(-1), { match: key("[") }),
     shortcutAction("next-file", "Next file", "Shift+J", () => moveFile(1), { match: key("j", { shift: true }) }),
     shortcutAction("previous-file", "Previous file", "Shift+K", () => moveFile(-1), { match: key("k", { shift: true }) }),
     shortcutAction("next-hunk", "Next changed hunk", "J", () => focusHunk(1), { match: key("j") }),
@@ -2913,20 +2872,18 @@ function getKeyboardActions() {
     }),
     shortcutAction("comment-file", "Add file comment", "Shift+C", showFileCommentModal, { match: key("c", { shift: true }) }),
     shortcutAction("mark-file-reviewed", "Mark file reviewed", "R", toggleCurrentFileReviewed, { match: key("r") }),
-    shortcutAction("mark-chapter-reviewed", "Mark chapter reviewed", "Shift+R", toggleCurrentChapterReviewed, { match: key("r", { shift: true }) }),
+    shortcutAction("mark-chapter-reviewed", "Mark review area reviewed", "Shift+R", toggleCurrentChapterReviewed, { match: key("r", { shift: true }) }),
     shortcutAction("toggle-changed-only", "Toggle changed areas only", "U", toggleChangedAreasOnly, {
       enabled: () => activeFileShowsDiff(),
       match: key("u"),
     }),
     shortcutAction("toggle-wrap", "Toggle line wrap", "W", toggleWrapLines, { match: key("w") }),
-    shortcutAction("overall-note", "Edit overall note", "O", showOverallCommentModal, { match: key("o") }),
-    shortcutAction("approval-packet", "Edit approval packet", "A", showApprovalPacketModal, { match: key("a") }),
-    shortcutAction("publish-github", "Publish to GitHub", "P", showPublishGitHubModal, {
-      enabled: () => state.aiReview.status !== "running" && !publishGitHubButton.classList.contains("hidden"),
+    shortcutAction("submit-review", "Submit review", "P", submitReview, {
+      enabled: () => state.aiReview.status !== "running",
       match: key("p"),
     }),
-    shortcutAction("finish-review", "Finish review", "", finishReview, {
-      keywords: "submit complete done",
+    shortcutAction("save-close-review", "Save & close", "", saveAndCloseReview, {
+      keywords: "save close exit",
       enabled: () => state.aiReview.status !== "running",
     }),
   ];
@@ -3060,23 +3017,9 @@ function handleGlobalShortcut(event) {
   action.run();
 }
 
-submitButton.addEventListener("click", finishReview);
+submitButton.addEventListener("click", submitReview);
 
-cancelButton.addEventListener("click", cancelReview);
-
-publishGitHubButton.addEventListener("click", () => {
-  showPublishGitHubModal();
-});
-
-runAiReviewButton.addEventListener("click", runAiReviewFromUi);
-
-overallCommentButton.addEventListener("click", () => {
-  showOverallCommentModal();
-});
-
-approvalPacketButton.addEventListener("click", () => {
-  showApprovalPacketModal();
-});
+saveCloseButton.addEventListener("click", saveAndCloseReview);
 
 fileCommentButton.addEventListener("click", () => {
   showFileCommentModal();

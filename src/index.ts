@@ -29,6 +29,7 @@ import type {
   ReviewPublishPayload,
   ReviewRunAiReviewPayload,
   ReviewRequestFilePayload,
+  ReviewSaveClosePayload,
   ReviewSaveSessionPayload,
   ReviewSessionSnapshot,
   ReviewSubmitPayload,
@@ -44,6 +45,10 @@ function isSubmitPayload(value: ReviewWindowMessage): value is ReviewSubmitPaylo
 
 function isCancelPayload(value: ReviewWindowMessage): value is ReviewCancelPayload {
   return value.type === "cancel";
+}
+
+function isSaveClosePayload(value: ReviewWindowMessage): value is ReviewSaveClosePayload {
+  return value.type === "save-close";
 }
 
 function isRequestFilePayload(value: ReviewWindowMessage): value is ReviewRequestFilePayload {
@@ -312,7 +317,7 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.notify("Opened native review window.", "info");
 
     try {
-      const terminalMessagePromise = new Promise<ReviewSubmitPayload | ReviewCancelPayload | null>((resolve, reject) => {
+      const terminalMessagePromise = new Promise<ReviewSubmitPayload | ReviewCancelPayload | ReviewSaveClosePayload | null>((resolve, reject) => {
         let settled = false;
         let publishInFlight = false;
         let aiReviewInFlight = false;
@@ -326,7 +331,7 @@ export default function (pi: ExtensionAPI) {
           }
         };
 
-        const settle = (value: ReviewSubmitPayload | ReviewCancelPayload | null): void => {
+        const settle = (value: ReviewSubmitPayload | ReviewCancelPayload | ReviewSaveClosePayload | null): void => {
           if (settled) return;
           settled = true;
           cleanup();
@@ -337,11 +342,11 @@ export default function (pi: ExtensionAPI) {
 
         const handlePublishGitHubReview = async (message: ReviewPublishPayload): Promise<void> => {
           if (publishInFlight) {
-            ctx.ui.notify("A GitHub review publish is already in progress.", "warning");
+            ctx.ui.notify("A GitHub review submission is already in progress.", "warning");
             return;
           }
           if (!dataset.source.github) {
-            ctx.ui.notify("This review source cannot publish GitHub reviews.", "error");
+            ctx.ui.notify("This review source cannot submit GitHub reviews.", "error");
             return;
           }
 
@@ -366,13 +371,13 @@ export default function (pi: ExtensionAPI) {
             const payload = buildGitHubReviewPayload(buildOptions);
 
             await publishGitHubReview(pi, dataset.workingRoot, dataset.source.github, payload);
-            ctx.ui.notify("Published GitHub review.", "info");
+            ctx.ui.notify("Submitted GitHub review.", "info");
             if (skippedCount > 0) {
               ctx.ui.notify(`Skipped ${skippedCount} unsupported manual comment(s) that are not GitHub PR diff coordinates.`, "warning");
             }
           } catch (error) {
             const messageText = error instanceof Error ? error.message : String(error);
-            ctx.ui.notify(`GitHub publish failed: ${messageText}`, "error");
+            ctx.ui.notify(`GitHub review submission failed: ${messageText}`, "error");
           } finally {
             publishInFlight = false;
           }
@@ -501,7 +506,7 @@ export default function (pi: ExtensionAPI) {
             void handleRequestFile(message);
             return;
           }
-          if (isSubmitPayload(message) || isCancelPayload(message)) {
+          if (isSubmitPayload(message) || isCancelPayload(message) || isSaveClosePayload(message)) {
             settle(message);
           }
         };
@@ -543,6 +548,11 @@ export default function (pi: ExtensionAPI) {
       }
       await flushSessionSave();
       closeActiveWindow();
+
+      if (message?.type === "save-close") {
+        ctx.ui.notify("Review saved.", "info");
+        return;
+      }
 
       if (message == null || message.type === "cancel") {
         ctx.ui.notify("Review cancelled.", "info");

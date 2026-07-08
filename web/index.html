@@ -9,7 +9,7 @@
   @theme {
     --color-review-bg: #0d1117;
     --color-review-panel: #161b22;
-    --color-review-border: #30363d;
+    --color-review-border: #27313c;
     --color-review-text: #c9d1d9;
     --color-review-muted: #8b949e;
     --color-review-accent: #58a6ff;
@@ -258,9 +258,9 @@
 </head>
 <body class="h-full overflow-hidden bg-review-bg text-review-text antialiased">
 <div id="root-layout" class="flex h-full w-full flex-col">
-  <div class="flex min-h-12 items-center justify-between gap-3 border-b border-review-border bg-[#010409] px-3 py-2">
+  <div class="flex min-h-12 items-center justify-between gap-3 border-b border-review-border bg-[#010409] px-4 py-2">
     <div class="min-w-0 flex items-center gap-3">
-      <button id="toggle-sidebar-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Sidebar</button>
+      <button id="toggle-sidebar-button" class="cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium text-review-muted hover:bg-[#161b22] hover:text-review-text">Review plan</button>
       <div class="min-w-0">
         <div id="window-title" class="truncate text-sm font-semibold text-white">Diff review</div>
         <div id="repo-root" class="truncate text-[11px] text-review-muted"></div>
@@ -268,12 +268,8 @@
     </div>
     <div class="flex min-w-0 items-center gap-2">
       <div id="summary" class="hidden max-w-[26rem] truncate text-[11px] text-review-muted xl:block"></div>
-      <button id="run-ai-review-button" class="cursor-pointer rounded-md border border-[#8957e5]/40 bg-[#8957e5]/15 px-2.5 py-1 text-[11px] font-medium text-[#d2a8ff] hover:bg-[#8957e5]/25">Run PI review</button>
-      <button id="overall-comment-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Note</button>
-      <button id="approval-packet-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Packet</button>
-      <button id="cancel-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-red-500/10 hover:text-red-400 hover:border-red-500/30">Cancel</button>
-      <button id="publish-github-button" class="hidden cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[#388bfd]">Publish</button>
-      <button id="submit-button" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#238636] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[#2ea043] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-[#238636]">Finish</button>
+      <button id="save-close-button" class="cursor-pointer rounded-md px-3 py-1.5 text-xs font-medium text-review-text hover:bg-[#161b22] disabled:cursor-default disabled:opacity-50">Save & close</button>
+      <button id="submit-button" class="cursor-pointer rounded-md border border-[#1f6feb]/40 bg-[#1f6feb] px-4 py-1.5 text-xs font-semibold text-white shadow-[0_0_0_1px_rgba(255,255,255,0.04)] hover:bg-[#388bfd] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-[#1f6feb]">Submit review</button>
     </div>
   </div>
 
@@ -281,15 +277,15 @@
     <aside id="sidebar" tabindex="-1" class="flex min-h-0 shrink-0 flex-col border-r border-review-border bg-[#0d1117]" style="width: 280px; min-width: 280px; flex-basis: 280px; overflow: hidden;">
     <div class="border-b border-review-border px-4 py-3">
       <div class="mb-2 flex items-center justify-between gap-2">
-        <div id="sidebar-title" class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Files</div>
-        <div class="text-[10px] text-review-muted">Filter</div>
+        <div id="sidebar-title" class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review plan</div>
+        <div class="text-[10px] text-review-muted">Fuzzy filter</div>
       </div>
       <div class="mb-3 grid grid-cols-3 gap-1 rounded-md border border-review-border bg-[#010409] p-1">
         <button id="tab-review-map-button" class="rounded px-2 py-1 text-[11px] font-medium text-review-text">Map</button>
         <button id="tab-files-button" class="rounded px-2 py-1 text-[11px] font-medium text-review-muted">Files</button>
         <button id="tab-findings-button" class="rounded px-2 py-1 text-[11px] font-medium text-review-muted">Findings</button>
       </div>
-      <div class="mb-3 flex flex-wrap items-center gap-2">
+      <div id="scope-controls" class="mb-3 hidden flex-wrap items-center gap-2">
         <button id="scope-diff-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Git diff</button>
         <button id="scope-last-commit-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Last commit</button>
         <button id="scope-commit-button" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-2.5 py-1 text-[11px] font-medium text-review-text hover:bg-[#21262d]">Commits</button>
@@ -319,7 +315,7 @@
     </main>
     <aside id="insight-panel" tabindex="-1" class="flex min-h-0 w-[340px] shrink-0 flex-col border-l border-review-border bg-[#0d1117]">
       <div class="border-b border-review-border px-4 py-3">
-        <div id="insight-panel-title" class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review assistant</div>
+        <div id="insight-panel-title" class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review summary</div>
         <div id="source-label" class="mt-1 truncate text-sm font-medium text-white"></div>
         <div id="analysis-status" class="mt-1 text-[11px] text-review-muted"></div>
       </div>

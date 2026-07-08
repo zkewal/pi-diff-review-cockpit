@@ -27,7 +27,7 @@ const CHAPTER_REVIEW_SYSTEM_PROMPT = `You are a PI review subagent reviewing one
 Return strict JSON only. Do not wrap the response in Markdown. The JSON object must contain exactly these top-level keys:
 - "chapters": an array with exactly one chapter object
 - "findings": an array of findings
-- "approvalPacket": an approval packet object
+- "approvalPacket": a review summary object
 
 Only create findings for concrete, actionable concerns supported by the provided diff patches. Prefer no finding over a speculative finding. Do not invent files, file ids, paths, or line numbers.
 
@@ -46,7 +46,7 @@ Each finding must have:
 - locations: array of locations using only input file ids and paths, side one of "original", "modified", "file", and a changed line number or null when unsure
 - status: "new"
 
-The approvalPacket must summarize this chapter only. If there are no concrete findings, return an empty findings array.`;
+The approvalPacket object must summarize this chapter only. If there are no concrete findings, return an empty findings array.`;
 
 const VALIDATION_SYSTEM_PROMPT = `You are the validation critic for a PI diff review cycle.
 
@@ -71,7 +71,7 @@ Return strict JSON only:
   "summary": "one sentence",
   "suggestedVerdict": "approve" | "comment" | "request-changes",
   "acceptedRisks": ["..."],
-  "body": "markdown review packet"
+  "body": "markdown review summary"
 }
 
 The body should be concise, human-reviewer friendly, and grounded in the validated findings. Do not invent issues or claim tests ran unless the input says so.`;
@@ -179,7 +179,7 @@ export function normalizeChapterReviewJson(text: string, chapter: ReviewChapter,
       acceptedRisks: [],
       unresolvedFindings: findingIds,
       suggestedVerdict: "comment",
-      body: `PI subagent reviewed ${chapter.title}.`,
+      body: `AI review checked ${chapter.title}.`,
     },
   });
 }
@@ -397,7 +397,7 @@ export function normalizeValidationDecisionsJson(text: string, findingIds: Set<s
     normalized.push({
       id,
       action,
-      reason: typeof decision.reason === "string" && decision.reason.trim().length > 0 ? decision.reason.trim() : "Validated by PI critic.",
+      reason: typeof decision.reason === "string" && decision.reason.trim().length > 0 ? decision.reason.trim() : "Validated by AI review.",
       ...(isSeverity(decision.severity) ? { severity: decision.severity } : {}),
       ...(isSeverity(decision.confidence) ? { confidence: decision.confidence } : {}),
       ...(typeof decision.title === "string" && decision.title.trim().length > 0 ? { title: decision.title.trim() } : {}),
@@ -625,7 +625,7 @@ function mergeChapterResults(baseAnalysis: ReviewAnalysis, dataset: ReviewDatase
   return {
     ...baseAnalysis,
     status: "ready",
-    message: message ?? `AI review complete: ${findings.length} finding(s) from ${results.length} PI subagent(s).`,
+    message: message ?? `AI review complete: ${findings.length} finding(s) across ${results.length} review area(s).`,
     chapters,
     findings,
     approvalPacket: {
@@ -650,7 +650,7 @@ export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewD
     ...emptyProgress(analysis, options.config),
     status: "running" as const,
     phase: "scout" as const,
-    message: "Scout is planning the AI review.",
+    message: "Preparing AI review.",
   };
   options.onProgress(progress);
 
@@ -658,7 +658,7 @@ export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewD
   progress = {
     ...progress,
     phase: "chapter-review",
-    message: `PI subagents are reviewing changed hunks in parallel (${options.config.depth} depth).`,
+    message: "AI review is checking changed hunks.",
     scoutSummary,
   };
   options.onProgress(progress);
@@ -673,7 +673,7 @@ export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewD
 
       progress = updateChapterProgress(progress, chapter.id, {
         status: "running",
-        message: "PI subagent reviewing changed hunks.",
+        message: "Reviewing changed hunks.",
       });
       options.onProgress(progress);
 
@@ -692,7 +692,7 @@ export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewD
           dataset,
           results,
           scoutSummary,
-          `AI review running: ${findingCount} candidate finding(s) from ${results.length}/${analysis.chapters.length} PI subagent(s). Validation will refine them.`,
+          `AI review running: ${findingCount} candidate finding(s) from ${results.length}/${analysis.chapters.length} review area(s). Validation will refine them.`,
         );
         options.onPartialResult?.({ chapterId: chapter.id, analysis: partialAnalysis, progress });
       } catch (error) {
@@ -711,7 +711,7 @@ export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewD
 
   const failedChapterCount = progress.chapters.filter((chapter) => chapter.status === "failed").length;
   if (analysis.chapters.length > 0 && failedChapterCount === analysis.chapters.length) {
-    const message = "AI review failed for every chapter.";
+    const message = "AI review failed for every review area.";
     return {
       analysis: {
         ...analysis,
@@ -743,7 +743,7 @@ export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewD
     finalNotes.push(`Validation critic failed: ${message}`);
     progress = {
       ...progress,
-      message: "Validation critic failed; using structurally valid chapter findings.",
+      message: "Validation failed; using structurally valid findings.",
     };
     options.onProgress(progress);
   }
@@ -751,7 +751,7 @@ export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewD
   progress = {
     ...progress,
     phase: "synthesis",
-    message: "Synthesis pass is preparing the approval packet.",
+    message: "Preparing review summary.",
   };
   options.onProgress(progress);
 
@@ -762,12 +762,12 @@ export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewD
     finalNotes.push(`Synthesis failed: ${message}`);
   }
 
-  nextAnalysis.message = `AI review complete: ${nextAnalysis.findings.length} validated finding(s) from ${results.length} PI subagent(s).`;
+  nextAnalysis.message = `AI review complete: ${nextAnalysis.findings.length} validated finding(s) across ${results.length} review area(s).`;
   if (finalNotes.length > 0) {
     nextAnalysis.message = `${nextAnalysis.message} ${finalNotes.join(" ")}`;
   }
   if (failedChapterCount > 0) {
-    nextAnalysis.message = `${nextAnalysis.message} ${failedChapterCount} chapter agent(s) failed.`;
+    nextAnalysis.message = `${nextAnalysis.message} ${failedChapterCount} review area(s) failed.`;
   }
   progress = refreshProgressFindingCounts(progress, nextAnalysis);
   progress = completeProgress(progress, "done", nextAnalysis.message);

@@ -20,7 +20,7 @@ const ANALYSIS_SYSTEM_PROMPT = `You are a senior code reviewer preparing a revie
 Return strict JSON only. Do not wrap the response in Markdown. The JSON object must contain exactly these top-level keys:
 - "chapters": an array of review chapters
 - "findings": an array of findings
-- "approvalPacket": an approval packet object
+- "approvalPacket": a review summary object
 
 Group files into chapters in the order a reviewer should read them. Prefer domain-oriented chapters such as schema and migrations, API surface, service behavior, data models, tests, and miscellaneous changes. Each chapter must have:
 - id: stable kebab-case string
@@ -43,7 +43,7 @@ Separate high-confidence bugs from informational explanations. Only create findi
 - locations: array of locations using only input file ids and paths, side one of "original", "modified", "file", and line number or null
 - status: "new"
 
-The approvalPacket must have:
+The approvalPacket review summary object must have:
 - summary: concise summary of the review scope
 - reviewedChapters: array of chapter ids that should be reviewed
 - acceptedRisks: array of risks that can be explicitly accepted if no findings remain
@@ -51,7 +51,7 @@ The approvalPacket must have:
 - suggestedVerdict: one of "comment", "request-changes", "approve"
 - body: final review text suitable for the reviewer to edit before submitting
 
-If the input does not contain enough information to identify a concrete bug, keep findings empty and make the approval packet summarize the review areas.`;
+If the input does not contain enough information to identify a concrete bug, keep findings empty and make the review summary summarize the review areas.`;
 
 function chapterIdFromTitle(title: string): string {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "changes";
