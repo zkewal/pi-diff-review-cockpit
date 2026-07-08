@@ -280,12 +280,14 @@ export default function (pi: ExtensionAPI) {
         snapshot: sessionSnapshot,
       },
     });
+    const title = reviewWindowTitle(dataset);
     const window = open(html, {
       width: 1680,
       height: 1020,
-      title: reviewWindowTitle(dataset),
+      title,
     });
     activeWindow = window;
+    window.show({ title });
 
     const waitingUI = showWaitingUI(ctx);
     const fileMap = new Map(files.map((file) => [file.id, file]));
