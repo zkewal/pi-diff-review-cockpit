@@ -1,8 +1,5 @@
-import { mkdir, rm, stat } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { getReviewWindowData, getRepoRoot } from "../git.js";
+import { getRepoRoot, getRevisionDiffReviewData } from "../git.js";
 import type { DiffSourceAdapter, GitHubPullRequestMetadata, ReviewDataset } from "./types.js";
 
 const COMMAND_TIMEOUT_MS = 120_000;
@@ -86,16 +83,6 @@ function safeSegment(value: string): string {
   return sanitized;
 }
 
-export function buildPrWorktreePath(ref: GitHubPrRef): string {
-  return join(
-    homedir(),
-    ".cache",
-    "pi-diff-review-cockpit",
-    "github",
-    `${safeSegment(ref.owner)}--${safeSegment(ref.repo)}--pr-${ref.number}`,
-  );
-}
-
 export function buildPrPrivateRefs(ref: GitHubPrRef): GitHubPrPrivateRefs {
   const namespace = `refs/pi-diff-review-cockpit/github/${safeSegment(ref.owner)}/${safeSegment(ref.repo)}/pr/${ref.number}`;
   return {
@@ -114,11 +101,6 @@ async function run(pi: ExtensionAPI, cwd: string, command: string, args: string[
     const output = result.stderr.trim() || result.stdout.trim() || `exit code ${result.code}`;
     throw new Error(`Failed to run ${formatCommand(command, args)} in ${cwd}: ${output}`);
   }
-  return result.stdout;
-}
-
-async function runAllowFailure(pi: ExtensionAPI, cwd: string, command: string, args: string[]): Promise<string> {
-  const result = await pi.exec(command, args, { cwd, timeout: COMMAND_TIMEOUT_MS });
   return result.stdout;
 }
 
@@ -211,36 +193,13 @@ async function readPrMetadata(pi: ExtensionAPI, cwd: string, ref: GitHubPrRef): 
   };
 }
 
-async function isNonEmptyFile(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).size > 0;
-  } catch {
-    return false;
-  }
-}
-
-async function preparePrWorktree(pi: ExtensionAPI, repoRoot: string, ref: GitHubPrRef, metadata: GitHubPullRequestMetadata): Promise<string> {
-  const worktreePath = buildPrWorktreePath(ref);
-  const cacheDir = dirname(worktreePath);
-  const patchPath = join(cacheDir, `${safeSegment(ref.owner)}--${safeSegment(ref.repo)}--pr-${ref.number}.patch`);
+async function preparePrRefs(pi: ExtensionAPI, repoRoot: string, ref: GitHubPrRef, metadata: GitHubPullRequestMetadata): Promise<GitHubPrPrivateRefs> {
   const privateRefs = buildPrPrivateRefs(ref);
-
-  await mkdir(cacheDir, { recursive: true });
-  await runAllowFailure(pi, repoRoot, "git", ["worktree", "prune"]);
-  await runAllowFailure(pi, repoRoot, "git", ["worktree", "remove", "--force", worktreePath]);
-  await rm(worktreePath, { recursive: true, force: true });
-  await runAllowFailure(pi, repoRoot, "git", ["worktree", "prune"]);
 
   await run(pi, repoRoot, "git", ["fetch", "origin", `+refs/heads/${metadata.baseRefName}:${privateRefs.baseRef}`]);
   await run(pi, repoRoot, "git", ["fetch", "origin", `+pull/${ref.number}/head:${privateRefs.headRef}`]);
-  await run(pi, repoRoot, "git", ["worktree", "add", "--detach", worktreePath, privateRefs.baseRef]);
-  await run(pi, repoRoot, "git", ["diff", "--binary", `${privateRefs.baseRef}...${privateRefs.headRef}`, `--output=${patchPath}`]);
 
-  if (await isNonEmptyFile(patchPath)) {
-    await run(pi, worktreePath, "git", ["apply", "--3way", patchPath]);
-  }
-
-  return worktreePath;
+  return privateRefs;
 }
 
 export async function buildGitHubPrReviewDataset(pi: ExtensionAPI, ctx: ExtensionCommandContext, url: string): Promise<ReviewDataset> {
@@ -248,13 +207,12 @@ export async function buildGitHubPrReviewDataset(pi: ExtensionAPI, ctx: Extensio
   const repoRoot = await getRepoRoot(pi, ctx.cwd);
   await verifyOriginMatchesPr(pi, repoRoot, ref);
   const metadata = await readPrMetadata(pi, repoRoot, ref);
-  const worktreePath = await preparePrWorktree(pi, repoRoot, ref, metadata);
-  const data = await getReviewWindowData(pi, worktreePath, { gitDiffMode: "index" });
-  const privateRefs = buildPrPrivateRefs(ref);
+  const privateRefs = await preparePrRefs(pi, repoRoot, ref, metadata);
+  const data = await getRevisionDiffReviewData(pi, repoRoot, privateRefs.baseRef, privateRefs.headRef);
 
   return {
     repoRoot,
-    workingRoot: worktreePath,
+    workingRoot: repoRoot,
     files: data.files,
     analysisFileIds: data.files.filter((file) => file.inGitDiff).map((file) => file.id),
     commits: data.commits,
@@ -262,7 +220,7 @@ export async function buildGitHubPrReviewDataset(pi: ExtensionAPI, ctx: Extensio
       kind: "github-pr",
       label: `PR #${metadata.number}: ${metadata.title}`,
       repoRoot,
-      workingRoot: worktreePath,
+      workingRoot: repoRoot,
       baseRevision: privateRefs.baseRef,
       headRevision: privateRefs.headRef,
       github: metadata,

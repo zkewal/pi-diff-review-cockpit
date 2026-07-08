@@ -29,6 +29,10 @@ export type ReviewGitDiffMode = "working-tree" | "index";
 
 export interface ReviewWindowDataOptions {
   gitDiffMode?: ReviewGitDiffMode;
+  revisionDiff?: {
+    baseRevision: string;
+    headRevision: string;
+  };
 }
 
 async function runGit(pi: ExtensionAPI, repoRoot: string, args: string[]): Promise<string> {
@@ -483,12 +487,113 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string, options
   return { repoRoot, files, commits };
 }
 
+export async function getRevisionDiffReviewData(
+  pi: ExtensionAPI,
+  repoRoot: string,
+  baseRevision: string,
+  headRevision: string,
+): Promise<{ repoRoot: string; files: ReviewFile[]; commits: { sha: string; shortSha: string; subject: string }[] }> {
+  const diffRange = `${baseRevision}...${headRevision}`;
+  const trackedDiffOutput = await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--name-status", diffRange, "--"]);
+  const commentableDiffOutput = await runGitAllowFailure(pi, repoRoot, ["diff", "--find-renames", "-M", "--unified=0", "--no-color", diffRange, "--"]);
+  const trackedFilesOutput = await runGitAllowFailure(pi, repoRoot, ["ls-tree", "-r", "--name-only", headRevision]);
+  const lastCommitOutput = await runGitAllowFailure(pi, repoRoot, ["diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", headRevision]);
+  const commits = parseCommitLog(await runGitAllowFailure(pi, repoRoot, ["log", "--max-count=50", "--format=%H%x09%h%x09%s", `${baseRevision}..${headRevision}`]));
+  const commitChanges = new Map<string, ChangedPath[]>();
+  for (const commit of commits) {
+    const output = await runGitAllowFailure(pi, repoRoot, ["diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", commit.sha]);
+    commitChanges.set(commit.sha, parseNameStatus(output).filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? "")));
+  }
+
+  const diffChanges = parseNameStatus(trackedDiffOutput)
+    .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? ""));
+  const commentableLinesByPath = parseCommentableLineRanges(commentableDiffOutput);
+  const currentPaths = parseTrackedPaths(trackedFilesOutput).filter(isReviewableFilePath);
+  const lastCommitChanges = parseNameStatus(lastCommitOutput)
+    .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? ""));
+
+  const seeds = new Map<string, ReviewFileSeed>();
+
+  for (const path of currentPaths) {
+    seeds.set(path, {
+      path,
+      worktreeStatus: null,
+      hasWorkingTreeFile: true,
+      inGitDiff: false,
+      inLastCommit: false,
+      gitDiff: null,
+      lastCommit: null,
+      commitComparisons: {},
+    });
+  }
+
+  for (const change of diffChanges) {
+    const key = change.newPath ?? change.oldPath ?? toDisplayPath(change);
+    const seed = upsertSeed(seeds, key, () => ({
+      path: key,
+      worktreeStatus: null,
+      hasWorkingTreeFile: change.newPath != null,
+      inGitDiff: false,
+      inLastCommit: false,
+      gitDiff: null,
+      lastCommit: null,
+      commitComparisons: {},
+    }));
+    seed.worktreeStatus = change.status;
+    seed.hasWorkingTreeFile = change.newPath != null;
+    seed.inGitDiff = true;
+    seed.gitDiff = toComparison(change, commentableLinesByPath.get(change.newPath ?? change.oldPath ?? ""));
+  }
+
+  for (const change of lastCommitChanges) {
+    const key = change.newPath ?? change.oldPath ?? toDisplayPath(change);
+    const seed = upsertSeed(seeds, key, () => ({
+      path: key,
+      worktreeStatus: null,
+      hasWorkingTreeFile: change.newPath != null && currentPaths.includes(change.newPath),
+      inGitDiff: false,
+      inLastCommit: false,
+      gitDiff: null,
+      lastCommit: null,
+      commitComparisons: {},
+    }));
+    seed.inLastCommit = true;
+    seed.lastCommit = toComparison(change);
+  }
+
+  for (const [commitSha, changes] of commitChanges) {
+    for (const change of changes) {
+      const key = change.newPath ?? change.oldPath ?? toDisplayPath(change);
+      const seed = upsertSeed(seeds, key, () => ({
+        path: key,
+        worktreeStatus: null,
+        hasWorkingTreeFile: change.newPath != null && currentPaths.includes(change.newPath),
+        inGitDiff: false,
+        inLastCommit: false,
+        gitDiff: null,
+        lastCommit: null,
+        commitComparisons: {},
+      }));
+      seed.commitComparisons[commitSha] = toComparison(change);
+    }
+  }
+
+  const files = [...seeds.values()]
+    .map(createReviewFile)
+    .sort(compareReviewFiles);
+
+  return { repoRoot, files, commits };
+}
+
 export async function loadReviewFileContents(pi: ExtensionAPI, repoRoot: string, file: ReviewFile, scope: ReviewScope, commitSha?: string, options: ReviewWindowDataOptions = {}): Promise<ReviewFileContents> {
   const gitDiffMode = options.gitDiffMode ?? "working-tree";
+  const revisionDiff = options.revisionDiff;
 
   if (scope === "all-files") {
     const content = file.hasWorkingTreeFile
-      ? gitDiffMode === "index"
+      ? revisionDiff != null
+        ? await getRevisionContent(pi, repoRoot, revisionDiff.headRevision, file.path)
+        : gitDiffMode === "index"
         ? await getIndexContent(pi, repoRoot, file.path)
         : await getWorkingTreeContent(repoRoot, file.path)
       : "";
@@ -506,15 +611,25 @@ export async function loadReviewFileContents(pi: ExtensionAPI, repoRoot: string,
     };
   }
 
-  const originalRevision = scope === "git-diff" ? "HEAD" : scope === "commit" && commitSha ? `${commitSha}^` : "HEAD^";
-  const modifiedRevision = scope === "git-diff" ? null : scope === "commit" && commitSha ? commitSha : "HEAD";
+  const originalRevision = scope === "git-diff"
+    ? revisionDiff?.baseRevision ?? "HEAD"
+    : scope === "commit" && commitSha
+      ? `${commitSha}^`
+      : revisionDiff != null
+        ? `${revisionDiff.headRevision}^`
+        : "HEAD^";
+  const modifiedRevision = scope === "git-diff"
+    ? revisionDiff?.headRevision ?? null
+    : scope === "commit" && commitSha
+      ? commitSha
+      : revisionDiff?.headRevision ?? "HEAD";
 
   const originalContent = comparison.oldPath == null ? "" : await getRevisionContent(pi, repoRoot, originalRevision, comparison.oldPath);
   const modifiedContent = comparison.newPath == null
     ? ""
-    : scope === "git-diff" && gitDiffMode === "index"
+    : scope === "git-diff" && revisionDiff == null && gitDiffMode === "index"
       ? await getIndexContent(pi, repoRoot, comparison.newPath)
-      : modifiedRevision == null
+    : modifiedRevision == null
       ? await getWorkingTreeContent(repoRoot, comparison.newPath)
       : await getRevisionContent(pi, repoRoot, modifiedRevision, comparison.newPath);
 

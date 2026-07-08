@@ -171,7 +171,9 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const useIndexGitDiff = dataset.source.kind === "github-pr";
+    const revisionDiff = dataset.source.kind === "github-pr" && dataset.source.baseRevision != null && dataset.source.headRevision != null
+      ? { baseRevision: dataset.source.baseRevision, headRevision: dataset.source.headRevision }
+      : undefined;
 
     const loadFilePatch = async (file: ReviewFile): Promise<string> => {
       const comparison = file.gitDiff ?? file.lastCommit ?? Object.values(file.commitComparisons)[0] ?? null;
@@ -183,13 +185,17 @@ export default function (pi: ExtensionAPI) {
       ].filter((path): path is string => path != null && path.length > 0))];
       if (paths.length === 0) return "";
 
-      const args = file.gitDiff != null
-        ? ["diff", ...(useIndexGitDiff ? ["--cached"] : []), "--no-color", "--unified=80", "HEAD", "--", ...paths]
+      const args = file.gitDiff != null && revisionDiff != null
+        ? ["diff", "--no-color", "--unified=80", `${revisionDiff.baseRevision}...${revisionDiff.headRevision}`, "--", ...paths]
+        : file.gitDiff != null
+        ? ["diff", "--no-color", "--unified=80", "HEAD", "--", ...paths]
+        : file.lastCommit != null && revisionDiff != null
+          ? ["diff", "--no-color", "--unified=80", `${revisionDiff.headRevision}^`, revisionDiff.headRevision, "--", ...paths]
         : file.lastCommit != null
           ? ["diff", "--no-color", "--unified=80", "HEAD^", "HEAD", "--", ...paths]
           : ["diff", "--no-color", "--unified=80", "HEAD", "--", ...paths];
       const result = await pi.exec("git", args, {
-        cwd: workingRoot,
+        cwd: revisionDiff != null ? dataset.repoRoot : workingRoot,
         timeout: PATCH_COMMAND_TIMEOUT_MS,
       });
       if (result.code === 0 && result.stdout.length > 0) {
@@ -197,6 +203,13 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (comparison.status === "added" && comparison.oldPath == null && comparison.newPath != null) {
+        if (revisionDiff != null) {
+          const showResult = await pi.exec("git", ["show", `${revisionDiff.headRevision}:${comparison.newPath}`], {
+            cwd: dataset.repoRoot,
+            timeout: PATCH_COMMAND_TIMEOUT_MS,
+          });
+          return showResult.code === 0 ? showResult.stdout : "";
+        }
         try {
           return await readFile(join(workingRoot, comparison.newPath), "utf8");
         } catch {
@@ -331,7 +344,10 @@ export default function (pi: ExtensionAPI) {
       const cached = contentCache.get(cacheKey);
       if (cached != null) return cached;
 
-      const pending = loadReviewFileContents(pi, workingRoot, file, scope, commitSha, { gitDiffMode: useIndexGitDiff ? "index" : "working-tree" });
+      const pending = loadReviewFileContents(pi, workingRoot, file, scope, commitSha, {
+        gitDiffMode: "working-tree",
+        revisionDiff,
+      });
       contentCache.set(cacheKey, pending);
       return pending;
     };

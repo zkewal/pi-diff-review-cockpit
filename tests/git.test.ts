@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { getReviewWindowData } from "../src/git.js";
+import { getReviewWindowData, getRevisionDiffReviewData, loadReviewFileContents } from "../src/git.js";
 
 interface FakeExecResult {
   code: number;
@@ -121,4 +121,87 @@ test("index git-diff mode ignores unrelated unstaged worktree changes", async ()
   assert.deepEqual(diffFiles.map((file) => file.path), ["pr-file.ts"]);
   assert.deepEqual(diffFiles[0]?.gitDiff?.commentableModifiedLines, [{ start: 10, end: 11 }]);
   assert.deepEqual(diffFiles[0]?.gitDiff?.commentableOriginalLines, [{ start: 10, end: 10 }]);
+});
+
+test("revision diff review data does not require a checkout worktree", async () => {
+  const outputs = new Map<string, Partial<FakeExecResult>>([
+    [["diff", "--find-renames", "-M", "--name-status", "refs/review/base...refs/review/head", "--"].join("\0"), {
+      stdout: [
+        "M\tmodified.ts",
+        "A\tadded.ts",
+        "D\tdeleted.ts",
+      ].join("\n"),
+    }],
+    [["diff", "--find-renames", "-M", "--unified=0", "--no-color", "refs/review/base...refs/review/head", "--"].join("\0"), {
+      stdout: [
+        "diff --git a/modified.ts b/modified.ts",
+        "--- a/modified.ts",
+        "+++ b/modified.ts",
+        "@@ -8 +8,2 @@",
+        "-old",
+        "+new",
+        "+newer",
+        "diff --git a/added.ts b/added.ts",
+        "new file mode 100644",
+        "--- /dev/null",
+        "+++ b/added.ts",
+        "@@ -0,0 +1,2 @@",
+        "+one",
+        "+two",
+        "diff --git a/deleted.ts b/deleted.ts",
+        "deleted file mode 100644",
+        "--- a/deleted.ts",
+        "+++ /dev/null",
+        "@@ -4,2 +0,0 @@",
+        "-one",
+        "-two",
+      ].join("\n"),
+    }],
+    [["ls-tree", "-r", "--name-only", "refs/review/head"].join("\0"), {
+      stdout: "modified.ts\nadded.ts\nunchanged.ts\n",
+    }],
+    [["diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", "refs/review/head"].join("\0"), {
+      stdout: "M\tmodified.ts\n",
+    }],
+    [["log", "--max-count=50", "--format=%H%x09%h%x09%s", "refs/review/base..refs/review/head"].join("\0"), {
+      stdout: "abc123\tabc123\tUpdate PR files\n",
+    }],
+    [["diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", "abc123"].join("\0"), {
+      stdout: "M\tmodified.ts\n",
+    }],
+    [["show", "refs/review/base:modified.ts"].join("\0"), { stdout: "old\n" }],
+    [["show", "refs/review/head:modified.ts"].join("\0"), { stdout: "new\nnewer\n" }],
+    [["show", "refs/review/head:unchanged.ts"].join("\0"), { stdout: "same\n" }],
+  ]);
+
+  const pi = fakePi(outputs);
+  const { files, commits } = await getRevisionDiffReviewData(pi, "/repo", "refs/review/base", "refs/review/head");
+  const byPath = new Map(files.map((file) => [file.path, file]));
+
+  assert.deepEqual(commits.map((commit) => commit.sha), ["abc123"]);
+  assert.deepEqual(files.filter((file) => file.inGitDiff).map((file) => file.path), ["added.ts", "deleted.ts", "modified.ts"]);
+  assert.equal(byPath.get("unchanged.ts")?.inGitDiff, false);
+  assert.equal(byPath.get("deleted.ts")?.hasWorkingTreeFile, false);
+  assert.deepEqual(byPath.get("modified.ts")?.gitDiff?.commentableOriginalLines, [{ start: 8, end: 8 }]);
+  assert.deepEqual(byPath.get("modified.ts")?.gitDiff?.commentableModifiedLines, [{ start: 8, end: 9 }]);
+
+  const modified = byPath.get("modified.ts");
+  assert.ok(modified);
+  const contents = await loadReviewFileContents(pi, "/repo", modified, "git-diff", undefined, {
+    revisionDiff: { baseRevision: "refs/review/base", headRevision: "refs/review/head" },
+  });
+  assert.deepEqual(contents, {
+    originalContent: "old\n",
+    modifiedContent: "new\nnewer\n",
+  });
+
+  const unchanged = byPath.get("unchanged.ts");
+  assert.ok(unchanged);
+  const allFileContents = await loadReviewFileContents(pi, "/repo", unchanged, "all-files", undefined, {
+    revisionDiff: { baseRevision: "refs/review/base", headRevision: "refs/review/head" },
+  });
+  assert.deepEqual(allFileContents, {
+    originalContent: "same\n",
+    modifiedContent: "same\n",
+  });
 });
