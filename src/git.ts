@@ -25,6 +25,12 @@ interface CommentableLineRanges {
   modified: ReviewLineRange[];
 }
 
+export type ReviewGitDiffMode = "working-tree" | "index";
+
+export interface ReviewWindowDataOptions {
+  gitDiffMode?: ReviewGitDiffMode;
+}
+
 async function runGit(pi: ExtensionAPI, repoRoot: string, args: string[]): Promise<string> {
   const result = await pi.exec("git", args, { cwd: repoRoot });
   if (result.code !== 0) {
@@ -290,6 +296,14 @@ async function getWorkingTreeContent(repoRoot: string, path: string): Promise<st
   }
 }
 
+async function getIndexContent(pi: ExtensionAPI, repoRoot: string, path: string): Promise<string> {
+  const result = await pi.exec("git", ["show", `:${path}`], { cwd: repoRoot });
+  if (result.code !== 0) {
+    return "";
+  }
+  return result.stdout;
+}
+
 function isReviewableFilePath(path: string): boolean {
   const lowerPath = path.toLowerCase();
   const fileName = lowerPath.split("/").pop() ?? lowerPath;
@@ -355,19 +369,25 @@ function upsertSeed(seeds: Map<string, ReviewFileSeed>, key: string, create: () 
   return seed;
 }
 
-export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promise<{ repoRoot: string; files: ReviewFile[]; commits: { sha: string; shortSha: string; subject: string }[] }> {
+export async function getReviewWindowData(pi: ExtensionAPI, cwd: string, options: ReviewWindowDataOptions = {}): Promise<{ repoRoot: string; files: ReviewFile[]; commits: { sha: string; shortSha: string; subject: string }[] }> {
   const repoRoot = await getRepoRoot(pi, cwd);
   const repositoryHasHead = await hasHead(pi, repoRoot);
+  const gitDiffMode = options.gitDiffMode ?? "working-tree";
+  const diffModeArgs = gitDiffMode === "index" ? ["--cached"] : [];
 
   const trackedDiffOutput = repositoryHasHead
-    ? await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--name-status", "HEAD", "--"])
+    ? await runGit(pi, repoRoot, ["diff", ...diffModeArgs, "--find-renames", "-M", "--name-status", "HEAD", "--"])
     : "";
   const commentableDiffOutput = repositoryHasHead
-    ? await runGitAllowFailure(pi, repoRoot, ["diff", "--find-renames", "-M", "--unified=0", "--no-color", "HEAD", "--"])
+    ? await runGitAllowFailure(pi, repoRoot, ["diff", ...diffModeArgs, "--find-renames", "-M", "--unified=0", "--no-color", "HEAD", "--"])
     : "";
-  const untrackedOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--others", "--exclude-standard"]);
+  const untrackedOutput = gitDiffMode === "working-tree"
+    ? await runGitAllowFailure(pi, repoRoot, ["ls-files", "--others", "--exclude-standard"])
+    : "";
   const trackedFilesOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--cached"]);
-  const deletedFilesOutput = await runGitAllowFailure(pi, repoRoot, ["ls-files", "--deleted"]);
+  const deletedFilesOutput = gitDiffMode === "working-tree"
+    ? await runGitAllowFailure(pi, repoRoot, ["ls-files", "--deleted"])
+    : "";
   const lastCommitOutput = repositoryHasHead
     ? await runGitAllowFailure(pi, repoRoot, ["diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", "HEAD"])
     : "";
@@ -463,9 +483,15 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string): Promis
   return { repoRoot, files, commits };
 }
 
-export async function loadReviewFileContents(pi: ExtensionAPI, repoRoot: string, file: ReviewFile, scope: ReviewScope, commitSha?: string): Promise<ReviewFileContents> {
+export async function loadReviewFileContents(pi: ExtensionAPI, repoRoot: string, file: ReviewFile, scope: ReviewScope, commitSha?: string, options: ReviewWindowDataOptions = {}): Promise<ReviewFileContents> {
+  const gitDiffMode = options.gitDiffMode ?? "working-tree";
+
   if (scope === "all-files") {
-    const content = file.hasWorkingTreeFile ? await getWorkingTreeContent(repoRoot, file.path) : "";
+    const content = file.hasWorkingTreeFile
+      ? gitDiffMode === "index"
+        ? await getIndexContent(pi, repoRoot, file.path)
+        : await getWorkingTreeContent(repoRoot, file.path)
+      : "";
     return {
       originalContent: content,
       modifiedContent: content,
@@ -486,7 +512,9 @@ export async function loadReviewFileContents(pi: ExtensionAPI, repoRoot: string,
   const originalContent = comparison.oldPath == null ? "" : await getRevisionContent(pi, repoRoot, originalRevision, comparison.oldPath);
   const modifiedContent = comparison.newPath == null
     ? ""
-    : modifiedRevision == null
+    : scope === "git-diff" && gitDiffMode === "index"
+      ? await getIndexContent(pi, repoRoot, comparison.newPath)
+      : modifiedRevision == null
       ? await getWorkingTreeContent(repoRoot, comparison.newPath)
       : await getRevisionContent(pi, repoRoot, modifiedRevision, comparison.newPath);
 

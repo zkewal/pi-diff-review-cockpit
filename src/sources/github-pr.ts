@@ -249,7 +249,7 @@ export async function buildGitHubPrReviewDataset(pi: ExtensionAPI, ctx: Extensio
   await verifyOriginMatchesPr(pi, repoRoot, ref);
   const metadata = await readPrMetadata(pi, repoRoot, ref);
   const worktreePath = await preparePrWorktree(pi, repoRoot, ref, metadata);
-  const data = await getReviewWindowData(pi, worktreePath);
+  const data = await getReviewWindowData(pi, worktreePath, { gitDiffMode: "index" });
   const privateRefs = buildPrPrivateRefs(ref);
 
   return {

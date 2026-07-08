@@ -171,6 +171,8 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
+    const useIndexGitDiff = dataset.source.kind === "github-pr";
+
     const loadFilePatch = async (file: ReviewFile): Promise<string> => {
       const comparison = file.gitDiff ?? file.lastCommit ?? Object.values(file.commitComparisons)[0] ?? null;
       if (comparison == null) return "";
@@ -182,7 +184,7 @@ export default function (pi: ExtensionAPI) {
       if (paths.length === 0) return "";
 
       const args = file.gitDiff != null
-        ? ["diff", "--no-color", "--unified=80", "HEAD", "--", ...paths]
+        ? ["diff", ...(useIndexGitDiff ? ["--cached"] : []), "--no-color", "--unified=80", "HEAD", "--", ...paths]
         : file.lastCommit != null
           ? ["diff", "--no-color", "--unified=80", "HEAD^", "HEAD", "--", ...paths]
           : ["diff", "--no-color", "--unified=80", "HEAD", "--", ...paths];
@@ -329,7 +331,7 @@ export default function (pi: ExtensionAPI) {
       const cached = contentCache.get(cacheKey);
       if (cached != null) return cached;
 
-      const pending = loadReviewFileContents(pi, workingRoot, file, scope, commitSha);
+      const pending = loadReviewFileContents(pi, workingRoot, file, scope, commitSha, { gitDiffMode: useIndexGitDiff ? "index" : "working-tree" });
       contentCache.set(cacheKey, pending);
       return pending;
     };

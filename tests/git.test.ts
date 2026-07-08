@@ -91,3 +91,34 @@ test("attaches commentable git-diff hunk ranges to worktree comparisons", async 
   assert.deepEqual(byPath.get("renamed.ts")?.gitDiff?.commentableOriginalLines, [{ start: 20, end: 20 }]);
   assert.deepEqual(byPath.get("renamed.ts")?.gitDiff?.commentableModifiedLines, [{ start: 21, end: 21 }]);
 });
+
+test("index git-diff mode ignores unrelated unstaged worktree changes", async () => {
+  const outputs = new Map<string, Partial<FakeExecResult>>([
+    [["rev-parse", "--show-toplevel"].join("\0"), { stdout: "/repo\n" }],
+    [["rev-parse", "--verify", "HEAD"].join("\0"), { stdout: "HEAD\n" }],
+    [["diff", "--cached", "--find-renames", "-M", "--name-status", "HEAD", "--"].join("\0"), {
+      stdout: "M\tpr-file.ts\n",
+    }],
+    [["diff", "--cached", "--find-renames", "-M", "--unified=0", "--no-color", "HEAD", "--"].join("\0"), {
+      stdout: [
+        "diff --git a/pr-file.ts b/pr-file.ts",
+        "--- a/pr-file.ts",
+        "+++ b/pr-file.ts",
+        "@@ -10 +10,2 @@",
+        "-old",
+        "+new",
+        "+newer",
+      ].join("\n"),
+    }],
+    [["ls-files", "--cached"].join("\0"), { stdout: "pr-file.ts\nlarge-dirty.csv\n" }],
+    [["diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", "HEAD"].join("\0"), { stdout: "" }],
+    [["log", "--max-count=50", "--format=%H%x09%h%x09%s"].join("\0"), { stdout: "" }],
+  ]);
+
+  const { files } = await getReviewWindowData(fakePi(outputs), "/repo", { gitDiffMode: "index" });
+  const diffFiles = files.filter((file) => file.inGitDiff);
+
+  assert.deepEqual(diffFiles.map((file) => file.path), ["pr-file.ts"]);
+  assert.deepEqual(diffFiles[0]?.gitDiff?.commentableModifiedLines, [{ start: 10, end: 11 }]);
+  assert.deepEqual(diffFiles[0]?.gitDiff?.commentableOriginalLines, [{ start: 10, end: 10 }]);
+});
