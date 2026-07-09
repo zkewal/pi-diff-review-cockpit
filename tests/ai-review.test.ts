@@ -177,7 +177,15 @@ test("validation decisions drop and adjust candidate findings", () => {
   const decisions = normalizeValidationDecisionsJson(JSON.stringify({
     decisions: [
       { id: "drop-me", action: "drop", reason: "Speculative." },
-      { id: "adjust-me", action: "adjust", reason: "Too severe.", severity: "medium", confidence: "high", title: "New title" },
+      {
+        id: "adjust-me",
+        action: "adjust",
+        reason: "Too severe.",
+        severity: "medium",
+        confidence: "high",
+        title: "New title",
+        locations: [{ fileId: "src/app/api/qa_api.py", path: "src/app/api/qa_api.py", side: "modified", line: 4 }],
+      },
       { id: "invented", action: "keep", reason: "Ignore." },
     ],
   }), new Set(analysis.findings.map((finding) => finding.id)));
@@ -188,6 +196,7 @@ test("validation decisions drop and adjust candidate findings", () => {
   assert.equal(validated.findings[0]?.severity, "medium");
   assert.equal(validated.findings[0]?.confidence, "high");
   assert.equal(validated.findings[0]?.title, "New title");
+  assert.deepEqual(validated.findings[0]?.locations, [{ fileId: "src/app/api/qa_api.py", path: "src/app/api/qa_api.py", side: "modified", line: 4 }]);
   assert.deepEqual(validated.chapters[0]?.findingIds, ["adjust-me"]);
   assert.deepEqual(validated.approvalPacket.unresolvedFindings, ["adjust-me"]);
   assert.equal(validated.approvalPacket.suggestedVerdict, "comment");

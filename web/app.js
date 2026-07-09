@@ -97,6 +97,7 @@ const state = {
   pendingRequestIds: {},
   activeDiffSide: "modified",
   activeDiffLine: null,
+  activeCanvas: "file",
   pendingHunkFocus: null,
   pendingFindingFocus: null,
   editingCommentIds: new Set(),
@@ -138,6 +139,7 @@ const currentFileLabelEl = document.getElementById("current-file-label");
 const modeHintEl = document.getElementById("mode-hint");
 const fileCommentsContainer = document.getElementById("file-comments-container");
 const editorContainerEl = document.getElementById("editor-container");
+const chapterBriefContainerEl = document.getElementById("chapter-brief-container");
 const insightPanelEl = document.getElementById("insight-panel");
 const insightPanelTitleEl = document.getElementById("insight-panel-title");
 const insightContentEl = document.getElementById("insight-content");
@@ -670,6 +672,22 @@ function chapterForFile(fileId) {
   return getReviewChapters().find((chapter) => getChapterDisplayFiles(chapter).some((file) => file.id === fileId)) || null;
 }
 
+function chapterDisplayTitle(chapter) {
+  const index = getReviewChapters().findIndex((item) => item.id === chapter?.id);
+  const prefix = index >= 0 ? `${index + 1}. ` : "";
+  return `${prefix}${chapter?.title || "Review area"}`;
+}
+
+function chapterFindings(chapter) {
+  const findingIds = new Set(chapter?.findingIds || []);
+  return getReviewFindings().filter((finding) => findingIds.has(finding.id));
+}
+
+function shouldRenderUnifiedForFile(file = activeFile()) {
+  const counts = fileDiffstatCounts(file, state.currentScope);
+  return activeFileShowsDiff() && (counts?.added || 0) > 0 && (counts?.deleted || 0) === 0;
+}
+
 function getOrderedReviewFiles() {
   const scopedFiles = getScopedFiles();
   const scopedFileIds = new Set(scopedFiles.map((file) => file.id));
@@ -734,6 +752,30 @@ function getVisibleFindingsForFile(fileId) {
     const status = state.findingStatuses[finding.id] || "new";
     return status === "new" || status === "accepted-comment";
   });
+}
+
+function getOpenInlineFindingEntriesForFile(file) {
+  if (!file || state.currentScope !== "git-diff") return [];
+  const comparison = getScopeComparison(file, state.currentScope);
+  if (!comparison) return [];
+  const entries = [];
+  const seen = new Set();
+
+  for (const finding of getReviewFindings()) {
+    const status = state.findingStatuses[finding.id] || "new";
+    if (status !== "new") continue;
+    for (const location of finding.locations || []) {
+      if (location.fileId !== file.id || location.line == null || location.side === "file") continue;
+      const ranges = rangesForSide(comparison, location.side);
+      if (!clampRangeToCommentable(location.line, location.line, ranges)) continue;
+      const key = `${finding.id}:${location.side}:${location.line}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      entries.push({ finding, location });
+    }
+  }
+
+  return entries;
 }
 
 function findingStatusCounts() {
@@ -974,6 +1016,8 @@ function updateKeyboardLineDecoration(side, startLine, endLine = startLine) {
     modifiedKeyboardDecorations = diffEditor.getModifiedEditor().deltaDecorations(modifiedKeyboardDecorations, [decoration]);
     originalKeyboardDecorations = diffEditor.getOriginalEditor().deltaDecorations(originalKeyboardDecorations, []);
   }
+
+  updateFocusedInlineFinding(side, startLine);
 }
 
 function focusDiffLine(side, line, endLine = line) {
@@ -1200,6 +1244,7 @@ function ensureFileLoaded(fileId, scope = state.currentScope) {
 }
 
 function openFile(fileId) {
+  state.activeCanvas = "file";
   if (state.activeFileId === fileId) {
     ensureFileLoaded(fileId, state.currentScope);
     requestAnimationFrame(applyPendingHunkFocus);
@@ -1211,6 +1256,17 @@ function openFile(fileId) {
   state.activeDiffSide = "modified";
   renderAll({ restoreFileScroll: true });
   ensureFileLoaded(fileId, state.currentScope);
+}
+
+function openChapterBrief(chapterId) {
+  const chapter = getReviewChapter(chapterId);
+  if (!chapter) return false;
+  state.activeCanvas = "chapter";
+  state.activeSidebarTab = "review-map";
+  state.activeInsight = { type: "chapter", id: chapter.id };
+  saveCurrentScrollPosition();
+  renderAll({ restoreFileScroll: false });
+  return true;
 }
 
 function openFileWithPendingHunk(fileId, direction = 1) {
@@ -1310,15 +1366,30 @@ function focusHunk(direction) {
   return moveToAdjacentReviewFile(direction);
 }
 
-function scrollDiffCanvas(direction) {
+function moveDiffFocus(direction) {
   if (!diffEditor) return false;
   const editor = diffEditor.getModifiedEditor().hasTextFocus()
     ? diffEditor.getModifiedEditor()
     : diffEditor.getOriginalEditor().hasTextFocus()
       ? diffEditor.getOriginalEditor()
       : diffEditor.getModifiedEditor();
-  editor.setScrollTop(editor.getScrollTop() + direction * 180);
+  const side = editor === diffEditor.getOriginalEditor() ? "original" : "modified";
+  const model = editor.getModel();
+  if (!model) return false;
+  const visibleRange = editor.getVisibleRanges?.()[0] || null;
+  const currentLine = editor.getPosition()?.lineNumber
+    || state.activeDiffLine
+    || visibleRange?.startLineNumber
+    || 1;
+  const targetLine = Math.max(1, Math.min(model.getLineCount(), currentLine + direction));
   editor.focus();
+  editor.setPosition({ lineNumber: targetLine, column: 1 });
+  if (typeof editor.revealLineInCenterIfOutsideViewport === "function") {
+    editor.revealLineInCenterIfOutsideViewport(targetLine);
+  } else {
+    editor.revealLineInCenter(targetLine);
+  }
+  updateKeyboardLineDecoration(side, targetLine);
   return true;
 }
 
@@ -1391,7 +1462,9 @@ function pulseInlineFinding(findingId, location) {
 }
 
 function isAiFindingExpanded(findingId) {
-  return getReviewFinding(findingId) != null && (state.findingStatuses[findingId] || "new") === "new";
+  return getReviewFinding(findingId) != null
+    && (state.findingStatuses[findingId] || "new") === "new"
+    && (state.expandedFindingIds.has(findingId) || isAiFindingActive(findingId));
 }
 
 function isAiFindingActive(findingId) {
@@ -1403,12 +1476,33 @@ function findInlineFindingAtLine(side, line) {
     .find((entry) => entry.location.side === side && Number(entry.location.line) === Number(line)) || null;
 }
 
+function updateFocusedInlineFinding(side, line) {
+  const activeFindingId = state.activeInsight.type === "finding" ? state.activeInsight.id : null;
+  const entry = findInlineFindingAtLine(side, line);
+  const nextFindingId = entry?.finding.id || null;
+  if (activeFindingId === nextFindingId) return;
+
+  if (nextFindingId) {
+    state.activeInsight = { type: "finding", id: nextFindingId };
+  } else if (activeFindingId) {
+    state.activeInsight = { type: "default", id: null };
+  } else {
+    return;
+  }
+
+  syncViewZones();
+  updateDecorations();
+  renderTree();
+  if (entry) requestAnimationFrame(() => pulseInlineFinding(entry.finding.id, entry.location));
+}
+
 function toggleInlineFindingAtLine(side, line) {
   const entry = findInlineFindingAtLine(side, line);
   if (!entry) return false;
 
   state.expandedFindingIds.add(entry.finding.id);
   state.activeInsight = { type: "finding", id: entry.finding.id };
+  syncViewZones();
   updateDecorations();
   renderTree();
   focusDiffLine(side, line, line);
@@ -1511,12 +1605,12 @@ function fileNavIconHtml(file, options = {}) {
 }
 
 function fileNavBadgesHtml(file) {
-  const findingCount = getVisibleFindingsForFile(file.id).length;
+  const findingCount = getOpenInlineFindingEntriesForFile(file).length;
   const commentCount = getDraftCommentsForFile(file.id).length;
   const stats = diffstatHtml(fileDiffstatCounts(file), { compact: true, blocks: 0 });
   return `
     ${stats}
-    ${findingCount > 0 ? `<button type="button" data-finding-file-id="${escapeHtml(file.id)}" class="shrink-0 rounded px-1 py-0.5 text-[10px] font-semibold text-[#d2a8ff] hover:bg-[#8957e5]/12 focus:outline-none focus:ring-1 focus:ring-[#8957e5]/50" title="Jump to first AI finding in this file">● ${findingCount}</button>` : ""}
+    ${findingCount > 0 ? `<button type="button" data-finding-file-id="${escapeHtml(file.id)}" class="shrink-0 rounded px-1 py-0.5 text-[10px] font-semibold text-[#d2a8ff] hover:bg-[#8957e5]/12 focus:outline-none focus:ring-1 focus:ring-[#8957e5]/50" title="Jump to first inline AI review item in this file">● ${findingCount}</button>` : ""}
     ${commentCount > 0 ? `<span class="shrink-0 rounded-full bg-[#238636]/14 px-1.5 py-0.5 text-[10px] font-semibold text-[#7ee787]" title="${commentCount} staged comment${commentCount === 1 ? "" : "s"}">✓ ${commentCount}</span>` : ""}
   `;
 }
@@ -1532,14 +1626,11 @@ function fileDisplayParts(file, label) {
   return { filename, directory };
 }
 
-function firstVisibleFindingForFile(fileId) {
-  return getVisibleFindingsForFile(fileId).find((finding) => firstExistingFindingLocation(finding)) || null;
-}
-
 function openFirstVisibleFindingForFile(fileId) {
-  const finding = firstVisibleFindingForFile(fileId);
-  if (!finding) return false;
-  openFirstFindingLocation(finding);
+  const file = reviewData.files.find((candidate) => candidate.id === fileId) || null;
+  const entry = getOpenInlineFindingEntriesForFile(file)[0];
+  if (!entry) return false;
+  openFindingLocation(entry.finding, entry.location);
   return true;
 }
 
@@ -1617,32 +1708,38 @@ function getReviewNavigationGroups(files) {
 function renderReviewGroup(group) {
   const progress = fileReviewProgress(group.files);
   const complete = progress.total > 0 && progress.reviewed >= progress.total;
-  const active = group.files.some((file) => file.id === state.activeFileId);
+  const activeFileInGroup = group.files.some((file) => file.id === state.activeFileId);
+  const active = (state.activeCanvas === "chapter" && state.activeInsight.type === "chapter" && state.activeInsight.id === group.chapter?.id) || activeFileInGroup;
   if (complete && state.collapsedDirs[group.id] == null && !active) {
     state.collapsedDirs[group.id] = true;
   }
   const collapsed = state.collapsedDirs[group.id] === true;
   const running = group.files.some((file) => aiReviewFileState(file.id) === "running");
-  const row = document.createElement("button");
-  row.type = "button";
+  const row = document.createElement("div");
   row.className = [
-    "group flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-[13px] hover:bg-[#21262d]",
+    "group flex w-full items-start gap-1.5 rounded px-2 py-1.5 text-left text-[13px] hover:bg-[#21262d]",
     active ? "bg-[#161b22] text-white" : complete ? "text-review-muted" : "text-[#c9d1d9]",
   ].join(" ");
   row.innerHTML = `
-    <svg class="h-4 w-4 shrink-0 text-[#8b949e] transition-transform ${collapsed ? "-rotate-90" : ""}" viewBox="0 0 16 16" fill="currentColor">
-      <path d="M12.78 6.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 7.28a.749.749 0 0 1 1.06-1.06L8 9.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"></path>
-    </svg>
+    <button type="button" data-chapter-toggle="${escapeHtml(group.id)}" class="mt-0.5 shrink-0 cursor-pointer rounded text-[#8b949e] hover:text-review-text" title="${collapsed ? "Expand" : "Collapse"} ${escapeHtml(group.title)}">
+      <svg class="h-4 w-4 transition-transform ${collapsed ? "-rotate-90" : ""}" viewBox="0 0 16 16" fill="currentColor">
+        <path d="M12.78 6.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 7.28a.749.749 0 0 1 1.06-1.06L8 9.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"></path>
+      </svg>
+    </button>
     ${running
       ? `<span class="review-scan-pulse" title="AI is scanning this review area"></span>`
       : complete ? `<span class="shrink-0 text-[12px] text-[#3fb950]">✓</span>` : ""}
-    <span class="min-w-0 flex-1 truncate font-medium ${complete ? "line-through opacity-70" : ""}">${escapeHtml(group.title)}</span>
-    <span class="shrink-0 text-[11px] text-review-muted">${progress.reviewed}/${progress.total}${complete ? " ✓" : ""}</span>
+    <button type="button" data-chapter-open="${escapeHtml(group.chapter?.id || "")}" class="min-w-0 flex-1 cursor-pointer text-left font-medium leading-tight ${complete ? "line-through opacity-70" : ""}">${escapeHtml(group.title)}</button>
+    <span class="mt-0.5 shrink-0 text-[11px] text-review-muted">${progress.reviewed}/${progress.total}${complete ? " ✓" : ""}</span>
   `;
-  row.addEventListener("click", () => {
+  row.querySelector("[data-chapter-toggle]")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
     state.collapsedDirs[group.id] = !collapsed;
-    if (group.chapter) state.activeInsight = { type: "chapter", id: group.chapter.id };
     renderTree();
+  });
+  row.querySelector("[data-chapter-open]")?.addEventListener("click", () => {
+    if (group.chapter) openChapterBrief(group.chapter.id);
   });
   fileTreeEl.appendChild(row);
 
@@ -1810,8 +1907,21 @@ function toolbarButtonClass(active = false) {
 }
 
 function updateToggleButtons() {
+  if (state.activeCanvas === "chapter") {
+    toggleWrapButton.style.display = "none";
+    toggleUnchangedButton.style.display = "none";
+    fileCommentButton.style.display = "none";
+    toggleReviewedButton.style.display = "none";
+    updateScopeButtons();
+    updateAiReviewButton();
+    submitButton.disabled = false;
+    return;
+  }
   const file = activeFile();
   const reviewed = file ? isFileReviewed(file.id) : false;
+  toggleWrapButton.style.display = "inline-flex";
+  fileCommentButton.style.display = "inline-flex";
+  toggleReviewedButton.style.display = "inline-flex";
   toggleReviewedButton.setAttribute("aria-pressed", reviewed ? "true" : "false");
   toggleReviewedButton.title = reviewed ? "Mark this file not reviewed" : "Mark this file reviewed and advance";
   toggleReviewedButton.innerHTML = reviewed ? `<span class="mr-1">✓</span><span>Reviewed</span>` : "<span>Reviewed</span>";
@@ -1846,6 +1956,7 @@ function openFileFromAnalysis(fileId) {
   if (!file) return;
 
   saveCurrentScrollPosition();
+  state.activeCanvas = "file";
   const preferred = findPreferredScopeForFile(file);
   state.currentScope = preferred.scope;
   if (preferred.scope === "commit" && preferred.commitSha) {
@@ -1894,6 +2005,7 @@ function openFindingLocation(location, options = {}) {
   const file = getFileById(location.fileId);
   if (!file) return;
   saveCurrentScrollPosition();
+  state.activeCanvas = "file";
   state.currentScope = "git-diff";
   state.activeFileId = file.id;
   if (location.side === "original" || location.side === "modified") {
@@ -1921,7 +2033,7 @@ function openFirstFindingLocation(finding) {
 function applyEditorOptions() {
   if (!diffEditor) return;
   diffEditor.updateOptions({
-    renderSideBySide: activeFileShowsDiff(),
+    renderSideBySide: activeFileShowsDiff() && !shouldRenderUnifiedForFile(),
     diffWordWrap: state.wrapLines ? "on" : "off",
     hideUnchangedRegions: {
       enabled: activeFileShowsDiff() && state.hideUnchanged,
@@ -2407,18 +2519,7 @@ function renderCommentDOM(comment) {
 
 function getInlineAiFindingEntries(file) {
   if (!file || state.currentScope !== "git-diff" || !activeFileShowsDiff()) return [];
-  const entries = [];
-  for (const finding of getReviewFindings()) {
-    const status = state.findingStatuses[finding.id] || "new";
-    if (status !== "new") continue;
-    for (const location of finding.locations || []) {
-      if (location.fileId !== file.id || location.line == null || location.side === "file") continue;
-      const ranges = rangesForSide(activeComparison(), location.side);
-      if (!clampRangeToCommentable(location.line, location.line, ranges)) continue;
-      entries.push({ finding, location });
-    }
-  }
-  return entries;
+  return getOpenInlineFindingEntriesForFile(file);
 }
 
 function createDraftCommentFromFinding(finding, location) {
@@ -2594,6 +2695,7 @@ function syncViewZones() {
   });
 
   getInlineAiFindingEntries(file)
+    .filter(({ finding }) => isAiFindingExpanded(finding.id))
     .forEach(({ finding, location }) => {
       const editor = location.side === "original" ? originalEditor : modifiedEditor;
       const domNode = renderAiFindingZoneDOM(finding, location);
@@ -2700,9 +2802,126 @@ function getMountedContents(file, scope = state.currentScope) {
   return getRequestState(file.id, scope).contents || getPlaceholderContents(file, scope);
 }
 
+function chapterBriefHtml(chapter) {
+  const files = getChapterDisplayFiles(chapter);
+  const progress = chapterReviewProgress(chapter);
+  const counts = chapterDiffstatCounts(chapter);
+  const findings = chapterFindings(chapter).filter((finding) => (state.findingStatuses[finding.id] || "new") === "new");
+  const tags = (chapter.attentionTags || []).slice(0, 5);
+  const firstFileId = firstExistingChapterFileId(chapter);
+  const reviewedLabel = progress.total > 0 ? `${progress.reviewed}/${progress.total} reviewed` : "No files";
+
+  return `
+    <div class="mx-auto w-full max-w-5xl px-8 py-8">
+      <div class="mb-6 flex flex-wrap items-start justify-between gap-4 border-b border-review-border pb-5">
+        <div class="min-w-0">
+          <div class="mb-2 flex flex-wrap items-center gap-2">
+            <span class="${chapterPriorityBadgeClass(chapter.priority)}">${escapeHtml(chapterPriorityLabel(chapter.priority))}</span>
+            <span class="${reviewStatusBadgeClass(progress.total > 0 && progress.reviewed >= progress.total)}">${escapeHtml(reviewedLabel)}</span>
+            ${diffstatHtml(counts, { compact: true })}
+          </div>
+          <h1 class="max-w-3xl text-2xl font-semibold leading-tight text-white">${escapeHtml(chapterDisplayTitle(chapter))}</h1>
+          <p class="mt-3 max-w-3xl text-sm leading-6 text-review-muted">${escapeHtml(chapter.summary || "Review the changed files in this area before marking it complete.")}</p>
+        </div>
+        ${firstFileId ? `<button type="button" data-open-chapter-file="${escapeHtml(firstFileId)}" class="cursor-pointer rounded-md border border-[#1f6feb]/40 bg-[#1f6feb] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#388bfd]">Open first file</button>` : ""}
+      </div>
+
+      <div class="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
+        <section class="rounded-lg border border-review-border bg-[#010409] p-4">
+          <div class="mb-3 text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review scope</div>
+          <div class="flex flex-wrap gap-2">
+            ${tags.length > 0 ? tags.map((tag) => `<span class="rounded bg-[#30363d]/50 px-2 py-1 text-xs font-medium text-review-text">${escapeHtml(tag)}</span>`).join("") : `<span class="text-sm text-review-muted">No attention tags.</span>`}
+          </div>
+          <div class="mt-4 grid grid-cols-3 gap-2">
+            <div class="rounded-md bg-[#161b22] px-3 py-2">
+              <div class="text-base font-semibold text-white">${files.length}</div>
+              <div class="text-[10px] uppercase tracking-wider text-review-muted">Files</div>
+            </div>
+            <div class="rounded-md bg-[#161b22] px-3 py-2">
+              <div class="text-base font-semibold text-[#3fb950]">+${Math.max(0, counts.added || 0)}</div>
+              <div class="text-[10px] uppercase tracking-wider text-review-muted">Added lines</div>
+            </div>
+            <div class="rounded-md bg-[#161b22] px-3 py-2">
+              <div class="text-base font-semibold text-[#f85149]">-${Math.max(0, counts.deleted || 0)}</div>
+              <div class="text-[10px] uppercase tracking-wider text-review-muted">Deleted lines</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="rounded-lg border border-review-border bg-[#010409] p-4">
+          <div class="mb-3 flex items-center justify-between gap-3">
+            <div class="text-[11px] font-semibold uppercase tracking-wider text-review-muted">AI findings</div>
+            <span class="rounded bg-[#161b22] px-1.5 py-0.5 text-[10px] font-medium text-review-muted">${findings.length} open</span>
+          </div>
+          <div class="space-y-2">
+            ${findings.length > 0
+              ? findings.slice(0, 4).map((finding) => `
+                <button type="button" data-finding-id="${escapeHtml(finding.id)}" class="block w-full cursor-pointer rounded-md border border-review-border bg-[#0d1117] px-3 py-2 text-left hover:border-[#8957e5]/50 hover:bg-[#161b22]">
+                  <div class="flex items-center gap-2">
+                    <span class="${severityBadgeClass(finding.severity)}">${escapeHtml(humanizeToken(finding.kind))}</span>
+                    <span class="min-w-0 truncate text-xs font-semibold text-review-text">${escapeHtml(finding.title)}</span>
+                  </div>
+                </button>
+              `).join("")
+              : `<div class="text-sm text-review-muted">No open AI findings in this area.</div>`}
+          </div>
+        </section>
+      </div>
+
+      <section class="mt-4 rounded-lg border border-review-border bg-[#010409] p-4">
+        <div class="mb-3 text-[11px] font-semibold uppercase tracking-wider text-review-muted">Files in this area</div>
+        <div class="divide-y divide-review-border/70">
+          ${files.map((file) => {
+            const display = fileDisplayParts(file, getScopeDisplayPath(file, state.currentScope) || file.path);
+            return `
+              <button type="button" data-open-chapter-file="${escapeHtml(file.id)}" class="flex w-full cursor-pointer items-center justify-between gap-3 py-2 text-left hover:text-white">
+                <span class="min-w-0">
+                  <span class="block truncate text-sm font-medium text-review-text">${escapeHtml(display.filename)}</span>
+                  ${display.directory ? `<span class="mt-0.5 block truncate text-[11px] text-review-muted">${escapeHtml(display.directory)}</span>` : ""}
+                </span>
+                <span class="shrink-0">${diffstatHtml(fileDiffstatCounts(file), { compact: true, blocks: 0 })}</span>
+              </button>
+            `;
+          }).join("")}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function mountChapterBrief(chapter) {
+  if (!chapter) return;
+  clearViewZones();
+  if (diffEditor) {
+    originalDecorations = diffEditor.getOriginalEditor().deltaDecorations(originalDecorations, []);
+    modifiedDecorations = diffEditor.getModifiedEditor().deltaDecorations(modifiedDecorations, []);
+    originalKeyboardDecorations = diffEditor.getOriginalEditor().deltaDecorations(originalKeyboardDecorations, []);
+    modifiedKeyboardDecorations = diffEditor.getModifiedEditor().deltaDecorations(modifiedKeyboardDecorations, []);
+  }
+  editorContainerEl.classList.add("hidden");
+  chapterBriefContainerEl.classList.remove("hidden");
+  fileCommentsContainer.className = "hidden border-b border-review-border bg-[#0d1117] px-4 py-0";
+  currentFileLabelEl.innerHTML = `<span class="truncate">${escapeHtml(chapterDisplayTitle(chapter))}</span>`;
+  modeHintEl.textContent = chapter.summary || "Review area";
+  chapterBriefContainerEl.innerHTML = chapterBriefHtml(chapter);
+  chapterBriefContainerEl.querySelectorAll("[data-open-chapter-file]").forEach((button) => {
+    button.addEventListener("click", () => openFile(button.getAttribute("data-open-chapter-file")));
+  });
+  chapterBriefContainerEl.querySelectorAll("[data-finding-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const finding = getReviewFinding(button.getAttribute("data-finding-id"));
+      if (finding) openFirstFindingLocation(finding);
+    });
+  });
+  updateToggleButtons();
+}
+
 function mountFile(options = {}) {
   if (!diffEditor || !monacoApi) return;
   const file = activeFile();
+  state.activeCanvas = "file";
+  chapterBriefContainerEl.classList.add("hidden");
+  editorContainerEl.classList.remove("hidden");
   if (!file) {
     currentFileLabelEl.textContent = "No file selected";
     clearViewZones();
@@ -2725,12 +2944,16 @@ function mountFile(options = {}) {
   const language = inferLanguage(getScopeFilePath(file) || file.path);
   const contents = getMountedContents(file, state.currentScope);
   const reviewed = isFileReviewed(file.id);
+  const chapter = chapterForFile(file.id);
+  const chapterLabel = chapter ? chapterDisplayTitle(chapter) : "";
+  const displayPath = getScopeDisplayPath(file, state.currentScope);
 
   clearViewZones();
   currentFileLabelEl.innerHTML = `
     <span class="flex min-w-0 items-center gap-2 ${reviewed ? "opacity-70" : ""}">
       ${reviewed ? `<span class="shrink-0 text-[12px] text-[#3fb950]">✓</span>` : ""}
-      <span class="min-w-0 truncate">${escapeHtml(getScopeDisplayPath(file, state.currentScope))}</span>
+      ${chapterLabel ? `<span class="min-w-0 truncate text-review-muted">${escapeHtml(chapterLabel)}</span><span class="shrink-0 text-review-muted">→</span>` : ""}
+      <span class="min-w-0 truncate">${escapeHtml(displayPath)}</span>
       ${diffstatHtml(fileDiffstatCounts(file), { compact: true })}
     </span>
   `;
@@ -2782,6 +3005,14 @@ function updateCommentsUI() {
 function renderAll(options = {}) {
   renderTree();
   submitButton.disabled = false;
+  if (state.activeCanvas === "chapter" && state.activeInsight.type === "chapter") {
+    const chapter = getReviewChapter(state.activeInsight.id);
+    if (chapter) {
+      mountChapterBrief(chapter);
+      return;
+    }
+    state.activeCanvas = "file";
+  }
   if (diffEditor && monacoApi) {
     mountFile(options);
     requestAnimationFrame(() => {
@@ -3009,7 +3240,7 @@ function setupMonaco() {
 
     diffEditor = monacoApi.editor.createDiffEditor(editorContainerEl, {
       automaticLayout: true,
-      renderSideBySide: activeFileShowsDiff(),
+      renderSideBySide: activeFileShowsDiff() && !shouldRenderUnifiedForFile(),
       readOnly: true,
       originalEditable: false,
       minimap: { enabled: true, renderCharacters: false, showSlider: "always", size: "proportional" },
@@ -3341,10 +3572,10 @@ function getKeyboardActions() {
     shortcutAction("search-files", "Search files", "/", focusFileSearch, { match: key("/") }),
     shortcutAction("next-file", "Next file", "]", () => moveFile(1), { match: key("]") }),
     shortcutAction("previous-file", "Previous file", "[", () => moveFile(-1), { match: key("[") }),
-    shortcutAction("scroll-down", "Scroll diff down", "J / ↓", () => scrollDiffCanvas(1), {
+    shortcutAction("scroll-down", "Move diff focus down", "J / ↓", () => moveDiffFocus(1), {
       match: (event) => key("j")(event) || (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "ArrowDown"),
     }),
-    shortcutAction("scroll-up", "Scroll diff up", "K / ↑", () => scrollDiffCanvas(-1), {
+    shortcutAction("scroll-up", "Move diff focus up", "K / ↑", () => moveDiffFocus(-1), {
       match: (event) => key("k")(event) || (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "ArrowUp"),
     }),
     shortcutAction("comment-line", "Add line comment", "C", addInlineCommentAtCursor, {

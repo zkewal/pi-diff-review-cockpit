@@ -13,6 +13,7 @@ import type {
   ReviewFile,
   ReviewFinding,
   ReviewLineRange,
+  ReviewLocation,
   ReviewFindingSeverity,
 } from "./types.js";
 
@@ -63,8 +64,10 @@ Each decision must contain:
 - title: optional corrected title
 - explanation: optional corrected explanation
 - suggestedComment: optional corrected ready-to-post reviewer comment
+- locations: optional corrected locations using only input file ids and paths
 
 Keep only findings that are concrete, actionable, tied to a real changed line or file in the input, and supported by the candidate's own evidence. Drop speculative, duplicate, vague, or unverifiable claims.
+Use the supplied changed file patches to verify that each location points at the most relevant changed line for the finding. If the issue is real but the candidate line is imprecise, return action "adjust" with corrected locations.
 Use the active reviewSkills from the input as the validation rubric. Drop findings that do not satisfy at least one enabled skill or that apply a disabled/custom skill without evidence.`;
 
 const SYNTHESIS_SYSTEM_PROMPT = `You are synthesizing a PI diff review after scout, chapter subagents, and validation.
@@ -412,6 +415,32 @@ export interface AiReviewValidationDecision {
   title?: string;
   explanation?: string;
   suggestedComment?: string;
+  locations?: ReviewLocation[];
+}
+
+function isCommentSide(value: unknown): value is ReviewLocation["side"] {
+  return value === "original" || value === "modified" || value === "file";
+}
+
+function normalizeDecisionLocations(value: unknown): ReviewLocation[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const locations: ReviewLocation[] = [];
+
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    const fileId = typeof item.fileId === "string" && item.fileId.trim().length > 0 ? item.fileId.trim() : null;
+    const path = typeof item.path === "string" && item.path.trim().length > 0 ? item.path.trim() : null;
+    if (!fileId || !path || !isCommentSide(item.side)) continue;
+    const line = item.line == null
+      ? null
+      : Number.isInteger(item.line) && Number(item.line) > 0
+        ? Number(item.line)
+        : undefined;
+    if (line === undefined) continue;
+    locations.push({ fileId, path, side: item.side, line });
+  }
+
+  return locations.length > 0 ? locations : undefined;
 }
 
 export function normalizeValidationDecisionsJson(text: string, findingIds: Set<string>): AiReviewValidationDecision[] {
@@ -424,6 +453,7 @@ export function normalizeValidationDecisionsJson(text: string, findingIds: Set<s
     const id = typeof decision.id === "string" ? decision.id : "";
     if (!findingIds.has(id)) continue;
     const action = decision.action === "drop" || decision.action === "adjust" ? decision.action : "keep";
+    const locations = normalizeDecisionLocations(decision.locations);
     normalized.push({
       id,
       action,
@@ -433,6 +463,7 @@ export function normalizeValidationDecisionsJson(text: string, findingIds: Set<s
       ...(typeof decision.title === "string" && decision.title.trim().length > 0 ? { title: decision.title.trim() } : {}),
       ...(typeof decision.explanation === "string" && decision.explanation.trim().length > 0 ? { explanation: decision.explanation.trim() } : {}),
       ...(typeof decision.suggestedComment === "string" && decision.suggestedComment.trim().length > 0 ? { suggestedComment: decision.suggestedComment.trim() } : {}),
+      ...(locations ? { locations } : {}),
     });
   }
 
@@ -511,18 +542,49 @@ export function applyValidationDecisions(analysis: ReviewAnalysis, decisions: Ai
       ...(decision?.title ? { title: decision.title } : {}),
       ...(decision?.explanation ? { explanation: decision.explanation } : {}),
       ...(decision?.suggestedComment ? { suggestedComment: decision.suggestedComment } : {}),
+      ...(decision?.locations ? { locations: decision.locations } : {}),
     });
   }
 
   return rebuildFindingReferences(analysis, findings);
 }
 
-function buildValidationInput(dataset: ReviewDataset, analysis: ReviewAnalysis, scoutSummary: string, config: AiReviewRuntimeConfig): string {
+async function buildValidationInput(
+  dataset: ReviewDataset,
+  analysis: ReviewAnalysis,
+  scoutSummary: string,
+  config: AiReviewRuntimeConfig,
+  getFilePatch: (file: ReviewFile) => Promise<string>,
+): Promise<string> {
+  const fileById = new Map(dataset.files.map((file) => [file.id, file] as const));
+  const candidateFileIds = new Set<string>();
+  for (const finding of analysis.findings) {
+    for (const location of finding.locations) {
+      candidateFileIds.add(location.fileId);
+    }
+  }
+  const changedFiles = [];
+  for (const fileId of candidateFileIds) {
+    const file = fileById.get(fileId);
+    if (!file) continue;
+    const rawPatch = await getFilePatch(file);
+    changedFiles.push({
+      id: file.id,
+      path: file.path,
+      status: fileStatus(file),
+      displayPath: file.gitDiff?.displayPath ?? file.path,
+      commentableOriginalLines: file.gitDiff?.commentableOriginalLines ?? [],
+      commentableModifiedLines: file.gitDiff?.commentableModifiedLines ?? [],
+      patch: truncateText(rawPatch, Math.min(config.maxPatchCharsPerFile, 18_000)),
+    });
+  }
+
   return JSON.stringify({
     source: dataset.source,
     scoutSummary,
     reviewSkills: reviewSkillsForInput(config),
     coverage: analysis.coverage,
+    changedFiles,
     chapters: analysis.chapters.map((chapter) => ({
       id: chapter.id,
       title: chapter.title,
@@ -547,12 +609,24 @@ function buildValidationInput(dataset: ReviewDataset, analysis: ReviewAnalysis, 
   });
 }
 
-async function validateFindings(ctx: ExtensionCommandContext, dataset: ReviewDataset, analysis: ReviewAnalysis, scoutSummary: string, config: AiReviewRuntimeConfig): Promise<ReviewAnalysis> {
+async function validateFindings(
+  ctx: ExtensionCommandContext,
+  dataset: ReviewDataset,
+  analysis: ReviewAnalysis,
+  scoutSummary: string,
+  config: AiReviewRuntimeConfig,
+  getFilePatch: (file: ReviewFile) => Promise<string>,
+): Promise<ReviewAnalysis> {
   if (analysis.findings.length === 0) return analysis;
   const findingIds = new Set(analysis.findings.map((finding) => finding.id));
-  const text = await completeTextJson(ctx, config, "validation", VALIDATION_SYSTEM_PROMPT, buildValidationInput(dataset, analysis, scoutSummary, config));
+  const text = await completeTextJson(ctx, config, "validation", VALIDATION_SYSTEM_PROMPT, await buildValidationInput(dataset, analysis, scoutSummary, config, getFilePatch));
   const decisions = normalizeValidationDecisionsJson(text, findingIds);
-  return refreshApprovalPacketForFindings(applyValidationDecisions(analysis, decisions), scoutSummary);
+  const fileById = new Map(dataset.files.map((file) => [file.id, file] as const));
+  const validated = applyValidationDecisions(analysis, decisions);
+  return refreshApprovalPacketForFindings({
+    ...validated,
+    findings: validated.findings.map((finding) => sanitizeFindingLocations(finding, fileById)),
+  }, scoutSummary);
 }
 
 export interface AiReviewSynthesisJson {
@@ -772,7 +846,7 @@ export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewD
   let nextAnalysis = mergeChapterResults(analysis, dataset, results, scoutSummary);
   const finalNotes: string[] = [];
   try {
-    nextAnalysis = await validateFindings(ctx, dataset, nextAnalysis, scoutSummary, options.config);
+    nextAnalysis = await validateFindings(ctx, dataset, nextAnalysis, scoutSummary, options.config, options.getFilePatch);
     progress = {
       ...refreshProgressFindingCounts(progress, nextAnalysis),
       message: `Validation complete: ${nextAnalysis.findings.length} finding(s) kept.`,

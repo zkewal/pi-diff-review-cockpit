@@ -76,6 +76,15 @@
     height: 100% !important;
   }
 
+  .chapter-brief-view {
+    animation: chapter-brief-in 160ms cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  @keyframes chapter-brief-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
   .monaco-editor .view-zones {
     z-index: 10;
   }
@@ -321,6 +330,7 @@
   @media (prefers-reduced-motion: reduce) {
     .ai-pulse-dot,
     .review-scan-pulse,
+    .chapter-brief-view,
     .ai-finding-zone.is-pulsing {
       animation: none;
     }
@@ -382,6 +392,7 @@
     </div>
     <div id="file-comments-container" class="hidden border-b border-review-border bg-[#0d1117] px-4 py-0"></div>
     <div id="editor-container" class="min-h-0 min-w-0 flex-1"></div>
+    <div id="chapter-brief-container" class="chapter-brief-view scrollbar-thin hidden min-h-0 min-w-0 flex-1 overflow-auto bg-[#0d1117]"></div>
     </main>
     <aside id="insight-panel" tabindex="-1" class="hidden min-h-0 shrink-0 flex-col border-l border-review-border bg-[#0d1117] review-checkout-drawer">
       <div class="border-b border-review-border px-4 py-2">
