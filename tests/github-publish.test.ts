@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildGitHubReviewPayload, countSkippedGitHubReviewComments } from "../src/github-publish.js";
+import { buildGitHubReviewPayload, countSkippedGitHubReviewComments, listPublishableGitHubReviewCommentIds } from "../src/github-publish.js";
 import type { ReviewSubmitPayload } from "../src/types.js";
 
 const filePathById = new Map([["file-1", "src/app/api/qa_api.py"]]);
@@ -81,6 +81,7 @@ test("publishes valid modified git-diff line inside commentable range", () => {
   const result = buildGitHubReviewPayload(options);
 
   assert.equal(countSkippedGitHubReviewComments(options), 0);
+  assert.deepEqual(listPublishableGitHubReviewCommentIds(options), ["modified"]);
   assert.deepEqual(result.comments, [{
     path: "src/app/api/qa_api.py",
     body: "Modified line note.",
@@ -105,6 +106,7 @@ test("skips and counts modified git-diff line outside commentable range", () => 
   const result = buildGitHubReviewPayload(options);
 
   assert.equal(countSkippedGitHubReviewComments(options), 1);
+  assert.deepEqual(listPublishableGitHubReviewCommentIds(options), []);
   assert.deepEqual(result.comments, []);
 });
 

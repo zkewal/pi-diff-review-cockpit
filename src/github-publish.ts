@@ -82,6 +82,12 @@ export function countSkippedGitHubReviewComments(options: BuildPayloadOptions): 
   return options.submit.comments.filter((comment) => toGitHubReviewComment(options, comment) == null).length;
 }
 
+export function listPublishableGitHubReviewCommentIds(options: BuildPayloadOptions): string[] {
+  return options.submit.comments
+    .filter((comment) => toGitHubReviewComment(options, comment) != null)
+    .map((comment) => comment.id);
+}
+
 function acceptedFindingsSection(submit: ReviewSubmitPayload): string | null {
   const bodies = submit.acceptedFindings
     .map((finding) => finding.body.trim())

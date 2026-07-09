@@ -55,6 +55,9 @@ export interface DiffReviewComment {
   startLine: number | null;
   endLine: number | null;
   body: string;
+  status?: "staged" | "published";
+  published?: boolean;
+  publishedAt?: string;
 }
 
 export interface AcceptedFindingComment {
@@ -92,6 +95,7 @@ export type GitHubReviewEvent = "COMMENT" | "REQUEST_CHANGES" | "APPROVE";
 
 export interface ReviewPublishPayload {
   type: "publish-github-review";
+  requestId: string;
   event: GitHubReviewEvent;
   body: string;
   submit: ReviewSubmitPayload;
@@ -127,6 +131,7 @@ export interface ReviewSessionSnapshot {
   sidebarCollapsed?: boolean;
   aiReviewCompleted?: boolean;
   aiReviewStatus?: AiReviewRunStatus;
+  dismissedFindingLocationKeys?: string[];
   updatedAt?: string;
 }
 
@@ -163,6 +168,16 @@ export interface ReviewSaveSessionResultMessage {
   ok: boolean;
   message?: string;
   savedAt?: string;
+}
+
+export interface ReviewPublishGitHubReviewResultMessage {
+  type: "publish-github-review-result";
+  requestId: string;
+  ok: boolean;
+  message?: string;
+  publishedCommentIds?: string[];
+  skippedCount?: number;
+  submittedAt?: string;
 }
 
 export type AiReviewRunStatus = "idle" | "running" | "done" | "failed";
@@ -264,7 +279,7 @@ export interface ReviewAiReviewErrorMessage {
   progress: AiReviewProgress;
 }
 
-export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewSaveSessionResultMessage | ReviewAiReviewProgressMessage | ReviewAiReviewPartialResultMessage | ReviewAiReviewResultMessage | ReviewAiReviewErrorMessage;
+export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewSaveSessionResultMessage | ReviewPublishGitHubReviewResultMessage | ReviewAiReviewProgressMessage | ReviewAiReviewPartialResultMessage | ReviewAiReviewResultMessage | ReviewAiReviewErrorMessage;
 
 export type ReviewFindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type ReviewFindingKind = "bug" | "security" | "migration-risk" | "api-contract" | "test-gap" | "performance" | "question" | "informational";

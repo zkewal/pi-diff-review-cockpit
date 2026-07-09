@@ -14,6 +14,11 @@ function booleanMapOrEmpty(value) {
   return Object.fromEntries(Object.entries(objectOrEmpty(value)).filter((entry) => typeof entry[1] === "boolean"));
 }
 
+function stringSetOrEmpty(value) {
+  if (Array.isArray(value)) return new Set(value.filter((item) => typeof item === "string"));
+  return new Set(Object.entries(objectOrEmpty(value)).filter((entry) => entry[1] === true).map(([key]) => key));
+}
+
 function commentsOrEmpty(value) {
   return Array.isArray(value) ? value.filter((comment) => isPlainObject(comment) && typeof comment.id === "string") : [];
 }
@@ -103,6 +108,8 @@ const state = {
   editingCommentIds: new Set(),
   collapsedCommentIds: new Set(),
   expandedFindingIds: new Set(),
+  dismissedFindingLocationKeys: stringSetOrEmpty(restoredSession.dismissedFindingLocationKeys),
+  publishRequestId: null,
   aiReviewCompleted: restoredAiReviewCompleted,
   aiReview: {
     requestId: null,
@@ -230,6 +237,7 @@ function buildSessionSnapshot() {
     sidebarCollapsed: state.sidebarCollapsed,
     aiReviewCompleted: state.aiReviewCompleted,
     aiReviewStatus: ["done", "failed"].includes(state.aiReview.status) ? state.aiReview.status : undefined,
+    dismissedFindingLocationKeys: [...state.dismissedFindingLocationKeys],
     updatedAt: new Date().toISOString(),
   };
 }
@@ -729,16 +737,16 @@ function isCommentInScope(comment, scope = state.currentScope) {
 }
 
 function getDraftComments(scope = state.currentScope) {
-  return state.comments.filter((comment) => isCommentInScope(comment, scope));
+  return state.comments.filter((comment) => isCommentInScope(comment, scope) && commentLifecycleState(comment) !== "published");
 }
 
 function getDraftCommentsForFile(fileId, scope = state.currentScope) {
-  return state.comments.filter((comment) => comment.fileId === fileId && isCommentInScope(comment, scope));
+  return state.comments.filter((comment) => comment.fileId === fileId && isCommentInScope(comment, scope) && commentLifecycleState(comment) !== "published");
 }
 
 function getDraftCommentsForChapter(chapter, scope = state.currentScope) {
   const fileIds = new Set(chapter.fileIds || []);
-  return state.comments.filter((comment) => fileIds.has(comment.fileId) && isCommentInScope(comment, scope));
+  return state.comments.filter((comment) => fileIds.has(comment.fileId) && isCommentInScope(comment, scope) && commentLifecycleState(comment) !== "published");
 }
 
 function getFindingsForFile(fileId) {
@@ -754,6 +762,14 @@ function getVisibleFindingsForFile(fileId) {
   });
 }
 
+function findingLocationKey(finding, location) {
+  return `${finding.id}:${location.fileId}:${location.side}:${location.line ?? "file"}`;
+}
+
+function isFindingLocationDismissed(finding, location) {
+  return state.dismissedFindingLocationKeys.has(findingLocationKey(finding, location));
+}
+
 function getOpenInlineFindingEntriesForFile(file) {
   if (!file || state.currentScope !== "git-diff") return [];
   const comparison = getScopeComparison(file, state.currentScope);
@@ -766,6 +782,7 @@ function getOpenInlineFindingEntriesForFile(file) {
     if (status !== "new") continue;
     for (const location of finding.locations || []) {
       if (location.fileId !== file.id || location.line == null || location.side === "file") continue;
+      if (isFindingLocationDismissed(finding, location)) continue;
       const ranges = rangesForSide(comparison, location.side);
       if (!clampRangeToCommentable(location.line, location.line, ranges)) continue;
       const key = `${finding.id}:${location.side}:${location.line}`;
@@ -1423,7 +1440,7 @@ function stageCurrentFinding() {
 function dismissCurrentFinding() {
   const entry = getCurrentInlineFindingEntry();
   if (!entry) return false;
-  dismissFinding(entry.finding);
+  dismissFindingLocation(entry.finding, entry.location);
   return true;
 }
 
@@ -1589,13 +1606,13 @@ function fileNavIconHtml(file, options = {}) {
   const aiState = aiReviewFileState(file.id);
 
   if (aiState === "running") {
-    return `<span class="review-scan-pulse" title="AI is scanning this file"></span>`;
+    return `<span class="sidebar-scanning-icon mt-0.5 shrink-0" title="AI is scanning this file"></span>`;
   }
 
   const mutedClass = options.active ? "text-[#c9d1d9]" : "text-review-muted";
-  if (reviewed) return `<span class="mt-0.5 shrink-0 text-[12px] text-[#3fb950]">✓</span>`;
-  if (errored) return `<span class="mt-0.5 shrink-0 text-[12px] text-red-400">!</span>`;
-  if (loading || aiState === "queued") return `<span class="mt-0.5 shrink-0 text-[12px] text-[#58a6ff]">…</span>`;
+  if (reviewed) return `<span class="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[12px] text-[#3fb950]">✓</span>`;
+  if (errored) return `<span class="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[12px] text-red-400">!</span>`;
+  if (loading || aiState === "queued") return `<span class="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[12px] text-[#58a6ff]">…</span>`;
   return `
     <svg aria-hidden="true" class="mt-0.5 h-3.5 w-3.5 shrink-0 ${mutedClass}" viewBox="0 0 16 16" fill="none">
       <path d="M4.25 2.75h5.1l2.4 2.4v8.1h-7.5V2.75Z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"></path>
@@ -1726,9 +1743,11 @@ function renderReviewGroup(group) {
         <path d="M12.78 6.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 7.28a.749.749 0 0 1 1.06-1.06L8 9.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"></path>
       </svg>
     </button>
-    ${running
-      ? `<span class="review-scan-pulse" title="AI is scanning this review area"></span>`
-      : complete ? `<span class="shrink-0 text-[12px] text-[#3fb950]">✓</span>` : ""}
+    <span class="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+      ${running
+        ? `<span class="sidebar-scanning-icon" title="AI is scanning this review area"></span>`
+        : complete ? `<span class="text-[12px] text-[#3fb950]">✓</span>` : ""}
+    </span>
     <button type="button" data-chapter-open="${escapeHtml(group.chapter?.id || "")}" class="min-w-0 flex-1 cursor-pointer text-left font-medium leading-tight ${complete ? "line-through opacity-70" : ""}">${escapeHtml(group.title)}</button>
     <span class="mt-0.5 shrink-0 text-[11px] text-review-muted">${progress.reviewed}/${progress.total}${complete ? " ✓" : ""}</span>
   `;
@@ -1792,9 +1811,11 @@ function renderTreeNode(node, depth) {
         <svg class="h-4 w-4 shrink-0 text-[#8b949e] transition-transform ${collapsed ? "-rotate-90" : ""}" viewBox="0 0 16 16" fill="currentColor">
           <path d="M12.78 6.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 7.28a.749.749 0 0 1 1.06-1.06L8 9.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"></path>
         </svg>
-        ${aiState === "running"
-          ? `<span class="review-scan-pulse" title="AI is scanning this area"></span>`
-          : complete ? `<span class="shrink-0 text-[12px] text-[#3fb950]">✓</span>` : ""}
+        <span class="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+          ${aiState === "running"
+            ? `<span class="sidebar-scanning-icon" title="AI is scanning this area"></span>`
+            : complete ? `<span class="text-[12px] text-[#3fb950]">✓</span>` : ""}
+        </span>
         <span class="min-w-0 flex-1 truncate ${complete ? "opacity-70" : ""}">${escapeHtml(compact.name)}</span>
         <span class="shrink-0 text-[11px] text-review-muted">${progress.reviewed}/${progress.total}</span>
       `;
@@ -2165,6 +2186,74 @@ function isCheckoutDrawerOpen() {
   return !insightPanelEl.classList.contains("hidden");
 }
 
+function setPublishUiState(status, message = "") {
+  const statusEl = insightContentEl.querySelector("#github-publish-status");
+  const submitEl = insightContentEl.querySelector("#github-publish-submit");
+  const cancelEl = insightContentEl.querySelector("#github-publish-cancel");
+  const eventEl = insightContentEl.querySelector("#github-review-event");
+  const bodyEl = insightContentEl.querySelector("#github-review-body");
+  const submitting = status === "submitting";
+
+  if (submitEl) {
+    submitEl.disabled = submitting;
+    submitEl.className = submitting
+      ? "cursor-wait rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb]/70 px-3 py-1.5 text-sm font-medium text-white"
+      : "cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#388bfd]";
+    submitEl.innerHTML = submitting
+      ? `Submitting <span class="ml-2 inline-flex items-center gap-1 align-middle"><span class="ai-pulse-dot"></span><span class="ai-pulse-dot"></span><span class="ai-pulse-dot"></span></span>`
+      : `Submit review <span class="text-[11px] opacity-70">⌘↵</span>`;
+  }
+  if (cancelEl) cancelEl.disabled = submitting;
+  if (eventEl) eventEl.disabled = submitting;
+  if (bodyEl) bodyEl.disabled = submitting;
+
+  if (!statusEl) return;
+  if (!message) {
+    statusEl.className = "hidden";
+    statusEl.textContent = "";
+    return;
+  }
+  const tone = status === "failed"
+    ? "border-red-500/30 bg-red-500/10 text-red-300"
+    : status === "done"
+      ? "border-[#2ea043]/30 bg-[#238636]/12 text-[#7ee787]"
+      : "border-[#58a6ff]/30 bg-[#1f6feb]/10 text-[#79c0ff]";
+  statusEl.className = `rounded-md border px-3 py-2 text-sm leading-5 ${tone}`;
+  statusEl.textContent = message;
+}
+
+function markCommentsPublished(commentIds, publishedAt = new Date().toISOString()) {
+  const publishedIds = new Set(commentIds || []);
+  if (publishedIds.size === 0) return;
+  state.comments = state.comments.map((comment) => publishedIds.has(comment.id)
+    ? {
+        ...comment,
+        status: "published",
+        published: true,
+        publishedAt,
+      }
+    : comment
+  );
+}
+
+function handlePublishGitHubReviewResult(message) {
+  if (message.requestId !== state.publishRequestId) return;
+  state.publishRequestId = null;
+
+  if (!message.ok) {
+    setPublishUiState("failed", message.message || "GitHub review submission failed.");
+    return;
+  }
+
+  markCommentsPublished(message.publishedCommentIds || [], message.submittedAt);
+  setPublishUiState("done", message.message || "Submitted GitHub review.");
+  updateCommentsUI();
+  saveSessionNow({ showStatus: false });
+  setTimeout(() => {
+    if (!state.publishRequestId) closeCheckoutDrawer();
+  }, 700);
+}
+
 function showPublishGitHubModal() {
   syncCommentBodiesFromDOM();
   const submitPayload = buildSubmitPayload();
@@ -2202,6 +2291,7 @@ function showPublishGitHubModal() {
         <label class="mb-2 block text-[11px] font-semibold uppercase tracking-wider text-review-muted" for="github-review-body">Review body</label>
         <textarea id="github-review-body" class="scrollbar-thin min-h-[260px] max-h-[56vh] w-full resize-y rounded-md border border-review-border bg-[#010409] px-3 py-2 font-mono text-sm leading-6 text-review-text outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500">${escapeHtml(reviewData.analysis?.approvalPacket?.body || "")}</textarea>
       </div>
+      <div id="github-publish-status" class="hidden"></div>
       <div class="flex justify-end gap-2">
         <button id="github-publish-cancel" class="cursor-pointer rounded-md border border-review-border bg-review-panel px-3 py-1.5 text-sm font-medium text-review-text hover:bg-[#21262d]">Back</button>
         <button id="github-publish-submit" class="cursor-pointer rounded-md border border-[rgba(240,246,252,0.1)] bg-[#1f6feb] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#388bfd]">Submit review <span class="text-[11px] opacity-70">⌘↵</span></button>
@@ -2211,14 +2301,23 @@ function showPublishGitHubModal() {
   const eventSelect = insightContentEl.querySelector("#github-review-event");
   const textarea = insightContentEl.querySelector("#github-review-body");
   const publish = () => {
+    if (state.publishRequestId) return;
     syncCommentBodiesFromDOM();
+    const requestId = `publish:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+    state.publishRequestId = requestId;
+    setPublishUiState("submitting", "Submitting review to GitHub...");
+    if (!window.glimpse?.send) {
+      state.publishRequestId = null;
+      setPublishUiState("failed", "GitHub review submission is only available inside the review app.");
+      return;
+    }
     window.glimpse.send({
       type: "publish-github-review",
+      requestId,
       event: eventSelect.value,
       body: textarea.value.trim(),
       submit: buildSubmitPayload(),
     });
-    closeCheckoutDrawer();
   };
 
   eventSelect.value = suggestedGitHubReviewEvent();
@@ -2226,6 +2325,7 @@ function showPublishGitHubModal() {
   insightContentEl.querySelector("#github-publish-submit").addEventListener("click", publish);
   insightPanelEl.onkeydown = (event) => {
     if (event.key === "Escape") {
+      if (state.publishRequestId) return;
       event.preventDefault();
       closeCheckoutDrawer();
       return;
@@ -2310,12 +2410,18 @@ function commentLifecycleBadgeClass(comment) {
     : "rounded bg-[#238636]/15 px-1.5 py-0.5 text-[10px] font-medium text-[#3fb950]";
 }
 
+function commentProvenance(comment) {
+  return aiFindingIdForComment(comment) ? "ai" : "user";
+}
+
 function commentGlyphClassName(comment) {
-  return commentLifecycleState(comment) === "published" ? "review-comment-glyph-published" : "review-comment-glyph-staged";
+  if (commentLifecycleState(comment) === "published") return "review-comment-glyph-published";
+  return commentProvenance(comment) === "ai" ? "review-comment-glyph-staged-ai" : "review-comment-glyph-staged-user";
 }
 
 function commentRailClassName(comment) {
-  return commentLifecycleState(comment) === "published" ? "review-comment-rail-published" : "review-comment-rail-staged";
+  if (commentLifecycleState(comment) === "published") return "review-comment-rail-published";
+  return commentProvenance(comment) === "ai" ? "review-comment-rail-staged-ai" : "review-comment-rail-staged-user";
 }
 
 function commentMarkerTooltip(comment) {
@@ -2522,6 +2628,20 @@ function getInlineAiFindingEntries(file) {
   return getOpenInlineFindingEntriesForFile(file);
 }
 
+function hasOpenInlineFindingLocations(finding) {
+  for (const location of finding.locations || []) {
+    const file = getFileById(location.fileId);
+    if (!file || location.line == null || location.side === "file") continue;
+    const comparison = getScopeComparison(file, "git-diff");
+    if (!comparison) continue;
+    if (isFindingLocationDismissed(finding, location)) continue;
+    if (clampRangeToCommentable(location.line, location.line, rangesForSide(comparison, location.side))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function createDraftCommentFromFinding(finding, location) {
   const body = (finding.suggestedComment || "").trim();
   if (!body) return;
@@ -2563,6 +2683,19 @@ function dismissFinding(finding) {
   state.findingStatuses[finding.id] = "dismissed";
   delete state.acceptedFindingComments[finding.id];
   state.expandedFindingIds.delete(finding.id);
+  if (state.activeInsight.type === "finding" && state.activeInsight.id === finding.id) {
+    state.activeInsight = { type: "default", id: null };
+  }
+  updateCommentsUI();
+}
+
+function dismissFindingLocation(finding, location) {
+  state.dismissedFindingLocationKeys.add(findingLocationKey(finding, location));
+  state.expandedFindingIds.delete(finding.id);
+  if (!hasOpenInlineFindingLocations(finding)) {
+    state.findingStatuses[finding.id] = "dismissed";
+    delete state.acceptedFindingComments[finding.id];
+  }
   if (state.activeInsight.type === "finding" && state.activeInsight.id === finding.id) {
     state.activeInsight = { type: "default", id: null };
   }
@@ -2613,7 +2746,7 @@ function renderAiFindingZoneDOM(finding, location) {
     state.activeInsight = { type: "finding", id: finding.id };
   });
   container.querySelector("[data-action='stage-comment']").addEventListener("click", () => createDraftCommentFromFinding(finding, location));
-  container.querySelector("[data-action='dismiss-finding']").addEventListener("click", () => dismissFinding(finding));
+  container.querySelector("[data-action='dismiss-finding']").addEventListener("click", () => dismissFindingLocation(finding, location));
   return container;
 }
 
@@ -3126,6 +3259,11 @@ window.__reviewReceive = function (message) {
     return;
   }
 
+  if (message.type === "publish-github-review-result") {
+    handlePublishGitHubReviewResult(message);
+    return;
+  }
+
   if (message.type === "ai-review-progress") {
     if (message.requestId !== state.aiReview.requestId) return;
     state.aiReview = {
@@ -3317,6 +3455,7 @@ function applyAiReviewAnalysis(analysis) {
     Object.entries(previousAcceptedComments).filter(([findingId]) => findingIds.has(findingId)),
   );
   state.expandedFindingIds = new Set([...state.expandedFindingIds].filter((findingId) => findingIds.has(findingId)));
+  state.dismissedFindingLocationKeys = new Set([...state.dismissedFindingLocationKeys].filter((key) => findingIds.has(key.split(":")[0])));
 
   if (state.activeInsight.type === "finding" && !findingIds.has(state.activeInsight.id)) {
     state.activeInsight = { type: "default", id: null };
@@ -3377,6 +3516,7 @@ function buildSubmitPayload() {
     type: "submit",
     overallComment: state.overallComment.trim(),
     comments: state.comments
+      .filter((comment) => commentLifecycleState(comment) !== "published")
       .map((comment) => ({ ...comment, body: comment.body.trim() }))
       .filter((comment) => comment.body.length > 0),
     acceptedFindings: Object.entries(state.acceptedFindingComments).map(([findingId, body]) => ({ findingId, body })),

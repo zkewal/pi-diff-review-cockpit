@@ -8,7 +8,7 @@ import { loadAiReviewRuntimeConfig } from "./ai-review-config.js";
 import { analyzeReviewDataset } from "./analysis.js";
 import { parseDiffReviewArgs } from "./command.js";
 import { loadReviewFileContents } from "./git.js";
-import { buildGitHubReviewPayload, countSkippedGitHubReviewComments, publishGitHubReview } from "./github-publish.js";
+import { buildGitHubReviewPayload, countSkippedGitHubReviewComments, listPublishableGitHubReviewCommentIds, publishGitHubReview } from "./github-publish.js";
 import { composeReviewPrompt } from "./prompt.js";
 import { buildGitHubPrReviewDataset } from "./sources/github-pr.js";
 import { buildLocalReviewDataset } from "./sources/local.js";
@@ -386,10 +386,22 @@ export default function (pi: ExtensionAPI) {
         const handlePublishGitHubReview = async (message: ReviewPublishPayload): Promise<void> => {
           if (publishInFlight) {
             ctx.ui.notify("A GitHub review submission is already in progress.", "warning");
+            sendWindowMessage({
+              type: "publish-github-review-result",
+              requestId: message.requestId,
+              ok: false,
+              message: "A GitHub review submission is already in progress.",
+            });
             return;
           }
           if (!dataset.source.github) {
             ctx.ui.notify("This review source cannot submit GitHub reviews.", "error");
+            sendWindowMessage({
+              type: "publish-github-review-result",
+              requestId: message.requestId,
+              ok: false,
+              message: "This review source cannot submit GitHub reviews.",
+            });
             return;
           }
 
@@ -411,16 +423,34 @@ export default function (pi: ExtensionAPI) {
               commentableLinesByFileId,
             };
             const skippedCount = countSkippedGitHubReviewComments(buildOptions);
+            const publishedCommentIds = listPublishableGitHubReviewCommentIds(buildOptions);
             const payload = buildGitHubReviewPayload(buildOptions);
 
             await publishGitHubReview(pi, dataset.workingRoot, dataset.source.github, payload);
             ctx.ui.notify("Submitted GitHub review.", "info");
+            sendWindowMessage({
+              type: "publish-github-review-result",
+              requestId: message.requestId,
+              ok: true,
+              message: skippedCount > 0
+                ? `Submitted review. Skipped ${skippedCount} unsupported local comment(s).`
+                : "Submitted GitHub review.",
+              publishedCommentIds,
+              skippedCount,
+              submittedAt: new Date().toISOString(),
+            });
             if (skippedCount > 0) {
               ctx.ui.notify(`Skipped ${skippedCount} unsupported manual comment(s) that are not GitHub PR diff coordinates.`, "warning");
             }
           } catch (error) {
             const messageText = error instanceof Error ? error.message : String(error);
             ctx.ui.notify(`GitHub review submission failed: ${messageText}`, "error");
+            sendWindowMessage({
+              type: "publish-github-review-result",
+              requestId: message.requestId,
+              ok: false,
+              message: messageText,
+            });
           } finally {
             publishInFlight = false;
           }
