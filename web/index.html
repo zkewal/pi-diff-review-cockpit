@@ -147,14 +147,31 @@
 
   .monaco-editor .review-ai-finding-glyph::before,
   .monaco-editor .review-ai-finding-glyph-active::before {
+    align-items: center;
+    background: rgba(137, 87, 229, 0.18);
+    border: 1px solid rgba(210, 168, 255, 0.5);
+    border-radius: 999px;
+    box-shadow: 0 0 0 1px rgba(137, 87, 229, 0.12), 0 0 10px rgba(210, 168, 255, 0.2);
     color: #d2a8ff;
     content: "✦";
-    font-size: 12px;
-    text-shadow: 0 0 8px rgba(210, 168, 255, 0.35);
+    display: flex;
+    font-size: 10px;
+    height: 16px;
+    justify-content: center;
+    line-height: 16px;
+    text-shadow: 0 0 8px rgba(210, 168, 255, 0.42);
+    transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+    width: 16px;
   }
 
+  .monaco-editor .review-ai-finding-glyph:hover::before,
+  .monaco-editor .review-ai-finding-glyph-active:hover::before,
   .monaco-editor .review-ai-finding-glyph-active::before {
+    background: rgba(137, 87, 229, 0.72);
+    border-color: rgba(210, 168, 255, 0.95);
+    box-shadow: 0 0 0 2px rgba(137, 87, 229, 0.22), 0 0 14px rgba(210, 168, 255, 0.34);
     color: #ffffff;
+    transform: scale(1.06);
   }
 
   .monaco-editor .review-keyboard-line {

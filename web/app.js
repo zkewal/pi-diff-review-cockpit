@@ -1391,7 +1391,11 @@ function pulseInlineFinding(findingId, location) {
 }
 
 function isAiFindingExpanded(findingId) {
-  return state.expandedFindingIds.has(findingId) || (state.activeInsight.type === "finding" && state.activeInsight.id === findingId);
+  return getReviewFinding(findingId) != null && (state.findingStatuses[findingId] || "new") === "new";
+}
+
+function isAiFindingActive(findingId) {
+  return state.activeInsight.type === "finding" && state.activeInsight.id === findingId;
 }
 
 function findInlineFindingAtLine(side, line) {
@@ -1403,17 +1407,8 @@ function toggleInlineFindingAtLine(side, line) {
   const entry = findInlineFindingAtLine(side, line);
   if (!entry) return false;
 
-  if (state.expandedFindingIds.has(entry.finding.id)) {
-    state.expandedFindingIds.delete(entry.finding.id);
-    if (state.activeInsight.type === "finding" && state.activeInsight.id === entry.finding.id) {
-      state.activeInsight = { type: "default", id: null };
-    }
-  } else {
-    state.expandedFindingIds.add(entry.finding.id);
-    state.activeInsight = { type: "finding", id: entry.finding.id };
-  }
-
-  syncViewZones();
+  state.expandedFindingIds.add(entry.finding.id);
+  state.activeInsight = { type: "finding", id: entry.finding.id };
   updateDecorations();
   renderTree();
   focusDiffLine(side, line, line);
@@ -2599,7 +2594,6 @@ function syncViewZones() {
   });
 
   getInlineAiFindingEntries(file)
-    .filter(({ finding }) => isAiFindingExpanded(finding.id))
     .forEach(({ finding, location }) => {
       const editor = location.side === "original" ? originalEditor : modifiedEditor;
       const domNode = renderAiFindingZoneDOM(finding, location);
@@ -2639,22 +2633,23 @@ function updateDecorations() {
 
   for (const { finding, location } of findings) {
     if (commentedLines.has(`${location.side}:${location.line}`)) continue;
-    const expanded = isAiFindingExpanded(finding.id);
+    const visible = isAiFindingExpanded(finding.id);
+    const active = isAiFindingActive(finding.id);
     const overviewLane = monacoApi.editor.OverviewRulerLane?.Right ?? 4;
     const minimapPosition = monacoApi.editor.MinimapPosition?.Inline ?? 1;
     const range = {
       range: new monacoApi.Range(location.line, 1, location.line, 1),
       options: {
-        isWholeLine: expanded,
-        className: expanded ? "review-ai-finding-rail-active" : "",
-        glyphMarginClassName: expanded ? "review-ai-finding-glyph-active" : "review-ai-finding-glyph",
-        glyphMarginHoverMessage: { value: `AI finding: ${finding.title}` },
+        isWholeLine: visible,
+        className: visible ? "review-ai-finding-rail-active" : "",
+        glyphMarginClassName: active ? "review-ai-finding-glyph-active" : "review-ai-finding-glyph",
+        glyphMarginHoverMessage: { value: `AI finding: ${finding.title}\n\nClick to focus the inline review.` },
         overviewRuler: {
-          color: "rgba(210, 168, 255, 0.78)",
+          color: "rgba(210, 168, 255, 0.58)",
           position: overviewLane,
         },
         minimap: {
-          color: "rgba(210, 168, 255, 0.72)",
+          color: "rgba(210, 168, 255, 0.48)",
           position: minimapPosition,
         },
       },

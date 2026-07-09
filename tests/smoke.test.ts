@@ -61,9 +61,11 @@ test("finding cards focus and pulse the selected inline finding", () => {
   assert.equal(appJs.includes("data-ai-finding-id"), true);
   assert.equal(appJs.includes("toggleInlineFindingAtLine"), true);
   assert.equal(appJs.includes("review-ai-finding-glyph"), true);
-  assert.equal(appJs.includes("filter(({ finding }) => isAiFindingExpanded(finding.id))"), true);
+  assert.equal(appJs.includes("filter(({ finding }) => isAiFindingExpanded(finding.id))"), false);
+  assert.equal(appJs.includes("Click to focus the inline review."), true);
   assert.equal(html.includes("ai-finding-pulse"), true);
   assert.equal(html.includes("review-ai-finding-glyph"), true);
+  assert.equal(html.includes("review-ai-finding-glyph:hover::before"), true);
 });
 
 test("review progress is file-first and keyboard friendly", () => {
