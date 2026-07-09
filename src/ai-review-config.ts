@@ -9,7 +9,10 @@ import type {
   AiReviewPhase,
   AiReviewResolvedConfig,
   AiReviewResolvedPhaseConfig,
+  AiReviewResolvedSkillsConfig,
   AiReviewRuntimeConfig,
+  AiReviewSkillDefinition,
+  AiReviewSkillPreset,
 } from "./types.js";
 
 const CONFIG_ENV_VAR = "PI_DIFF_REVIEW_COCKPIT_CONFIG";
@@ -63,6 +66,60 @@ const DEPTH_LIMITS: Record<AiReviewDepth, {
   },
 };
 
+const DEFAULT_SKILL_PRESET: AiReviewSkillPreset = "balanced";
+
+const BUILT_IN_REVIEW_SKILLS: AiReviewSkillDefinition[] = [
+  {
+    id: "correctness",
+    title: "Correctness",
+    focus: "Concrete behavior regressions, bad state transitions, broken edge cases, and logic that no longer matches the changed contract.",
+    instructions: "Look for issues that can be explained from the diff and nearby context. Prefer one strong, changed-line-backed finding over multiple speculative comments. Ignore style-only concerns.",
+  },
+  {
+    id: "contracts",
+    title: "Contracts and data shape",
+    focus: "API contracts, type/schema changes, migrations, persistence models, serialization, backwards compatibility, and caller/callee expectations.",
+    instructions: "Check whether new fields, enums, migrations, validation rules, and public interfaces stay compatible with existing callers and stored data. Flag ordering, rollback, or mismatch risks only when supported by changed lines.",
+  },
+  {
+    id: "tests",
+    title: "Tests and coverage",
+    focus: "Missing or weak tests for changed behavior, boundary cases, migrations, auth gates, error paths, and contract changes.",
+    instructions: "Create test-gap findings only when the diff introduces meaningful behavior without corresponding coverage or when existing tests appear to assert the wrong contract.",
+  },
+  {
+    id: "silent-failures",
+    title: "Silent failures",
+    focus: "Swallowed errors, lossy fallbacks, partial writes, retries, timeouts, null handling, and logging that can hide production failures.",
+    instructions: "Prioritize paths where a user-visible or data-integrity failure could be hidden, retried unsafely, or reported as success.",
+  },
+  {
+    id: "security",
+    title: "Security and isolation",
+    focus: "Authz/authn gaps, tenant or source isolation, path traversal, injection, secrets, unsafe deserialization, and dangerous external calls.",
+    instructions: "Flag only concrete security or isolation risks tied to changed code. Do not stretch generic best practices into security findings.",
+  },
+  {
+    id: "comments",
+    title: "Comments and docs",
+    focus: "Changed comments, docstrings, README text, generated docs, and inline guidance that conflicts with executable behavior.",
+    instructions: "Use this skill sparingly. Report stale or misleading prose only when it can mislead a reviewer, operator, or future maintainer about changed behavior.",
+  },
+  {
+    id: "adversarial",
+    title: "Adversarial review",
+    focus: "High-impact failure modes, surprising interactions across chapters, rollback safety, concurrency, idempotency, and data corruption risks.",
+    instructions: "Act like a validation critic. Try to falsify the patch, but only promote issues that remain concrete after checking changed lines and adjacent context.",
+  },
+];
+
+const SKILL_PRESETS: Record<AiReviewSkillPreset, string[]> = {
+  minimal: ["correctness"],
+  balanced: ["correctness", "contracts", "tests", "silent-failures", "security", "comments"],
+  security: ["security", "silent-failures", "contracts", "tests"],
+  exhaustive: ["correctness", "contracts", "tests", "silent-failures", "security", "comments", "adversarial"],
+};
+
 type RawConfig = {
   aiReview?: RawAiReviewConfig;
 } | RawAiReviewConfig;
@@ -74,6 +131,8 @@ interface RawAiReviewConfig {
   maxChapterPatchChars?: unknown;
   maxFindingsPerChapter?: unknown;
   phases?: Partial<Record<AiReviewPhase, RawPhaseConfig>>;
+  skills?: unknown;
+  reviewSkills?: unknown;
 }
 
 interface RawPhaseConfig {
@@ -95,6 +154,15 @@ interface NormalizedConfig {
   maxChapterPatchChars?: number;
   maxFindingsPerChapter?: number;
   phases: Partial<Record<AiReviewPhase, NormalizedPhaseConfig>>;
+  skills?: NormalizedSkillsConfig;
+}
+
+interface NormalizedSkillsConfig {
+  preset?: AiReviewSkillPreset;
+  enabled?: string[];
+  disabled?: string[];
+  custom?: AiReviewSkillDefinition[];
+  additionalInstructions?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -103,6 +171,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isDepth(value: unknown): value is AiReviewDepth {
   return value === "fast" || value === "standard" || value === "deep";
+}
+
+function isSkillPreset(value: unknown): value is AiReviewSkillPreset {
+  return value === "minimal" || value === "balanced" || value === "security" || value === "exhaustive";
 }
 
 function isReasoning(value: unknown): value is "off" | ThinkingLevel {
@@ -124,10 +196,76 @@ function configBody(raw: RawConfig): RawAiReviewConfig {
   return raw as RawAiReviewConfig;
 }
 
+function cleanString(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return undefined;
+  return trimmed.length > maxLength ? trimmed.slice(0, maxLength).trim() : trimmed;
+}
+
+function cleanSkillId(value: unknown): string | undefined {
+  const trimmed = cleanString(value, 80);
+  if (!trimmed) return undefined;
+  return /^[a-z0-9][a-z0-9._-]*$/i.test(trimmed) ? trimmed.toLowerCase() : undefined;
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const values = value.map(cleanSkillId).filter((item): item is string => item != null);
+  return values.length > 0 ? [...new Set(values)] : [];
+}
+
+function normalizeCustomSkills(value: unknown): AiReviewSkillDefinition[] {
+  const rawItems = Array.isArray(value)
+    ? value
+    : isRecord(value)
+      ? Object.entries(value).map(([id, instructions]) => ({ id, instructions }))
+      : [];
+  const skills: AiReviewSkillDefinition[] = [];
+  const seen = new Set<string>();
+
+  for (const item of rawItems.slice(0, 12)) {
+    if (!isRecord(item)) continue;
+    const id = cleanSkillId(item.id);
+    const instructions = cleanString(item.instructions, 4_000);
+    if (!id || !instructions || seen.has(id)) continue;
+    seen.add(id);
+    skills.push({
+      id,
+      title: cleanString(item.title, 120) ?? id,
+      focus: cleanString(item.focus, 500) ?? "Custom review focus.",
+      instructions,
+    });
+  }
+
+  return skills;
+}
+
+function normalizeSkillsConfig(value: unknown): NormalizedSkillsConfig | undefined {
+  if (value == null) return undefined;
+  if (Array.isArray(value)) {
+    return { enabled: stringArray(value) ?? [] };
+  }
+  if (!isRecord(value)) return undefined;
+  const enabled = stringArray(value.enabled);
+  const disabled = stringArray(value.disabled);
+  const custom = normalizeCustomSkills(value.custom);
+  const additionalInstructions = cleanString(value.additionalInstructions, 4_000);
+
+  return {
+    ...(isSkillPreset(value.preset) ? { preset: value.preset } : {}),
+    ...(enabled ? { enabled } : {}),
+    ...(disabled ? { disabled } : {}),
+    ...(custom.length > 0 ? { custom } : {}),
+    ...(additionalInstructions ? { additionalInstructions } : {}),
+  };
+}
+
 function normalizeConfig(raw: RawConfig): NormalizedConfig {
   const body = configBody(raw);
   const phases: Partial<Record<AiReviewPhase, NormalizedPhaseConfig>> = {};
   const rawPhases = isRecord(body.phases) ? body.phases : {};
+  const skills = normalizeSkillsConfig(body.skills ?? body.reviewSkills);
 
   for (const phase of PHASES) {
     const rawPhase = rawPhases[phase];
@@ -146,6 +284,26 @@ function normalizeConfig(raw: RawConfig): NormalizedConfig {
     maxChapterPatchChars: positiveInteger(body.maxChapterPatchChars),
     maxFindingsPerChapter: positiveInteger(body.maxFindingsPerChapter),
     phases,
+    ...(skills ? { skills } : {}),
+  };
+}
+
+function mergeSkillsConfig(left: NormalizedSkillsConfig | undefined, right: NormalizedSkillsConfig | undefined): NormalizedSkillsConfig | undefined {
+  if (!left) return right;
+  if (!right) return left;
+  const resetToPreset = right.preset != null && right.enabled == null;
+  const enabled = right.enabled ?? (resetToPreset ? undefined : left.enabled);
+  const disabled = right.disabled ?? (resetToPreset ? undefined : left.disabled);
+  const custom = [
+    ...(left.custom ?? []),
+    ...(right.custom ?? []),
+  ];
+  return {
+    ...(right.preset ?? left.preset ? { preset: right.preset ?? left.preset } : {}),
+    ...(enabled ? { enabled } : {}),
+    ...(disabled ? { disabled } : {}),
+    ...(custom.length > 0 ? { custom } : {}),
+    ...(right.additionalInstructions ?? left.additionalInstructions ? { additionalInstructions: right.additionalInstructions ?? left.additionalInstructions } : {}),
   };
 }
 
@@ -158,6 +316,7 @@ function mergeConfig(left: NormalizedConfig, right: NormalizedConfig): Normalize
     },
   ])) as Partial<Record<AiReviewPhase, NormalizedPhaseConfig>>;
 
+  const skills = mergeSkillsConfig(left.skills, right.skills);
   return {
     ...(left.depth ? { depth: left.depth } : {}),
     ...(right.depth ? { depth: right.depth } : {}),
@@ -166,6 +325,40 @@ function mergeConfig(left: NormalizedConfig, right: NormalizedConfig): Normalize
     maxChapterPatchChars: right.maxChapterPatchChars ?? left.maxChapterPatchChars,
     maxFindingsPerChapter: right.maxFindingsPerChapter ?? left.maxFindingsPerChapter,
     phases: mergedPhases,
+    ...(skills ? { skills } : {}),
+  };
+}
+
+function resolveSkillsConfig(config: NormalizedSkillsConfig | undefined, warnings: string[]): AiReviewResolvedSkillsConfig {
+  const preset = config?.preset ?? DEFAULT_SKILL_PRESET;
+  const builtIns = new Map(BUILT_IN_REVIEW_SKILLS.map((skill) => [skill.id, skill] as const));
+  const custom = new Map((config?.custom ?? []).map((skill) => [skill.id, skill] as const));
+  const registry = new Map<string, AiReviewSkillDefinition>([...builtIns, ...custom]);
+  const disabled = new Set(config?.disabled ?? []);
+  const requested = config?.enabled ?? SKILL_PRESETS[preset];
+  const enabled: AiReviewSkillDefinition[] = [];
+
+  for (const id of requested) {
+    if (disabled.has(id)) continue;
+    const skill = registry.get(id);
+    if (!skill) {
+      warnings.push(`AI review skill "${id}" was not found and will be ignored.`);
+      continue;
+    }
+    if (enabled.some((item) => item.id === skill.id)) continue;
+    enabled.push(skill);
+  }
+
+  if (enabled.length === 0) {
+    warnings.push("AI review skills resolved to an empty set; using the correctness skill.");
+    enabled.push(BUILT_IN_REVIEW_SKILLS[0]!);
+  }
+
+  return {
+    preset,
+    enabled,
+    disabled: [...disabled],
+    additionalInstructions: config?.additionalInstructions ?? null,
   };
 }
 
@@ -287,6 +480,7 @@ export async function loadAiReviewRuntimeConfig(ctx: ExtensionCommandContext, da
   });
   const phases = Object.fromEntries(resolvedPhases.map(({ phase, runtime }) => [phase, runtime])) as AiReviewRuntimeConfig["phases"];
   const publicPhases = Object.fromEntries(resolvedPhases.map(({ phase, resolved }) => [phase, resolved])) as AiReviewResolvedConfig["phases"];
+  const skills = resolveSkillsConfig(config.skills, warnings);
 
   const parallelChapterReviews = clamp(config.parallelChapterReviews ?? limits.parallelChapterReviews, 1, 12);
   const maxPatchCharsPerFile = clamp(config.maxPatchCharsPerFile ?? limits.maxPatchCharsPerFile, 1_000, 200_000);
@@ -300,6 +494,7 @@ export async function loadAiReviewRuntimeConfig(ctx: ExtensionCommandContext, da
     maxChapterPatchChars,
     maxFindingsPerChapter,
     phases,
+    skills,
     public: {
       depth,
       parallelChapterReviews,
@@ -309,6 +504,7 @@ export async function loadAiReviewRuntimeConfig(ctx: ExtensionCommandContext, da
       configPaths: loaded.paths,
       warnings: [...new Set(warnings)],
       phases: publicPhases,
+      skills,
     },
   };
 }

@@ -117,3 +117,77 @@ test("AI review config disables missing xhigh reasoning support with a warning",
   assert.equal(config.public.phases.validation.reasoning, "off");
   assert.match(config.public.warnings.join("\n"), /does not support that level/);
 });
+
+test("AI review config resolves custom composable review skills safely", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "pi-review-config-"));
+  const envPath = join(repoRoot, "override.json");
+  await writeFile(envPath, JSON.stringify({
+    aiReview: {
+      skills: {
+        enabled: ["security", "team-qa", "missing-skill"],
+        disabled: ["security"],
+        custom: [{
+          id: "team-qa",
+          title: "Team QA contracts",
+          focus: "Headout QA workflow assumptions.",
+          instructions: "Check QA label lifecycle and benchmark data compatibility before suggesting approval.",
+        }],
+        additionalInstructions: "Prefer fewer, higher-confidence comments.",
+      },
+    },
+  }));
+
+  const previousEnv = process.env.PI_DIFF_REVIEW_COCKPIT_CONFIG;
+  process.env.PI_DIFF_REVIEW_COCKPIT_CONFIG = envPath;
+  try {
+    const active = model("openai", "active");
+    const config = await loadAiReviewRuntimeConfig(context(active, [active]), dataset(repoRoot));
+
+    assert.deepEqual(config.public.skills.enabled.map((skill) => skill.id), ["team-qa"]);
+    assert.equal(config.public.skills.enabled[0]?.title, "Team QA contracts");
+    assert.deepEqual(config.public.skills.disabled, ["security"]);
+    assert.equal(config.public.skills.additionalInstructions, "Prefer fewer, higher-confidence comments.");
+    assert.match(config.public.warnings.join("\n"), /missing-skill/);
+  } finally {
+    if (previousEnv == null) {
+      delete process.env.PI_DIFF_REVIEW_COCKPIT_CONFIG;
+    } else {
+      process.env.PI_DIFF_REVIEW_COCKPIT_CONFIG = previousEnv;
+    }
+  }
+});
+
+test("AI review skill preset can reset an earlier explicit skill list", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "pi-review-config-"));
+  const envPath = join(repoRoot, "override.json");
+  await writeFile(join(repoRoot, "pi-diff-review-cockpit.config.json"), JSON.stringify({
+    aiReview: {
+      skills: {
+        enabled: ["security", "tests"],
+      },
+    },
+  }));
+  await writeFile(envPath, JSON.stringify({
+    aiReview: {
+      skills: {
+        preset: "minimal",
+      },
+    },
+  }));
+
+  const previousEnv = process.env.PI_DIFF_REVIEW_COCKPIT_CONFIG;
+  process.env.PI_DIFF_REVIEW_COCKPIT_CONFIG = envPath;
+  try {
+    const active = model("openai", "active");
+    const config = await loadAiReviewRuntimeConfig(context(active, [active]), dataset(repoRoot));
+
+    assert.equal(config.public.skills.preset, "minimal");
+    assert.deepEqual(config.public.skills.enabled.map((skill) => skill.id), ["correctness"]);
+  } finally {
+    if (previousEnv == null) {
+      delete process.env.PI_DIFF_REVIEW_COCKPIT_CONFIG;
+    } else {
+      process.env.PI_DIFF_REVIEW_COCKPIT_CONFIG = previousEnv;
+    }
+  }
+});

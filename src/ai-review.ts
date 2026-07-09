@@ -20,7 +20,7 @@ const SCOUT_SYSTEM_PROMPT = `You are a PI review scout for a code review cockpit
 
 Return strict JSON only: {"summary":"..."}.
 
-Summarize the highest-value parallel review strategy from the provided PR metadata and chapter map. Include priority areas, context each chapter agent should care about, and likely test areas. Do not invent bugs. Keep it concise.`;
+Summarize the highest-value parallel review strategy from the provided PR metadata, chapter map, and active review skills. Include priority areas, context each chapter agent should care about, and likely test areas. Do not invent bugs. Keep it concise.`;
 
 const CHAPTER_REVIEW_SYSTEM_PROMPT = `You are a PI review subagent reviewing one chapter of a diff.
 
@@ -30,6 +30,8 @@ Return strict JSON only. Do not wrap the response in Markdown. The JSON object m
 - "approvalPacket": a review summary object
 
 Only create findings for concrete, actionable concerns supported by the provided diff patches. Prefer no finding over a speculative finding. Do not invent files, file ids, paths, or line numbers.
+
+Use the active reviewSkills from the input as the rubric for this chapter. If custom or additional skill instructions are present, apply them only when they are supported by the supplied diff patches. Do not report generic best practices that are not connected to changed lines.
 
 You are reviewing as one subagent in a larger cycle: scout -> chapter agents -> validation critic -> synthesis. Your findings are candidates and must be evidence-backed enough to survive validation.
 
@@ -62,7 +64,8 @@ Each decision must contain:
 - explanation: optional corrected explanation
 - suggestedComment: optional corrected ready-to-post reviewer comment
 
-Keep only findings that are concrete, actionable, tied to a real changed line or file in the input, and supported by the candidate's own evidence. Drop speculative, duplicate, vague, or unverifiable claims.`;
+Keep only findings that are concrete, actionable, tied to a real changed line or file in the input, and supported by the candidate's own evidence. Drop speculative, duplicate, vague, or unverifiable claims.
+Use the active reviewSkills from the input as the validation rubric. Drop findings that do not satisfy at least one enabled skill or that apply a disabled/custom skill without evidence.`;
 
 const SYNTHESIS_SYSTEM_PROMPT = `You are synthesizing a PI diff review after scout, chapter subagents, and validation.
 
@@ -91,6 +94,20 @@ export interface RunAiReviewOptions {
 function truncateText(value: string, maxChars: number): string {
   if (value.length <= maxChars) return value;
   return `${value.slice(0, maxChars)}\n\n[truncated ${value.length - maxChars} character(s)]`;
+}
+
+function reviewSkillsForInput(config: AiReviewRuntimeConfig): Record<string, unknown> {
+  return {
+    preset: config.skills.preset,
+    enabled: config.skills.enabled.map((skill) => ({
+      id: skill.id,
+      title: skill.title,
+      focus: skill.focus,
+      instructions: skill.instructions,
+    })),
+    disabled: config.skills.disabled,
+    additionalInstructions: config.skills.additionalInstructions,
+  };
 }
 
 function emptyProgress(analysis: ReviewAnalysis, config?: AiReviewRuntimeConfig): AiReviewProgress {
@@ -192,6 +209,7 @@ function buildScoutInput(dataset: ReviewDataset, analysis: ReviewAnalysis, confi
   return JSON.stringify({
     source: dataset.source,
     reviewDepth: config.depth,
+    reviewSkills: reviewSkillsForInput(config),
     maxFindingsPerChapter: config.maxFindingsPerChapter,
     chapters: analysis.chapters.map((chapter) => ({
       id: chapter.id,
@@ -303,6 +321,7 @@ async function buildChapterReviewInput(options: {
   return JSON.stringify({
     source: options.dataset.source,
     reviewDepth: options.config.depth,
+    reviewSkills: reviewSkillsForInput(options.config),
     maxFindings: options.config.maxFindingsPerChapter,
     scoutSummary: options.scoutSummary,
     chapter: {
@@ -498,10 +517,11 @@ export function applyValidationDecisions(analysis: ReviewAnalysis, decisions: Ai
   return rebuildFindingReferences(analysis, findings);
 }
 
-function buildValidationInput(dataset: ReviewDataset, analysis: ReviewAnalysis, scoutSummary: string): string {
+function buildValidationInput(dataset: ReviewDataset, analysis: ReviewAnalysis, scoutSummary: string, config: AiReviewRuntimeConfig): string {
   return JSON.stringify({
     source: dataset.source,
     scoutSummary,
+    reviewSkills: reviewSkillsForInput(config),
     coverage: analysis.coverage,
     chapters: analysis.chapters.map((chapter) => ({
       id: chapter.id,
@@ -530,7 +550,7 @@ function buildValidationInput(dataset: ReviewDataset, analysis: ReviewAnalysis, 
 async function validateFindings(ctx: ExtensionCommandContext, dataset: ReviewDataset, analysis: ReviewAnalysis, scoutSummary: string, config: AiReviewRuntimeConfig): Promise<ReviewAnalysis> {
   if (analysis.findings.length === 0) return analysis;
   const findingIds = new Set(analysis.findings.map((finding) => finding.id));
-  const text = await completeTextJson(ctx, config, "validation", VALIDATION_SYSTEM_PROMPT, buildValidationInput(dataset, analysis, scoutSummary));
+  const text = await completeTextJson(ctx, config, "validation", VALIDATION_SYSTEM_PROMPT, buildValidationInput(dataset, analysis, scoutSummary, config));
   const decisions = normalizeValidationDecisionsJson(text, findingIds);
   return refreshApprovalPacketForFindings(applyValidationDecisions(analysis, decisions), scoutSummary);
 }
@@ -556,6 +576,7 @@ function buildSynthesisInput(dataset: ReviewDataset, analysis: ReviewAnalysis, s
   return JSON.stringify({
     source: dataset.source,
     reviewDepth: config.depth,
+    reviewSkills: reviewSkillsForInput(config),
     scoutSummary,
     failedChapterCount,
     coverage: analysis.coverage,

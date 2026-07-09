@@ -82,12 +82,37 @@ Later files override earlier files. Example:
     "depth": "deep",
     "parallelChapterReviews": 2,
     "maxFindingsPerChapter": 12,
+    "skills": {
+      "preset": "balanced",
+      "enabled": ["correctness", "contracts", "tests", "silent-failures", "security", "comments"],
+      "custom": [
+        {
+          "id": "team-qa",
+          "title": "Team QA contracts",
+          "focus": "Headout QA workflow assumptions.",
+          "instructions": "Check QA label lifecycle and benchmark data compatibility before suggesting approval."
+        }
+      ],
+      "additionalInstructions": "Prefer fewer, higher-confidence comments."
+    },
     "phases": {
       "scout": { "reasoning": "medium" },
       "chapter": { "provider": "openai-codex", "model": "your-model-id", "reasoning": "high" },
       "validation": { "reasoning": "high" },
       "synthesis": { "reasoning": "high" }
     }
+  }
+}
+```
+
+Skill presets are `minimal`, `balanced`, `security`, and `exhaustive`. If `skills` is omitted, `balanced` is used. Unknown skills are ignored with a warning; if a config accidentally disables every skill, review falls back to `correctness`.
+
+For a short explicit skill list, this is also accepted:
+
+```json
+{
+  "aiReview": {
+    "skills": ["correctness", "security", "tests"]
   }
 }
 ```
