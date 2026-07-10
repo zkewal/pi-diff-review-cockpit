@@ -20,6 +20,7 @@ import { createCommentEditorSavePolicy } from "./comment-editor-save-policy.js";
 import { createCommentEditBuffer } from "./comment-edit-buffer.js";
 import { replaceDiffEditorModels } from "./model-lifecycle.js";
 import { applyAuthoritativePublishedCommentState } from "./publish-comment-state.js";
+import { expandDisclosure, isDisclosureExpanded, toggleDisclosure } from "./review-disclosure-state.js";
 import { isFileCanvasActive } from "./review-navigation-state.js";
 import { createSessionSaveScheduler } from "./session-save-scheduler.js";
 
@@ -242,7 +243,7 @@ const state = {
   pendingFindingFocus: null,
   editingCommentIds: new Set(),
   collapsedCommentIds: new Set(),
-  expandedFindingIds: new Set(),
+  collapsedFindingIds: new Set(),
   dismissedFindingLocationKeys: stringSetOrEmpty(restoredSession.dismissedFindingLocationKeys),
   publishRequestId: null,
   aiReviewCompleted: restoredAiReviewCompleted,
@@ -1648,7 +1649,7 @@ function pulseInlineFinding(findingId, location) {
 function isAiFindingExpanded(findingId) {
   return getReviewFinding(findingId) != null
     && (state.findingStatuses[findingId] || "new") === "new"
-    && (state.expandedFindingIds.has(findingId) || isAiFindingActive(findingId));
+    && isDisclosureExpanded(state.collapsedFindingIds, findingId);
 }
 
 function isAiFindingActive(findingId) {
@@ -1684,13 +1685,14 @@ function toggleInlineFindingAtLine(side, line) {
   const entry = findInlineFindingAtLine(side, line);
   if (!entry) return false;
 
-  state.expandedFindingIds.add(entry.finding.id);
-  state.activeInsight = { type: "finding", id: entry.finding.id };
+  toggleDisclosure(state.collapsedFindingIds, entry.finding.id);
+  const expanded = isAiFindingExpanded(entry.finding.id);
+  state.activeInsight = expanded ? { type: "finding", id: entry.finding.id } : { type: "default", id: null };
   syncViewZones();
   updateDecorations();
   renderTree();
   focusDiffLine(side, line, line);
-  requestAnimationFrame(() => pulseInlineFinding(entry.finding.id, entry.location));
+  if (expanded) requestAnimationFrame(() => pulseInlineFinding(entry.finding.id, entry.location));
   return true;
 }
 
@@ -1719,7 +1721,7 @@ function applyPendingFindingFocus() {
   const focused = focusDiffLine(pending.side, pending.line, pending.endLine);
   if (!focused) return false;
   state.pendingFindingFocus = null;
-  if (pending.findingId) state.expandedFindingIds.add(pending.findingId);
+  if (pending.findingId) expandDisclosure(state.collapsedFindingIds, pending.findingId);
   syncViewZones();
   updateDecorations();
   pulseInlineFinding(pending.findingId, pending);
@@ -2213,7 +2215,7 @@ function firstExistingFindingLocation(finding) {
 function openFirstFindingLocation(finding) {
   const location = firstExistingFindingLocation(finding);
   if (location) {
-    state.expandedFindingIds.add(finding.id);
+    expandDisclosure(state.collapsedFindingIds, finding.id);
     openFindingLocation(location, { findingId: finding.id });
   }
 }
@@ -2862,7 +2864,7 @@ function createDraftCommentFromFinding(finding, location) {
   }
   state.findingStatuses[finding.id] = "accepted-comment";
   delete state.acceptedFindingComments[finding.id];
-  state.expandedFindingIds.delete(finding.id);
+  expandDisclosure(state.collapsedFindingIds, finding.id);
   state.collapsedCommentIds.delete(comment.id);
   commentEditBuffer.begin(comment);
   state.editingCommentIds.add(comment.id);
@@ -2874,7 +2876,7 @@ function createDraftCommentFromFinding(finding, location) {
 function dismissFinding(finding) {
   state.findingStatuses[finding.id] = "dismissed";
   delete state.acceptedFindingComments[finding.id];
-  state.expandedFindingIds.delete(finding.id);
+  expandDisclosure(state.collapsedFindingIds, finding.id);
   if (state.activeInsight.type === "finding" && state.activeInsight.id === finding.id) {
     state.activeInsight = { type: "default", id: null };
   }
@@ -2883,7 +2885,7 @@ function dismissFinding(finding) {
 
 function dismissFindingLocation(finding, location) {
   state.dismissedFindingLocationKeys.add(findingLocationKey(finding, location));
-  state.expandedFindingIds.delete(finding.id);
+  expandDisclosure(state.collapsedFindingIds, finding.id);
   if (!hasOpenInlineFindingLocations(finding)) {
     state.findingStatuses[finding.id] = "dismissed";
     delete state.acceptedFindingComments[finding.id];
@@ -2978,11 +2980,7 @@ function toggleInlineCommentAtLine(side, line) {
   const comment = findInlineCommentAtLine(side, line);
   if (!comment) return false;
 
-  if (state.collapsedCommentIds.has(comment.id)) {
-    state.collapsedCommentIds.delete(comment.id);
-  } else {
-    state.collapsedCommentIds.add(comment.id);
-  }
+  toggleDisclosure(state.collapsedCommentIds, comment.id);
   state.activeInsight = { type: "comment", id: comment.id };
   syncViewZones();
   updateDecorations();
@@ -3649,7 +3647,7 @@ function applyAiReviewAnalysis(analysis) {
   state.acceptedFindingComments = Object.fromEntries(
     Object.entries(previousAcceptedComments).filter(([findingId]) => findingIds.has(findingId)),
   );
-  state.expandedFindingIds = new Set([...state.expandedFindingIds].filter((findingId) => findingIds.has(findingId)));
+  state.collapsedFindingIds = new Set([...state.collapsedFindingIds].filter((findingId) => findingIds.has(findingId)));
   state.dismissedFindingLocationKeys = new Set([...state.dismissedFindingLocationKeys].filter((key) => findingIds.has(key.split(":")[0])));
 
   if (state.activeInsight.type === "finding" && !findingIds.has(state.activeInsight.id)) {
