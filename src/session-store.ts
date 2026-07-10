@@ -774,12 +774,81 @@ function isPublishIntent(value: unknown): value is GitHubReviewPublishIntent {
   return value.status === "confirmed" ? value.receipt != null : value.receipt == null;
 }
 
+function isGitHubContextComment(value: unknown): boolean {
+  return isRecord(value)
+    && hasOnlyKeys(value, ["id", "author", "body", "createdAt", "url"])
+    && isNonemptyString(value.id)
+    && typeof value.author === "string"
+    && typeof value.body === "string"
+    && isNonemptyString(value.createdAt)
+    && isNonemptyString(value.url);
+}
+
+function hasUniqueRecordIds(values: unknown[], predicate: (value: unknown) => boolean): boolean {
+  if (!values.every(predicate)) return false;
+  const ids = values.map((value) => (value as { id: string }).id);
+  return new Set(ids).size === ids.length;
+}
+
+function isGitHubReviewSummary(value: unknown): boolean {
+  return isRecord(value)
+    && hasOnlyKeys(value, ["id", "author", "body", "createdAt", "url", "state"])
+    && isGitHubContextComment({
+      id: value.id,
+      author: value.author,
+      body: value.body,
+      createdAt: value.createdAt,
+      url: value.url,
+    })
+    && (value.state === "APPROVED"
+      || value.state === "CHANGES_REQUESTED"
+      || value.state === "COMMENTED"
+      || value.state === "DISMISSED"
+      || value.state === "PENDING");
+}
+
+function isGitHubReviewThread(value: unknown): boolean {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ["id", "isResolved", "isOutdated", "path", "side", "line", "originalLine", "comments"])
+    || !isNonemptyString(value.id)
+    || typeof value.isResolved !== "boolean"
+    || typeof value.isOutdated !== "boolean"
+    || !isNonemptyString(value.path)
+    || (value.side !== null && value.side !== "original" && value.side !== "modified")
+    || (value.line !== null && !isPositiveInteger(value.line))
+    || (value.originalLine !== null && !isPositiveInteger(value.originalLine))
+    || !Array.isArray(value.comments)) return false;
+  return hasUniqueRecordIds(value.comments, isGitHubContextComment);
+}
+
+export function isGitHubReviewContextSnapshot(value: unknown): boolean {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, [
+      "owner", "repo", "pullNumber", "reviewedHeadSha", "remoteHeadSha", "fetchedAt",
+      "conversationComments", "reviews", "threads", "diagnostics",
+    ])
+    || !isNonemptyString(value.owner)
+    || !isNonemptyString(value.repo)
+    || !isPositiveInteger(value.pullNumber)
+    || !isNonemptyString(value.reviewedHeadSha)
+    || !isNonemptyString(value.remoteHeadSha)
+    || !isNonemptyString(value.fetchedAt)
+    || !Array.isArray(value.conversationComments)
+    || !Array.isArray(value.reviews)
+    || !Array.isArray(value.threads)
+    || !Array.isArray(value.diagnostics)
+    || !value.diagnostics.every((item) => typeof item === "string")) return false;
+  return hasUniqueRecordIds(value.conversationComments, isGitHubContextComment)
+    && hasUniqueRecordIds(value.reviews, isGitHubReviewSummary)
+    && hasUniqueRecordIds(value.threads, isGitHubReviewThread);
+}
+
 function isReviewSnapshot(value: unknown): value is ReviewSessionSnapshot {
   if (!isRecord(value) || !hasOnlyKeys(value, [
     "analysis", "overallComment", "comments", "acceptedFindingComments", "findingStatuses",
     "reviewedFiles", "reviewedChapters", "activeFileId", "activeSidebarTab", "currentScope",
     "selectedCommitSha", "activeInsight", "hideUnchanged", "wrapLines", "sidebarCollapsed",
-    "aiReviewCompleted", "aiReviewStatus", "dismissedFindingLocationKeys", "githubPublishIntent",
+    "aiReviewCompleted", "aiReviewStatus", "dismissedFindingLocationKeys", "githubPublishIntent", "githubContext",
     "updatedAt",
   ])) return false;
   if (value.analysis != null && !isReviewAnalysis(value.analysis)) return false;
@@ -820,6 +889,7 @@ function isReviewSnapshot(value: unknown): value is ReviewSessionSnapshot {
     && value.aiReviewStatus !== "failed") return false;
   if (value.dismissedFindingLocationKeys != null && !hasUniqueStrings(value.dismissedFindingLocationKeys)) return false;
   if (value.githubPublishIntent != null && !isPublishIntent(value.githubPublishIntent)) return false;
+  if (value.githubContext != null && !isGitHubReviewContextSnapshot(value.githubContext)) return false;
   return value.updatedAt == null || isNonemptyString(value.updatedAt);
 }
 

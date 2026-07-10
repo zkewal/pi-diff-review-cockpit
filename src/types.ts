@@ -143,6 +143,42 @@ export interface ReviewRunAiReviewPayload {
 
 export type ReviewSessionRestoreStatus = "new" | "restored" | "stale" | "refreshed";
 
+export interface GitHubContextComment {
+  id: string;
+  author: string;
+  body: string;
+  createdAt: string;
+  url: string;
+}
+
+export interface GitHubReviewSummary extends GitHubContextComment {
+  state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" | "PENDING";
+}
+
+export interface GitHubReviewThread {
+  id: string;
+  isResolved: boolean;
+  isOutdated: boolean;
+  path: string;
+  side: "original" | "modified" | null;
+  line: number | null;
+  originalLine: number | null;
+  comments: GitHubContextComment[];
+}
+
+export interface GitHubReviewContextSnapshot {
+  owner: string;
+  repo: string;
+  pullNumber: number;
+  reviewedHeadSha: string;
+  remoteHeadSha: string;
+  fetchedAt: string;
+  conversationComments: GitHubContextComment[];
+  reviews: GitHubReviewSummary[];
+  threads: GitHubReviewThread[];
+  diagnostics: string[];
+}
+
 export interface ReviewActiveInsightState {
   type: "default" | "chapter" | "finding" | "comment";
   id: string | null;
@@ -168,12 +204,13 @@ export interface ReviewSessionSnapshot {
   aiReviewStatus?: AiReviewRunStatus;
   dismissedFindingLocationKeys?: string[];
   githubPublishIntent?: GitHubReviewPublishIntent;
+  githubContext?: GitHubReviewContextSnapshot;
   updatedAt?: string;
 }
 
 export type ReviewRendererSessionSnapshot = Omit<
   ReviewSessionSnapshot,
-  "analysis" | "githubPublishIntent"
+  "analysis" | "githubPublishIntent" | "githubContext"
 >;
 
 export interface ReviewCheckpointSessionPayload {

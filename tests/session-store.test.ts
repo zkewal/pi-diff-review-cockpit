@@ -107,6 +107,42 @@ function stagedComment(id = "submitted"): DiffReviewComment {
   };
 }
 
+function githubContextSnapshot() {
+  return {
+    owner: "headout",
+    repo: "magellan",
+    pullNumber: 646,
+    reviewedHeadSha: "head-immutable-sha",
+    remoteHeadSha: "head-immutable-sha",
+    fetchedAt: "2026-07-10T12:00:00Z",
+    conversationComments: [{
+      id: "conversation-1",
+      author: "reviewer",
+      body: "General context.",
+      createdAt: "2026-07-10T10:00:00Z",
+      url: "https://github.com/headout/magellan/pull/646#issuecomment-1",
+    }],
+    reviews: [],
+    threads: [{
+      id: "thread-1",
+      isResolved: false,
+      isOutdated: false,
+      path: "src/app/api/qa_api.py",
+      side: "modified",
+      line: 1,
+      originalLine: null,
+      comments: [{
+        id: "thread-comment-1",
+        author: "reviewer",
+        body: "Please guard this path.",
+        createdAt: "2026-07-10T10:05:00Z",
+        url: "https://github.com/headout/magellan/pull/646#discussion_r1",
+      }],
+    }],
+    diagnostics: [],
+  };
+}
+
 function createPublishHarness(options: {
   snapshot?: ReviewSessionSnapshot;
   initialIntent?: Record<string, unknown> | null;
@@ -328,6 +364,46 @@ test("session resolution restores cached analysis when fingerprint matches", asy
   assert.equal(resolution.status, "restored");
   assert.equal(resolution.analysis?.message, "cached");
   assert.equal(resolution.snapshot?.overallComment, "remember this");
+});
+
+test("matching sessions persist and restore host-owned GitHub review context", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-review-context-"));
+  const storagePath = join(root, "session.json");
+  const reviewDataset = dataset(["src/app/api/qa_api.py"]);
+  const fingerprint = await buildReviewDiffFingerprint(mockPi() as never, reviewDataset, async (file) => `patch:${file.path}`);
+  const analysis = createFallbackAnalysis(reviewDataset, "cached");
+  const context = githubContextSnapshot();
+  const record = buildReviewSessionRecord({
+    sourceKey: fingerprint.sourceKey,
+    fingerprint,
+    analysis,
+    snapshot: { analysis, githubContext: context } as never,
+  });
+  await saveReviewSession(storagePath, record);
+  const stored = await loadReviewSession(storagePath);
+  assert.ok(stored);
+
+  const resolution = resolveReviewSession({ stored, sourceKey: fingerprint.sourceKey, currentFingerprint: fingerprint, dataset: reviewDataset });
+
+  assert.deepEqual((resolution.snapshot as Record<string, unknown>)?.githubContext, context);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("stale sessions drop cached GitHub review context", async () => {
+  const reviewDataset = dataset(["src/app/api/qa_api.py"]);
+  const oldFingerprint = await buildReviewDiffFingerprint(mockPi() as never, reviewDataset, async () => "old");
+  const currentFingerprint = await buildReviewDiffFingerprint(mockPi() as never, reviewDataset, async () => "new");
+  const analysis = createFallbackAnalysis(reviewDataset, "cached");
+  const stored = buildReviewSessionRecord({
+    sourceKey: oldFingerprint.sourceKey,
+    fingerprint: oldFingerprint,
+    analysis,
+    snapshot: { analysis, githubContext: githubContextSnapshot() } as never,
+  });
+
+  const resolution = resolveReviewSession({ stored, sourceKey: currentFingerprint.sourceKey, currentFingerprint, dataset: reviewDataset });
+
+  assert.equal((resolution.snapshot as Record<string, unknown>)?.githubContext, undefined);
 });
 
 test("session resolution drops changed-file state when fingerprint changes", async () => {

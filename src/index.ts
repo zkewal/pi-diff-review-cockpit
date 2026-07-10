@@ -101,7 +101,13 @@ export function mergeRendererSessionCheckpoint(
   current: ReviewSessionSnapshot | null | undefined,
   checkpoint: ReviewRendererSessionSnapshot,
 ): ReviewSessionSnapshot {
-  return { ...(current ?? {}), ...checkpoint };
+  const {
+    analysis: _analysis,
+    githubPublishIntent: _githubPublishIntent,
+    githubContext: _githubContext,
+    ...rendererOwned
+  } = checkpoint as ReviewSessionSnapshot;
+  return { ...(current ?? {}), ...rendererOwned };
 }
 
 type WaitingEditorResult = "escape" | "window-settled";

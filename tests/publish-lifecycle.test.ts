@@ -224,19 +224,23 @@ test("renderer checkpoints preserve host-owned session state while replacing lat
   if (typeof mergeCheckpoint !== "function") return;
   const hostAnalysis = { status: "ready", marker: "host-owned" };
   const publishIntent = { status: "ambiguous", marker: "host-owned" };
+  const githubContext = { owner: "headout", repo: "magellan", marker: "host-owned" };
 
   const merged = (mergeCheckpoint as (current: Record<string, unknown>, checkpoint: Record<string, unknown>) => Record<string, unknown>)({
     analysis: hostAnalysis,
     githubPublishIntent: publishIntent,
+    githubContext,
     overallComment: "old",
     comments: [{ id: "comment", body: "old" }],
   }, {
     overallComment: "latest",
     comments: [{ id: "comment", body: "latest typed text" }],
+    githubContext: { owner: "attacker", marker: "renderer-controlled" },
   });
 
   assert.equal(merged.analysis, hostAnalysis);
   assert.equal(merged.githubPublishIntent, publishIntent);
+  assert.equal(merged.githubContext, githubContext);
   assert.equal(merged.overallComment, "latest");
   assert.deepEqual(merged.comments, [{ id: "comment", body: "latest typed text" }]);
 });
