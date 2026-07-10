@@ -23,6 +23,21 @@ function model(provider: string, id: string, reasoning = true): Model<Api> {
   };
 }
 
+function reasoningModel(provider: string, id: string): Model<Api> {
+  return {
+    ...model(provider, id),
+    thinkingLevelMap: {
+      off: null,
+      minimal: "low",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+    },
+  };
+}
+
 function context(activeModel: Model<Api>, models: Model<Api>[]): ExtensionCommandContext {
   return {
     model: activeModel,
@@ -83,15 +98,15 @@ test("AI review config merges later partial phase config without resetting earli
   const previousEnv = process.env.PI_DIFF_REVIEW_COCKPIT_CONFIG;
   process.env.PI_DIFF_REVIEW_COCKPIT_CONFIG = envPath;
   try {
-    const active = model("openai", "active");
-    const reviewer = model("anthropic", "reviewer");
+    const active = reasoningModel("openai", "active");
+    const reviewer = reasoningModel("anthropic", "reviewer");
     const config = await loadAiReviewRuntimeConfig(context(active, [active, reviewer]), dataset(repoRoot));
 
     assert.equal(config.public.depth, "deep");
     assert.equal(config.public.parallelChapterReviews, 6);
     assert.equal(config.public.phases.chapter.model, "anthropic/reviewer");
     assert.equal(config.public.phases.chapter.reasoning, "low");
-    assert.equal(config.public.phases.validation.reasoning, "high");
+    assert.equal(config.public.phases.validation.reasoning, "max");
   } finally {
     if (previousEnv == null) {
       delete process.env.PI_DIFF_REVIEW_COCKPIT_CONFIG;
@@ -99,6 +114,74 @@ test("AI review config merges later partial phase config without resetting earli
       process.env.PI_DIFF_REVIEW_COCKPIT_CONFIG = previousEnv;
     }
   }
+});
+
+test("AI review defaults route each depth through the appropriate GPT-5.6 categories", async () => {
+  const models = [
+    reasoningModel("openai-codex", "gpt-5.6-luna"),
+    reasoningModel("openai-codex", "gpt-5.6-terra"),
+    reasoningModel("openai-codex", "gpt-5.6-sol"),
+  ];
+  const expected = {
+    fast: {
+      scout: ["openai-codex/gpt-5.6-luna", "low"],
+      chapter: ["openai-codex/gpt-5.6-luna", "medium"],
+      validation: ["openai-codex/gpt-5.6-terra", "high"],
+      synthesis: ["openai-codex/gpt-5.6-luna", "medium"],
+    },
+    standard: {
+      scout: ["openai-codex/gpt-5.6-luna", "medium"],
+      chapter: ["openai-codex/gpt-5.6-terra", "high"],
+      validation: ["openai-codex/gpt-5.6-sol", "xhigh"],
+      synthesis: ["openai-codex/gpt-5.6-terra", "high"],
+    },
+    deep: {
+      scout: ["openai-codex/gpt-5.6-terra", "high"],
+      chapter: ["openai-codex/gpt-5.6-sol", "xhigh"],
+      validation: ["openai-codex/gpt-5.6-sol", "max"],
+      synthesis: ["openai-codex/gpt-5.6-sol", "xhigh"],
+    },
+  } as const;
+
+  for (const depth of ["fast", "standard", "deep"] as const) {
+    const repoRoot = await mkdtemp(join(tmpdir(), "pi-review-config-"));
+    if (depth !== "standard") {
+      await writeFile(join(repoRoot, "pi-diff-review-cockpit.config.json"), JSON.stringify({ aiReview: { depth } }));
+    }
+    const config = await loadAiReviewRuntimeConfig(context(models[0]!, models), dataset(repoRoot));
+    for (const phase of ["scout", "chapter", "validation", "synthesis"] as const) {
+      assert.deepEqual(
+        [config.public.phases[phase].model, config.public.phases[phase].reasoning],
+        expected[depth][phase],
+      );
+    }
+  }
+});
+
+test("AI review phase overrides beat built-in routing and accept max reasoning", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "pi-review-config-"));
+  await writeFile(join(repoRoot, "pi-diff-review-cockpit.config.json"), JSON.stringify({
+    aiReview: { phases: { chapter: { model: "team-reviewer", reasoning: "max" } } },
+  }));
+  const active = reasoningModel("openai-codex", "gpt-5.6-luna");
+  const custom = reasoningModel("anthropic", "team-reviewer");
+  const config = await loadAiReviewRuntimeConfig(context(active, [active, custom]), dataset(repoRoot));
+
+  assert.equal(config.public.phases.chapter.model, "anthropic/team-reviewer");
+  assert.equal(config.public.phases.chapter.reasoning, "max");
+});
+
+test("AI review built-in routes fall back to the active Pi model with warnings", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "pi-review-config-"));
+  const active = reasoningModel("openai-codex", "gpt-5.5");
+  const config = await loadAiReviewRuntimeConfig(context(active, [active]), dataset(repoRoot));
+
+  for (const phase of ["scout", "chapter", "validation", "synthesis"] as const) {
+    assert.equal(config.public.phases[phase].model, "openai-codex/gpt-5.5");
+  }
+  assert.match(config.public.warnings.join("\n"), /gpt-5\.6-luna.*not found/i);
+  assert.match(config.public.warnings.join("\n"), /gpt-5\.6-terra.*not found/i);
+  assert.match(config.public.warnings.join("\n"), /gpt-5\.6-sol.*not found/i);
 });
 
 test("AI review config disables missing xhigh reasoning support with a warning", async () => {

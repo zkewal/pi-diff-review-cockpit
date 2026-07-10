@@ -19,24 +19,30 @@ const CONFIG_ENV_VAR = "PI_DIFF_REVIEW_COCKPIT_CONFIG";
 
 const PHASES: AiReviewPhase[] = ["scout", "chapter", "validation", "synthesis"];
 
-const DEFAULT_REASONING_BY_DEPTH: Record<AiReviewDepth, Record<AiReviewPhase, ThinkingLevel>> = {
+interface DefaultPhaseRoute {
+  provider: string;
+  model: string;
+  reasoning: ThinkingLevel;
+}
+
+const DEFAULT_ROUTE_BY_DEPTH: Record<AiReviewDepth, Record<AiReviewPhase, DefaultPhaseRoute>> = {
   fast: {
-    scout: "minimal",
-    chapter: "low",
-    validation: "low",
-    synthesis: "low",
+    scout: { provider: "openai-codex", model: "gpt-5.6-luna", reasoning: "low" },
+    chapter: { provider: "openai-codex", model: "gpt-5.6-luna", reasoning: "medium" },
+    validation: { provider: "openai-codex", model: "gpt-5.6-terra", reasoning: "high" },
+    synthesis: { provider: "openai-codex", model: "gpt-5.6-luna", reasoning: "medium" },
   },
   standard: {
-    scout: "low",
-    chapter: "medium",
-    validation: "high",
-    synthesis: "high",
+    scout: { provider: "openai-codex", model: "gpt-5.6-luna", reasoning: "medium" },
+    chapter: { provider: "openai-codex", model: "gpt-5.6-terra", reasoning: "high" },
+    validation: { provider: "openai-codex", model: "gpt-5.6-sol", reasoning: "xhigh" },
+    synthesis: { provider: "openai-codex", model: "gpt-5.6-terra", reasoning: "high" },
   },
   deep: {
-    scout: "medium",
-    chapter: "high",
-    validation: "high",
-    synthesis: "high",
+    scout: { provider: "openai-codex", model: "gpt-5.6-terra", reasoning: "high" },
+    chapter: { provider: "openai-codex", model: "gpt-5.6-sol", reasoning: "xhigh" },
+    validation: { provider: "openai-codex", model: "gpt-5.6-sol", reasoning: "max" },
+    synthesis: { provider: "openai-codex", model: "gpt-5.6-sol", reasoning: "xhigh" },
   },
 };
 
@@ -178,7 +184,13 @@ function isSkillPreset(value: unknown): value is AiReviewSkillPreset {
 }
 
 function isReasoning(value: unknown): value is "off" | ThinkingLevel {
-  return value === "off" || value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh";
+  return value === "off"
+    || value === "minimal"
+    || value === "low"
+    || value === "medium"
+    || value === "high"
+    || value === "xhigh"
+    || value === "max";
 }
 
 function positiveInteger(value: unknown): number | undefined {
@@ -441,9 +453,10 @@ function resolvePhaseConfig(
   warnings: string[],
 ): { runtime: AiReviewRuntimeConfig["phases"][AiReviewPhase]; resolved: AiReviewResolvedPhaseConfig } {
   const phaseConfig = config.phases[phase];
-  const model = resolveModel(ctx, phase, phaseConfig, warnings);
-  const defaultReasoning = DEFAULT_REASONING_BY_DEPTH[config.depth][phase];
-  const configuredReasoning = phaseConfig?.reasoning ?? defaultReasoning;
+  const defaultRoute = DEFAULT_ROUTE_BY_DEPTH[config.depth][phase];
+  const modelConfig = phaseConfig?.model ? phaseConfig : defaultRoute;
+  const model = resolveModel(ctx, phase, modelConfig, warnings);
+  const configuredReasoning = phaseConfig?.reasoning ?? defaultRoute.reasoning;
   const reasoning = configuredReasoning === "off" || !model?.reasoning || (model != null && !supportsReasoningLevel(model, configuredReasoning)) ? undefined : configuredReasoning;
   if (configuredReasoning !== "off" && model && !model.reasoning) {
     warnings.push(`AI review ${phase} requested ${configuredReasoning} reasoning, but ${describeModel(model)} does not support reasoning.`);
