@@ -54,6 +54,10 @@ Inside Pi:
 
 `/diff-review pr <url>` loads GitHub PR metadata, fetches private base/head review refs, and opens the cockpit review window for the PR diff without creating a detached cache worktree.
 
+Click the PR title, the compact thread count, or press `P` to open the temporary pull request context drawer. **Overview** shows the PR description; **Threads** shows existing GitHub conversation, review, and inline-thread history. Current unresolved inline threads are also expanded at their exact diff anchors by default. Resolved and outdated history remains available under **All**, and any thread that cannot be matched exactly to the reviewed head stays in the drawer instead of being guessed onto a line.
+
+Imported GitHub context is read-only in the cockpit. It is cached with the local review session for fast reopen, refreshed asynchronously, and kept separate from locally staged comments and the review submission payload.
+
 Use `--reset-review` to clear saved cockpit metadata for the selected local diff or PR before opening the review again:
 
 ```bash

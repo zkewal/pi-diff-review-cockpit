@@ -58,6 +58,59 @@ html, body {
     box-shadow: -16px 0 42px rgba(0, 0, 0, 0.28);
   }
 
+  .review-pr-context-drawer {
+    position: fixed;
+    z-index: 40;
+    inset: 49px 0 0 auto;
+    display: flex;
+    width: min(520px, 92vw);
+    min-height: 0;
+    flex-direction: column;
+    border-left: 1px solid #30363d;
+    background: #0d1117;
+    box-shadow: -16px 0 36px rgba(0, 0, 0, 0.42);
+  }
+
+  .review-pr-context-drawer.hidden { display: none; }
+  .review-context-tab { cursor: pointer; border-bottom: 2px solid transparent; padding: 8px 1px 9px; font-size: 12px; color: #8b949e; }
+  .review-context-tab[aria-selected="true"] { border-bottom-color: #58a6ff; color: #f0f6fc; }
+  .review-context-markdown h1, .review-context-markdown h2, .review-context-markdown h3 { margin: 18px 0 8px; color: #f0f6fc; font-weight: 650; }
+  .review-context-markdown h1 { font-size: 18px; }
+  .review-context-markdown h2 { font-size: 16px; }
+  .review-context-markdown h3 { font-size: 14px; }
+  .review-context-markdown p, .review-context-markdown li { color: #c9d1d9; font-size: 13px; line-height: 1.6; }
+  .review-context-markdown ul, .review-context-markdown ol { margin: 8px 0; padding-left: 22px; }
+  .review-context-markdown ul { list-style: disc; }
+  .review-context-markdown ol { list-style: decimal; }
+  .review-context-markdown code { border-radius: 3px; background: #161b22; padding: 1px 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .review-context-markdown pre { margin: 10px 0; overflow: auto; border: 1px solid #30363d; border-radius: 5px; background: #010409; padding: 10px; }
+
+  .review-github-thread-zone {
+    border-left: 2px solid #6e7681;
+    background: #11161d;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
+  }
+
+  .monaco-editor .review-github-thread-rail { border-left: 2px solid #6e7681; }
+  .monaco-editor .review-github-thread-glyph {
+    box-sizing: border-box;
+    width: 10px !important;
+    height: 10px !important;
+    margin-top: 5px;
+    margin-left: 5px;
+    cursor: pointer;
+    border: 2px solid #8b949e;
+    border-radius: 50%;
+    background: #0d1117;
+  }
+
+  @keyframes github-thread-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(139, 148, 158, 0.7); }
+    100% { box-shadow: 0 0 0 10px rgba(139, 148, 158, 0); }
+  }
+
+  .review-github-thread-pulse { animation: github-thread-pulse 700ms ease-out; }
+
   #editor-container {
     height: 100%;
     min-height: 0;

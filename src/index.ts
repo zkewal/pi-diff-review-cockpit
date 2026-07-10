@@ -654,7 +654,7 @@ export default function (pi: ExtensionAPI) {
       reviewLifecycle = lifecycle;
       activeReviewLifecycle = lifecycle;
       const terminalMessagePromise = lifecycle.terminal;
-      const canUpdateAiReview = (): boolean => !lifecycle.terminalRequested && activeWindow === window;
+      const canUpdateReviewWindow = (): boolean => !lifecycle.terminalRequested && activeWindow === window;
 
       const handlePublishGitHubReview = (message: ReviewPublishPayload): void => {
         const pending = lifecycle.startPublish(async () => {
@@ -875,7 +875,7 @@ export default function (pi: ExtensionAPI) {
             getFilePatch: loadFilePatch,
             config: aiReviewConfig,
             onProgress: (progress) => {
-              if (!canUpdateAiReview()) return;
+              if (!canUpdateReviewWindow()) return;
               sendWindowMessage({
                 type: "ai-review-progress",
                 requestId: message.requestId,
@@ -883,7 +883,7 @@ export default function (pi: ExtensionAPI) {
               });
             },
             onPartialResult: (partial) => {
-              if (!canUpdateAiReview()) return;
+              if (!canUpdateReviewWindow()) return;
               analysis = partial.analysis;
               windowController?.updateProtocolContext(rendererProtocolContext(files, dataset.commits, analysis));
               queueSessionSave({
@@ -899,7 +899,7 @@ export default function (pi: ExtensionAPI) {
               });
             },
           });
-          if (!canUpdateAiReview()) return;
+          if (!canUpdateReviewWindow()) return;
           analysis = result.analysis;
           windowController?.updateProtocolContext(rendererProtocolContext(files, dataset.commits, analysis));
           queueSessionSave({
@@ -913,7 +913,7 @@ export default function (pi: ExtensionAPI) {
             progress: result.progress,
           });
         } catch (error) {
-          if (!canUpdateAiReview()) return;
+          if (!canUpdateReviewWindow()) return;
           const messageText = error instanceof Error ? error.message : String(error);
           sendWindowMessage({
             type: "ai-review-error",
@@ -964,14 +964,14 @@ export default function (pi: ExtensionAPI) {
       const handleRefreshGithubContext = async (message: ReviewRefreshGitHubContextPayload): Promise<void> => {
         try {
           const context = await refreshGithubContext();
-          if (!canUpdateAiReview()) return;
+          if (!canUpdateReviewWindow()) return;
           const nextSnapshot = { ...(sessionSnapshot ?? {}), githubContext: context };
           queueSessionSave(nextSnapshot);
           if (!await flushSessionSave()) throw new Error("Could not save refreshed GitHub review context.");
-          if (!canUpdateAiReview()) return;
+          if (!canUpdateReviewWindow()) return;
           sendWindowMessage({ type: "github-context-result", requestId: message.requestId, ok: true, context });
         } catch (error) {
-          if (!canUpdateAiReview()) return;
+          if (!canUpdateReviewWindow()) return;
           const messageText = safeGithubContextError(error);
           sendWindowMessage({
             type: "github-context-result",
@@ -997,7 +997,7 @@ export default function (pi: ExtensionAPI) {
       const onMessage = (data: unknown): void => {
         const message = data as ReviewWindowMessage;
         if (isSaveSessionPayload(message)) {
-          queueSessionSave(message.snapshot, message.requestId);
+          queueSessionSave(mergeRendererSessionCheckpoint(sessionSnapshot, message.snapshot), message.requestId);
           return;
         }
         if (isCheckpointSessionPayload(message)) {

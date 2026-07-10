@@ -12,7 +12,7 @@
     <div class="min-w-0 flex items-center gap-3">
       <button id="toggle-sidebar-button" class="cursor-pointer rounded-md px-2 py-1 text-[11px] font-medium text-review-muted hover:bg-[#161b22] hover:text-review-text">Review plan</button>
       <div class="min-w-0">
-        <div id="window-title" class="truncate text-sm font-semibold text-white">Diff review</div>
+        <button id="window-title" type="button" class="flex max-w-full cursor-default items-center gap-1 truncate text-left text-sm font-semibold text-white">Diff review</button>
         <div class="flex min-w-0 items-center gap-2">
           <div id="repo-root" class="truncate text-[11px] text-review-muted"></div>
           <button id="autosave-status" type="button" disabled aria-live="polite" class="shrink-0 cursor-default rounded px-1.5 py-0.5 text-[10px] font-medium text-[#3fb950]">Saved</button>
@@ -22,6 +22,7 @@
     </div>
     <div class="flex min-w-0 items-center gap-2">
       <div id="summary" class="hidden min-w-0 max-w-[34rem] text-[11px] text-review-muted xl:block"></div>
+      <button id="github-thread-count" type="button" title="Open GitHub review threads" class="hidden cursor-pointer rounded px-2 py-1 text-[11px] text-review-muted hover:bg-[#161b22] hover:text-review-text"></button>
       <button id="submit-button" class="cursor-pointer rounded-md border border-[#1f6feb]/40 bg-[#1f6feb] px-4 py-1.5 text-xs font-semibold text-white shadow-[0_0_0_1px_rgba(255,255,255,0.04)] hover:bg-[#388bfd] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-[#1f6feb]">Submit review</button>
     </div>
   </div>
@@ -73,6 +74,23 @@
       <div id="insight-content" class="scrollbar-thin min-h-0 flex-1 overflow-auto px-4 py-3"></div>
     </aside>
   </div>
+  <aside id="pr-context-drawer" aria-hidden="true" class="review-pr-context-drawer hidden">
+    <div class="flex items-center justify-between border-b border-review-border px-4 py-3">
+      <div class="min-w-0">
+        <div class="truncate text-sm font-semibold text-white">Pull request context</div>
+        <div id="pr-context-sync" class="mt-0.5 text-[10px] text-review-muted"></div>
+      </div>
+      <div class="flex items-center gap-1">
+        <button id="pr-context-refresh" type="button" aria-label="Refresh GitHub context" title="Refresh GitHub context" class="cursor-pointer rounded p-2 text-review-muted hover:bg-[#21262d] hover:text-review-text">↻</button>
+        <button id="pr-context-close" type="button" aria-label="Close PR context" title="Close" class="cursor-pointer rounded p-2 text-review-muted hover:bg-[#21262d] hover:text-review-text">×</button>
+      </div>
+    </div>
+    <div class="flex items-center gap-4 border-b border-review-border px-4 pt-2">
+      <button id="pr-context-overview-tab" type="button" class="review-context-tab">Overview</button>
+      <button id="pr-context-threads-tab" type="button" class="review-context-tab">Threads</button>
+    </div>
+    <div id="pr-context-content" class="scrollbar-thin min-h-0 flex-1 overflow-auto px-4 py-4"></div>
+  </aside>
 </div>
 
 <script defer src="./csp-monitor.js"></script>

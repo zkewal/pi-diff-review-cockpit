@@ -190,6 +190,24 @@ test("review workspace is consolidated around one sidebar and checkout drawer", 
   assert.equal(appJs.includes("Use the Files tab"), false);
 });
 
+test("GitHub PR context stays in a temporary drawer and outside local publish state", () => {
+  const appJs = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+  const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
+  const css = readFileSync(new URL("../web/review.css", import.meta.url), "utf8");
+  const host = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+
+  assert.equal(html.includes('id="pr-context-drawer"'), true);
+  assert.equal(html.includes('id="github-thread-count"'), true);
+  assert.equal(appJs.includes("Open PR context"), true);
+  assert.equal(appJs.includes('type: "refresh-github-context"'), true);
+  assert.equal(appJs.includes("renderGithubThreadZoneDOM"), true);
+  assert.equal(appJs.includes("applyPendingGithubThreadFocus"), true);
+  assert.equal(host.includes("mergeRendererSessionCheckpoint(sessionSnapshot, message.snapshot)"), true);
+  assert.equal(appJs.includes("state.comments.push(thread"), false);
+  assert.equal(css.includes("position: fixed"), true);
+  assert.equal(css.includes("review-github-thread-glyph"), true);
+});
+
 test("inline findings and comment editors expose home-row actions", () => {
   const appJs = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
   const css = readFileSync(new URL("../web/review.css", import.meta.url), "utf8");

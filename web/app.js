@@ -23,6 +23,13 @@ import { applyAuthoritativePublishedCommentState } from "./publish-comment-state
 import { expandDisclosure, isDisclosureExpanded, toggleDisclosure } from "./review-disclosure-state.js";
 import { isFileCanvasActive } from "./review-navigation-state.js";
 import { createSessionSaveScheduler } from "./session-save-scheduler.js";
+import { renderSafeMarkdown, safeExternalUrl } from "./safe-markdown.js";
+import {
+  createGitHubThreadDisclosureState,
+  locateCurrentThread,
+  threadItemsForFilter,
+  unresolvedThreadCount,
+} from "./github-review-context.js";
 
 const localWorkerSources = Object.freeze({
   editor: editorWorkerSource,
@@ -258,6 +265,15 @@ const state = {
     progress: null,
     config: reviewData.aiReviewConfig || null,
   },
+  githubContext: restoredSession.githubContext || null,
+  githubContextRequestId: null,
+  githubContextStatus: "idle",
+  githubContextMessage: "",
+  githubContextTab: "overview",
+  githubContextFilter: "open",
+  githubThreadDisclosure: createGitHubThreadDisclosureState(),
+  pendingGithubThreadFocus: null,
+  expandedGithubContextItemIds: new Set(),
 };
 
 const sidebarEl = document.getElementById("sidebar");
@@ -295,6 +311,15 @@ const fileCommentButton = document.getElementById("file-comment-button");
 const toggleReviewedButton = document.getElementById("toggle-reviewed-button");
 const toggleUnchangedButton = document.getElementById("toggle-unchanged-button");
 const toggleWrapButton = document.getElementById("toggle-wrap-button");
+const githubThreadCountButton = document.getElementById("github-thread-count");
+const prContextDrawerEl = document.getElementById("pr-context-drawer");
+const prContextContentEl = document.getElementById("pr-context-content");
+const prContextSyncEl = document.getElementById("pr-context-sync");
+const prContextOverviewTab = document.getElementById("pr-context-overview-tab");
+const prContextThreadsTab = document.getElementById("pr-context-threads-tab");
+const prContextRefreshButton = document.getElementById("pr-context-refresh");
+const prContextCloseButton = document.getElementById("pr-context-close");
+let prContextOpener = null;
 
 function shortPathName(path) {
   const parts = String(path || "").split("/").filter(Boolean);
@@ -322,6 +347,146 @@ const workflowTitle = workflowTitleParts();
 repoRootEl.textContent = workflowTitle.subtitle;
 windowTitleEl.textContent = workflowTitle.title;
 document.title = workflowTitle.documentTitle;
+if (reviewData.source?.github) {
+  windowTitleEl.classList.remove("cursor-default");
+  windowTitleEl.classList.add("cursor-pointer", "hover:text-blue-300");
+  windowTitleEl.innerHTML = `${escapeHtml(workflowTitle.title)} <span class="text-[10px] text-review-muted">⌄</span>`;
+  windowTitleEl.title = "Open pull request context (P)";
+}
+
+function currentUnresolvedGithubThreads() {
+  return threadItemsForFilter(state.githubContext, "open").map((entry) => entry.item);
+}
+
+function updateGithubThreadCount() {
+  if (!reviewData.source?.github) return;
+  const count = unresolvedThreadCount(state.githubContext);
+  githubThreadCountButton.textContent = `◌ ${count}`;
+  githubThreadCountButton.classList.remove("hidden");
+}
+
+function isPrContextOpen() {
+  return !prContextDrawerEl.classList.contains("hidden");
+}
+
+function closePrContext() {
+  if (!isPrContextOpen()) return;
+  prContextDrawerEl.classList.add("hidden");
+  prContextDrawerEl.setAttribute("aria-hidden", "true");
+  const opener = prContextOpener;
+  prContextOpener = null;
+  if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+}
+
+function githubContextTimeLabel() {
+  if (state.githubContextStatus === "loading") return "Refreshing GitHub context...";
+  if (state.githubContextStatus === "failed") return state.githubContextMessage || "Refresh failed";
+  const fetchedAt = state.githubContext?.fetchedAt ? new Date(state.githubContext.fetchedAt) : null;
+  return fetchedAt && !Number.isNaN(fetchedAt.getTime()) ? `Last synced ${fetchedAt.toLocaleTimeString()}` : "Not synced yet";
+}
+
+function renderPrContext() {
+  if (!reviewData.source?.github) return;
+  const github = reviewData.source.github;
+  prContextOverviewTab.setAttribute("aria-selected", String(state.githubContextTab === "overview"));
+  prContextThreadsTab.setAttribute("aria-selected", String(state.githubContextTab === "threads"));
+  prContextSyncEl.textContent = githubContextTimeLabel();
+  if (state.githubContextTab === "overview") {
+    prContextContentEl.innerHTML = `
+      <div class="text-base font-semibold text-white">${escapeHtml(github.title)}</div>
+      <div class="mt-1 text-xs text-review-muted">${escapeHtml(github.author || "Unknown author")} · ${escapeHtml(github.baseRefName)} ← ${escapeHtml(github.headRefName)} · ${escapeHtml(github.state || "")}</div>
+      <div class="review-context-markdown mt-5">${renderSafeMarkdown(github.body || "No pull request description provided.")}</div>
+      <button type="button" data-external-url="${escapeHtml(github.url)}" class="mt-5 cursor-pointer text-xs font-medium text-blue-400 hover:text-blue-300">Open on GitHub ↗</button>
+    `;
+  } else {
+    const context = state.githubContext;
+    const open = currentUnresolvedGithubThreads();
+    const items = threadItemsForFilter(context, state.githubContextFilter);
+    prContextContentEl.innerHTML = `
+      <div class="mb-3 flex items-center gap-1 rounded-md bg-[#010409] p-1">
+        <button type="button" data-context-filter="open" class="flex-1 cursor-pointer rounded px-2 py-1 text-xs ${state.githubContextFilter === "open" ? "bg-[#21262d] text-white" : "text-review-muted"}">Open ${open.length}</button>
+        <button type="button" data-context-filter="all" class="flex-1 cursor-pointer rounded px-2 py-1 text-xs ${state.githubContextFilter === "all" ? "bg-[#21262d] text-white" : "text-review-muted"}">All</button>
+      </div>
+      ${items.length === 0 ? `<div class="py-8 text-center text-sm text-review-muted">${state.githubContextStatus === "loading" ? "Loading GitHub threads..." : "No review threads to show."}</div>` : items.map(({ kind, item }) => {
+        const comment = kind === "thread" ? item.comments?.[item.comments.length - 1] : item;
+        const threadLine = item.side === "original" ? item.originalLine : item.line;
+        const location = kind === "thread" ? `${item.path}${threadLine ? `:${threadLine}` : ""}` : kind === "review" ? `Review · ${item.state}` : "Conversation";
+        const status = kind === "thread" && item.isOutdated ? "Outdated" : kind === "thread" && item.isResolved ? "Resolved" : "";
+        const itemKey = `${kind}:${item.id}`;
+        const canNavigate = kind === "thread" && !item.isOutdated;
+        const expanded = state.expandedGithubContextItemIds.has(itemKey);
+        const expandedBody = kind === "thread"
+          ? (item.comments || []).map((entry) => `<div class="border-t border-review-border py-2 first:border-0"><div class="text-[10px] text-review-muted">${escapeHtml(entry.author || "ghost")}</div><div class="review-context-markdown mt-1">${renderSafeMarkdown(entry.body || "")}</div></div>`).join("")
+          : `<div class="review-context-markdown mt-2 border-t border-review-border pt-2">${renderSafeMarkdown(item.body || "")}</div>`;
+        return `<div class="mb-2 overflow-hidden rounded-md border border-review-border bg-[#010409]">
+          <button type="button" ${canNavigate ? `data-github-thread-id="${escapeHtml(item.id)}"` : `data-context-item-id="${escapeHtml(itemKey)}"`} class="block w-full cursor-pointer px-3 py-3 text-left hover:bg-[#161b22]">
+            <div class="flex items-center justify-between gap-3 text-[10px] text-review-muted"><span class="truncate">${escapeHtml(location)}</span>${status ? `<span>${status}</span>` : ""}</div>
+            <div class="mt-1 truncate text-xs text-review-text">${escapeHtml((comment?.body || "No comment text.").replace(/\s+/g, " "))}</div>
+            <div class="mt-2 text-[10px] text-review-muted">${escapeHtml(comment?.author || "ghost")}${kind === "thread" ? ` · ${item.comments?.length || 0} comment(s)` : ""}</div>
+          </button>
+          ${expanded ? `<div class="px-3 pb-3">${expandedBody}</div>` : ""}
+        </div>`;
+      }).join("")}
+    `;
+  }
+}
+
+function openPrContext(tab = "overview", opener = document.activeElement) {
+  if (!reviewData.source?.github) return;
+  prContextOpener = opener;
+  state.githubContextTab = tab;
+  prContextDrawerEl.classList.remove("hidden");
+  prContextDrawerEl.setAttribute("aria-hidden", "false");
+  renderPrContext();
+  (tab === "threads" ? prContextThreadsTab : prContextOverviewTab).focus();
+}
+
+function refreshGithubContext() {
+  if (!reviewData.source?.github || state.githubContextStatus === "loading") return;
+  const requestId = `github-context:${Date.now()}:${++requestSequence}`;
+  state.githubContextRequestId = requestId;
+  state.githubContextStatus = "loading";
+  state.githubContextMessage = "";
+  if (isPrContextOpen()) renderPrContext();
+  sendRendererMessage({ type: "refresh-github-context", requestId });
+}
+
+function openGithubThread(threadId) {
+  const thread = state.githubContext?.threads?.find((item) => item.id === threadId);
+  if (!thread || thread.isOutdated) return;
+  const matches = githubFilesByPath().get(thread.path) || [];
+  if (matches.length !== 1) return;
+  saveCurrentScrollPosition();
+  state.currentScope = "git-diff";
+  state.activeCanvas = "file";
+  state.activeFileId = matches[0].id;
+  state.pendingGithubThreadFocus = thread.id;
+  state.githubThreadDisclosure.expand(thread.id);
+  closePrContext();
+  renderAll({ restoreFileScroll: false });
+  ensureFileLoaded(matches[0].id, "git-diff");
+  requestAnimationFrame(applyPendingGithubThreadFocus);
+}
+
+function applyPendingGithubThreadFocus() {
+  const threadId = state.pendingGithubThreadFocus;
+  if (!threadId || !isActiveFileReady()) return;
+  const thread = state.githubContext?.threads?.find((item) => item.id === threadId);
+  const location = thread ? locateGithubThread(thread) : null;
+  if (!thread || !location || location.fileId !== state.activeFileId) {
+    state.pendingGithubThreadFocus = null;
+    return;
+  }
+  state.pendingGithubThreadFocus = null;
+  syncViewZones();
+  updateDecorations();
+  focusDiffLine(location.side, location.line, location.line);
+  requestAnimationFrame(() => {
+    const node = document.querySelector(`[data-github-thread-id="${CSS.escape(thread.id)}"]`);
+    node?.classList.add("review-github-thread-pulse");
+    setTimeout(() => node?.classList.remove("review-github-thread-pulse"), 800);
+  });
+}
 
 function updateSessionNotice() {
   const labels = [];
@@ -2992,6 +3157,83 @@ function getInlineCommentsForFile(file = activeFile()) {
     : [];
 }
 
+function githubFilesByPath() {
+  const result = new Map();
+  for (const file of reviewData.files.filter((item) => item.inGitDiff)) {
+    for (const path of [file.path, file.gitDiff?.oldPath, file.gitDiff?.newPath].filter(Boolean)) {
+      const matches = result.get(path) || [];
+      if (!matches.some((item) => item.id === file.id)) matches.push(file);
+      result.set(path, matches);
+    }
+  }
+  return result;
+}
+
+function locateGithubThread(thread) {
+  if (!state.githubContext || !originalModel || !modifiedModel) return null;
+  return locateCurrentThread(thread, {
+    context: state.githubContext,
+    filesByPath: githubFilesByPath(),
+    originalLineCount: originalModel.getLineCount(),
+    modifiedLineCount: modifiedModel.getLineCount(),
+  });
+}
+
+function getInlineGithubThreadEntries(file = activeFile()) {
+  if (!file || state.currentScope !== "git-diff" || !state.githubContext) return [];
+  const threads = state.githubContextFilter === "all"
+    ? state.githubContext.threads.filter((thread) => !thread.isOutdated)
+    : currentUnresolvedGithubThreads();
+  return threads.flatMap((thread) => {
+    const location = locateGithubThread(thread);
+    return location?.fileId === file.id ? [{ thread, location }] : [];
+  });
+}
+
+function renderGithubThreadZoneDOM(thread, location) {
+  const container = document.createElement("div");
+  container.className = "view-zone-container review-github-thread-zone";
+  container.dataset.githubThreadId = thread.id;
+  const comments = (thread.comments || []).map((comment) => `
+    <div class="border-t border-review-border py-3 first:border-t-0 first:pt-0">
+      <div class="text-[10px] text-review-muted">${escapeHtml(comment.author || "ghost")} · ${escapeHtml(new Date(comment.createdAt).toLocaleString())}</div>
+      <div class="review-context-markdown mt-1">${renderSafeMarkdown(comment.body || "")}</div>
+      <button type="button" data-external-url="${escapeHtml(comment.url || "")}" class="mt-2 cursor-pointer text-[10px] text-blue-400 hover:text-blue-300">View on GitHub ↗</button>
+    </div>
+  `).join("");
+  container.innerHTML = `
+    <div class="mb-2 flex items-center justify-between gap-3">
+      <div class="flex min-w-0 items-center gap-2 text-xs font-semibold text-review-text"><span class="text-review-muted">GitHub</span><span class="truncate">Published thread</span></div>
+      <button type="button" data-action="collapse-github-thread" class="review-card-disclosure review-disclosure-expanded shrink-0 cursor-pointer rounded border border-review-border bg-[#0d1117] text-review-muted" aria-label="Collapse GitHub thread" title="Collapse GitHub thread"></button>
+    </div>
+    ${comments}
+  `;
+  container.querySelector("[data-action='collapse-github-thread']")?.addEventListener("click", () => {
+    state.githubThreadDisclosure.collapse(thread.id);
+    syncViewZones();
+    updateDecorations();
+  });
+  container.querySelectorAll("[data-external-url]").forEach((button) => button.addEventListener("click", () => {
+    const url = safeExternalUrl(button.dataset.externalUrl || "");
+    if (url) sendRendererMessage({ type: "open-external-url", url });
+  }));
+  return container;
+}
+
+function findInlineGithubThreadAtLine(side, line) {
+  return getInlineGithubThreadEntries().find((entry) => entry.location.side === side && entry.location.line === line) || null;
+}
+
+function toggleInlineGithubThreadAtLine(side, line) {
+  const entry = findInlineGithubThreadAtLine(side, line);
+  if (!entry) return false;
+  state.githubThreadDisclosure.toggle(entry.thread.id);
+  syncViewZones();
+  updateDecorations();
+  focusDiffLine(side, line, line);
+  return true;
+}
+
 function findInlineCommentAtLine(side, line) {
   return getInlineCommentsForFile()
     .filter((comment) => comment.side === side && comment.startLine === line)
@@ -3043,6 +3285,20 @@ function syncViewZones() {
     });
   });
 
+  getInlineGithubThreadEntries(file).forEach(({ thread, location }) => {
+    if (!state.githubThreadDisclosure.isExpanded(thread.id)) return;
+    const editor = location.side === "original" ? originalEditor : modifiedEditor;
+    const domNode = renderGithubThreadZoneDOM(thread, location);
+    editor.changeViewZones((accessor) => {
+      const id = accessor.addZone({
+        afterLineNumber: location.line,
+        heightInPx: Math.max(112, 72 + (thread.comments || []).reduce((total, comment) => total + Math.max(36, String(comment.body || "").split("\n").length * 20), 0)),
+        domNode,
+      });
+      activeViewZones.push({ id, editor });
+    });
+  });
+
   getInlineAiFindingEntries(file)
     .filter(({ finding }) => isAiFindingExpanded(finding.id))
     .forEach(({ finding, location }) => {
@@ -3063,6 +3319,7 @@ function updateDecorations() {
   if (!diffEditor || !monacoApi) return;
   const comments = getInlineCommentsForFile();
   const findings = getInlineAiFindingEntries(activeFile());
+  const githubThreads = getInlineGithubThreadEntries(activeFile());
   const originalRanges = [];
   const modifiedRanges = [];
   const commentedLines = new Set();
@@ -3079,6 +3336,21 @@ function updateDecorations() {
       },
     };
     if (comment.side === "original") originalRanges.push(range);
+    else modifiedRanges.push(range);
+  }
+
+  for (const { thread, location } of githubThreads) {
+    const expanded = state.githubThreadDisclosure.isExpanded(thread.id);
+    const range = {
+      range: new monacoApi.Range(location.line, 1, location.line, 1),
+      options: {
+        isWholeLine: expanded,
+        className: expanded ? "review-github-thread-rail" : "",
+        glyphMarginClassName: `review-github-thread-glyph ${expanded ? "review-disclosure-expanded" : "review-disclosure-collapsed"}`,
+        glyphMarginHoverMessage: { value: expanded ? "Collapse published GitHub thread" : "Expand published GitHub thread" },
+      },
+    };
+    if (location.side === "original") originalRanges.push(range);
     else modifiedRanges.push(range);
   }
 
@@ -3333,12 +3605,14 @@ function mountFile(options = {}) {
     if (options.preserveScroll) restoreScrollState(scrollState);
     applyPendingHunkFocus();
     applyPendingFindingFocus();
+    applyPendingGithubThreadFocus();
     setTimeout(() => {
       layoutEditor();
       if (options.restoreFileScroll) restoreFileScrollPosition();
       if (options.preserveScroll) restoreScrollState(scrollState);
       applyPendingHunkFocus();
       applyPendingFindingFocus();
+      applyPendingGithubThreadFocus();
     }, 50);
   });
 }
@@ -3424,6 +3698,7 @@ function createGlyphHoverActions(editor, side) {
   let hoverDecoration = [];
 
   function openDraftAtLine(line) {
+    if (toggleInlineGithubThreadAtLine(side, line)) return;
     if (toggleInlineFindingAtLine(side, line)) return;
     if (toggleInlineCommentAtLine(side, line)) return;
     addInlineComment(side, line, line);
@@ -3440,7 +3715,7 @@ function createGlyphHoverActions(editor, side) {
     if (target.type === monacoApi.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || target.type === monacoApi.editor.MouseTargetType.GUTTER_LINE_NUMBERS) {
       const line = target.position?.lineNumber;
       if (!line) return;
-      if (findInlineCommentAtLine(side, line) || findInlineFindingAtLine(side, line)) {
+      if (findInlineGithubThreadAtLine(side, line) || findInlineCommentAtLine(side, line) || findInlineFindingAtLine(side, line)) {
         hoverDecoration = editor.deltaDecorations(hoverDecoration, []);
         return;
       }
@@ -3472,6 +3747,25 @@ function createGlyphHoverActions(editor, side) {
 
 window.__reviewReceive = function (message) {
   if (!message || typeof message !== "object") return;
+
+  if (message.type === "github-context-result") {
+    if (message.requestId !== state.githubContextRequestId) return;
+    state.githubContextRequestId = null;
+    if (message.ok) {
+      state.githubContext = message.context;
+      state.githubContextStatus = "ready";
+      state.githubContextMessage = "";
+    } else {
+      if (message.cachedContext) state.githubContext = message.cachedContext;
+      state.githubContextStatus = "failed";
+      state.githubContextMessage = message.message || "GitHub review context could not be loaded.";
+    }
+    updateGithubThreadCount();
+    syncViewZones();
+    updateDecorations();
+    if (isPrContextOpen()) renderPrContext();
+    return;
+  }
 
   if (message.type === "save-session-result") {
     if (message.requestId !== latestSaveRequestId) return;
@@ -3929,6 +4223,10 @@ function getKeyboardActions() {
     shortcutAction("focus-diff", "Focus diff", "2", focusDiffPane, { match: key("2") }),
     shortcutAction("focus-context", "Open review checkout", "3", focusInsightPane, { match: key("3") }),
     shortcutAction("search-files", "Search files", "/", focusFileSearch, { match: key("/") }),
+    shortcutAction("pr-context", "Open PR context", "P", () => openPrContext("overview"), {
+      enabled: () => !!reviewData.source?.github,
+      match: key("p"),
+    }),
     shortcutAction("next-file", "Next file", "]", () => moveFile(1), { match: key("]") }),
     shortcutAction("previous-file", "Previous file", "[", () => moveFile(-1), { match: key("[") }),
     shortcutAction("scroll-down", "Move diff focus down", "J / ↓", () => moveDiffFocus(1), {
@@ -4099,6 +4397,51 @@ function handleGlobalShortcut(event) {
 
 submitButton.addEventListener("click", submitReview);
 
+windowTitleEl.addEventListener("click", () => openPrContext("overview", windowTitleEl));
+githubThreadCountButton.addEventListener("click", () => openPrContext("threads", githubThreadCountButton));
+prContextCloseButton.addEventListener("click", closePrContext);
+prContextRefreshButton.addEventListener("click", refreshGithubContext);
+prContextOverviewTab.addEventListener("click", () => {
+  state.githubContextTab = "overview";
+  renderPrContext();
+});
+prContextThreadsTab.addEventListener("click", () => {
+  state.githubContextTab = "threads";
+  renderPrContext();
+});
+prContextContentEl.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const threadId = target?.closest("[data-github-thread-id]")?.dataset.githubThreadId;
+  if (threadId) {
+    openGithubThread(threadId);
+    return;
+  }
+  const itemId = target?.closest("[data-context-item-id]")?.dataset.contextItemId;
+  if (itemId) {
+    if (state.expandedGithubContextItemIds.has(itemId)) state.expandedGithubContextItemIds.delete(itemId);
+    else state.expandedGithubContextItemIds.add(itemId);
+    renderPrContext();
+    return;
+  }
+  const filter = target?.closest("[data-context-filter]")?.dataset.contextFilter;
+  if (filter === "open" || filter === "all") {
+    state.githubContextFilter = filter;
+    renderPrContext();
+    syncViewZones();
+    updateDecorations();
+    return;
+  }
+  const external = target?.closest("[data-external-url]")?.dataset.externalUrl;
+  const safeUrl = safeExternalUrl(external || "");
+  if (safeUrl) sendRendererMessage({ type: "open-external-url", url: safeUrl });
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !isPrContextOpen()) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  closePrContext();
+}, true);
+
 autosaveStatusButton?.addEventListener("click", () => {
   if (autosaveStatusButton.dataset.status === "failed") saveSessionNow();
 });
@@ -4179,10 +4522,12 @@ document.addEventListener("keydown", handleGlobalShortcut);
 populateCommitSelect();
 ensureActiveFileForScope();
 renderTree();
+updateGithubThreadCount();
 renderFileComments();
 updateSidebarLayout();
 setupMonaco();
 setTimeout(maybeStartAiReview, 250);
+if (reviewData.source?.github) setTimeout(refreshGithubContext, 100);
 }
 
 window.__reviewBootstrap = function (bootstrap) {

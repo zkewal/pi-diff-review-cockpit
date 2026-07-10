@@ -97,3 +97,40 @@ test("skips malformed siblings and records bounded diagnostics", async () => {
   assert.match(result.diagnostics.join("\n"), /Skipped malformed conversation comment/);
   assert.match(result.diagnostics.join("\n"), /Skipped malformed review thread/);
 });
+
+test("fails closed when a top-level connection repeats its cursor", async () => {
+  const pi = fakePi({
+    ConversationComments: [
+      { data: { repository: { pullRequest: { headRefOid: "head-sha", comments: connection([], "same-cursor") } } } },
+      { data: { repository: { pullRequest: { headRefOid: "head-sha", comments: connection([], "same-cursor") } } } },
+    ],
+  });
+
+  await assert.rejects(
+    fetchGitHubReviewContext(pi, "/repo", source),
+    /pagination repeated a cursor/,
+  );
+});
+
+test("fails closed when the pull request head changes between connections", async () => {
+  const pi = fakePi({
+    ConversationComments: [{ data: { repository: { pullRequest: { headRefOid: "head-sha", comments: connection([]) } } } }],
+    ReviewSummaries: [{ data: { repository: { pullRequest: { headRefOid: "new-head", reviews: connection([]) } } } }],
+  });
+
+  await assert.rejects(
+    fetchGitHubReviewContext(pi, "/repo", source),
+    /head changed while review context was loading/,
+  );
+});
+
+test("rejects invalid GraphQL JSON without exposing it as context", async () => {
+  const pi = {
+    exec: async () => ({ code: 0, stdout: "{not-json", stderr: "" }),
+  } as unknown as ExtensionAPI;
+
+  await assert.rejects(
+    fetchGitHubReviewContext(pi, "/repo", source),
+    /returned invalid JSON/,
+  );
+});
