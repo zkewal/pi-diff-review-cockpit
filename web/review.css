@@ -109,37 +109,84 @@ html, body {
 
   .monaco-editor .review-comment-glyph-staged-ai,
   .monaco-editor .review-comment-glyph-staged-user,
-  .monaco-editor .review-comment-glyph-published {
+  .monaco-editor .review-comment-glyph-published,
+  .monaco-editor .review-ai-finding-glyph {
     align-items: center;
     background: transparent;
+    cursor: pointer;
     display: flex;
     height: 18px !important;
     justify-content: center;
+    line-height: 18px;
     margin-left: 2px;
     margin-top: 1px;
     width: 18px !important;
-    cursor: pointer;
-    line-height: 18px;
   }
 
-  .monaco-editor .review-comment-glyph-staged-ai::before {
+  .monaco-editor .review-comment-glyph-staged-ai::before,
+  .monaco-editor .review-comment-glyph-staged-user::before,
+  .monaco-editor .review-comment-glyph-published::before,
+  .monaco-editor .review-ai-finding-glyph::before,
+  .review-card-disclosure::before {
+    align-items: center;
+    border: 1px solid currentColor;
+    border-radius: 4px;
+    box-sizing: border-box;
+    display: flex;
+    font-size: 13px;
+    font-weight: 700;
+    height: 16px;
+    justify-content: center;
+    line-height: 13px;
+    transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, color 120ms ease;
+    width: 16px;
+  }
+
+  .monaco-editor .review-comment-glyph-staged-ai::before,
+  .monaco-editor .review-ai-finding-glyph::before {
+    background: rgba(137, 87, 229, 0.16);
+    border-color: rgba(210, 168, 255, 0.58);
     color: #d2a8ff;
-    content: "●";
-    font-size: 12px;
-    text-shadow: 0 0 8px rgba(210, 168, 255, 0.46);
+    box-shadow: 0 0 8px rgba(210, 168, 255, 0.18);
   }
 
   .monaco-editor .review-comment-glyph-staged-user::before {
+    background: rgba(31, 111, 235, 0.14);
+    border-color: rgba(88, 166, 255, 0.55);
     color: #58a6ff;
-    content: "●";
-    font-size: 12px;
-    text-shadow: 0 0 8px rgba(88, 166, 255, 0.46);
+    box-shadow: 0 0 8px rgba(88, 166, 255, 0.16);
   }
 
   .monaco-editor .review-comment-glyph-published::before {
+    background: rgba(139, 148, 158, 0.08);
+    border-color: rgba(139, 148, 158, 0.48);
     color: #8b949e;
-    content: "◌";
-    font-size: 13px;
+  }
+
+  .monaco-editor .review-disclosure-expanded::before,
+  .review-card-disclosure.review-disclosure-expanded::before {
+    content: "⌄";
+    padding-bottom: 3px;
+  }
+
+  .monaco-editor .review-disclosure-collapsed::before,
+  .review-card-disclosure.review-disclosure-collapsed::before {
+    content: "›";
+    padding-left: 1px;
+  }
+
+  .review-card-disclosure {
+    align-items: center;
+    color: #d2a8ff;
+    display: flex;
+    height: 24px;
+    justify-content: center;
+    width: 24px;
+  }
+
+  .review-card-disclosure::before {
+    background: rgba(137, 87, 229, 0.12);
+    border-color: rgba(210, 168, 255, 0.52);
   }
 
   .monaco-editor .review-ai-finding-rail-active {
@@ -147,47 +194,27 @@ html, body {
     box-shadow: inset 2px 0 0 rgba(210, 168, 255, 0.72);
   }
 
-  .monaco-editor .review-ai-finding-glyph,
-  .monaco-editor .review-ai-finding-glyph-active {
-    align-items: center;
-    background: transparent;
-    cursor: pointer;
-    display: flex;
-    height: 18px !important;
-    justify-content: center;
-    line-height: 18px;
-    margin-left: 2px;
-    margin-top: 1px;
-    width: 18px !important;
-  }
-
-  .monaco-editor .review-ai-finding-glyph::before,
-  .monaco-editor .review-ai-finding-glyph-active::before {
-    align-items: center;
-    background: rgba(137, 87, 229, 0.18);
-    border: 1px solid rgba(210, 168, 255, 0.5);
-    border-radius: 999px;
-    box-shadow: 0 0 0 1px rgba(137, 87, 229, 0.12), 0 0 10px rgba(210, 168, 255, 0.2);
-    color: #d2a8ff;
-    content: "✦";
-    display: flex;
-    font-size: 10px;
-    height: 16px;
-    justify-content: center;
-    line-height: 16px;
-    text-shadow: 0 0 8px rgba(210, 168, 255, 0.42);
-    transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
-    width: 16px;
-  }
-
+  .monaco-editor .review-comment-glyph-staged-ai:hover::before,
   .monaco-editor .review-ai-finding-glyph:hover::before,
-  .monaco-editor .review-ai-finding-glyph-active:hover::before,
   .monaco-editor .review-ai-finding-glyph-active::before {
-    background: rgba(137, 87, 229, 0.72);
-    border-color: rgba(210, 168, 255, 0.95);
-    box-shadow: 0 0 0 2px rgba(137, 87, 229, 0.22), 0 0 14px rgba(210, 168, 255, 0.34);
+    background: rgba(137, 87, 229, 0.42);
+    border-color: #d2a8ff;
+    box-shadow: 0 0 0 2px rgba(137, 87, 229, 0.2), 0 0 12px rgba(210, 168, 255, 0.24);
     color: #ffffff;
-    transform: scale(1.06);
+  }
+
+  .monaco-editor .review-comment-glyph-staged-user:hover::before {
+    background: rgba(31, 111, 235, 0.38);
+    border-color: #58a6ff;
+    box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.18), 0 0 12px rgba(88, 166, 255, 0.22);
+    color: #ffffff;
+  }
+
+  .monaco-editor .review-comment-glyph-published:hover::before {
+    background: rgba(139, 148, 158, 0.22);
+    border-color: #8b949e;
+    box-shadow: 0 0 0 2px rgba(139, 148, 158, 0.12);
+    color: #c9d1d9;
   }
 
   .monaco-editor .review-keyboard-line {

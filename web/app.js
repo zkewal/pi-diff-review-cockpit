@@ -1681,8 +1681,7 @@ function updateFocusedInlineFinding(side, line) {
   if (entry) requestAnimationFrame(() => pulseInlineFinding(entry.finding.id, entry.location));
 }
 
-function toggleInlineFindingAtLine(side, line) {
-  const entry = findInlineFindingAtLine(side, line);
+function toggleInlineFinding(entry) {
   if (!entry) return false;
 
   toggleDisclosure(state.collapsedFindingIds, entry.finding.id);
@@ -1694,6 +1693,10 @@ function toggleInlineFindingAtLine(side, line) {
   focusDiffLine(side, line, line);
   if (expanded) requestAnimationFrame(() => pulseInlineFinding(entry.finding.id, entry.location));
   return true;
+}
+
+function toggleInlineFindingAtLine(side, line) {
+  return toggleInlineFinding(findInlineFindingAtLine(side, line));
 }
 
 function queueFindingFocus(location, findingId = null) {
@@ -2590,8 +2593,10 @@ function commentProvenance(comment) {
 }
 
 function commentGlyphClassName(comment) {
-  if (commentLifecycleState(comment) === "published") return "review-comment-glyph-published";
-  return commentProvenance(comment) === "ai" ? "review-comment-glyph-staged-ai" : "review-comment-glyph-staged-user";
+  const provenanceClass = commentLifecycleState(comment) === "published"
+    ? "review-comment-glyph-published"
+    : commentProvenance(comment) === "ai" ? "review-comment-glyph-staged-ai" : "review-comment-glyph-staged-user";
+  return `${provenanceClass} ${disclosureStateClass(isDisclosureExpanded(state.collapsedCommentIds, comment.id))}`;
 }
 
 function commentRailClassName(comment) {
@@ -2600,8 +2605,19 @@ function commentRailClassName(comment) {
 }
 
 function commentMarkerTooltip(comment) {
+  const action = isDisclosureExpanded(state.collapsedCommentIds, comment.id) ? "Collapse" : "Expand";
   const stateLabel = commentLifecycleState(comment) === "published" ? "GitHub published thread" : "Local staged comment";
-  return `[${commentLifecycleState(comment) === "published" ? "◌" : "●"}] ${stateLabel} · ${commentSourceTitle(comment)}`;
+  return `${action} ${stateLabel} · ${commentSourceTitle(comment)}`;
+}
+
+function disclosureStateClass(expanded) {
+  return expanded ? "review-disclosure-expanded" : "review-disclosure-collapsed";
+}
+
+function aiFindingDisclosureLabel(finding) {
+  return isAiFindingExpanded(finding.id)
+    ? `Collapse AI review: ${finding.title}`
+    : `Expand AI review: ${finding.title}`;
 }
 
 function commentSourceTitle(comment) {
@@ -2928,6 +2944,7 @@ function renderAiFindingZoneDOM(finding, location) {
         <span class="rounded bg-[#8957e5]/15 px-1.5 py-0.5 text-[10px] text-[#d2a8ff]">AI</span>
         <span class="truncate">Review item • ${escapeHtml(humanizeToken(finding.kind))}</span>
       </div>
+      <button type="button" data-action="collapse-finding" class="review-card-disclosure review-disclosure-expanded shrink-0 cursor-pointer rounded border border-review-border bg-[#0d1117] text-[#d2a8ff] hover:border-[#8957e5]/60 hover:bg-[#8957e5]/12 focus:outline-none focus:ring-1 focus:ring-[#8957e5]/70" aria-label="Collapse AI review" title="Collapse AI review"></button>
     </div>
     <div class="text-sm font-medium leading-5 text-white">${escapeHtml(finding.title)}</div>
     <div class="mt-1 line-clamp-2 text-xs leading-5 text-review-muted">${escapeHtml(finding.explanation)}</div>
@@ -2938,6 +2955,11 @@ function renderAiFindingZoneDOM(finding, location) {
   `;
   container.addEventListener("click", () => {
     state.activeInsight = { type: "finding", id: finding.id };
+  });
+  container.querySelector("[data-action='collapse-finding']").addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    toggleInlineFinding({ finding, location });
   });
   container.querySelector("[data-action='stage-comment']").addEventListener("click", () => createDraftCommentFromFinding(finding, location));
   container.querySelector("[data-action='dismiss-finding']").addEventListener("click", () => dismissFindingLocation(finding, location));
@@ -3060,6 +3082,7 @@ function updateDecorations() {
     if (commentedLines.has(`${location.side}:${location.line}`)) continue;
     const visible = isAiFindingExpanded(finding.id);
     const active = isAiFindingActive(finding.id);
+    const disclosureClass = disclosureStateClass(visible);
     const overviewLane = monacoApi.editor.OverviewRulerLane?.Right ?? 4;
     const minimapPosition = monacoApi.editor.MinimapPosition?.Inline ?? 1;
     const range = {
@@ -3067,8 +3090,8 @@ function updateDecorations() {
       options: {
         isWholeLine: visible,
         className: visible ? "review-ai-finding-rail-active" : "",
-        glyphMarginClassName: active ? "review-ai-finding-glyph-active" : "review-ai-finding-glyph",
-        glyphMarginHoverMessage: { value: `AI finding: ${finding.title}\n\nClick to focus the inline review.` },
+        glyphMarginClassName: `review-ai-finding-glyph ${active ? "review-ai-finding-glyph-active" : ""} ${disclosureClass}`,
+        glyphMarginHoverMessage: { value: aiFindingDisclosureLabel(finding) },
         overviewRuler: {
           color: "rgba(210, 168, 255, 0.58)",
           position: overviewLane,

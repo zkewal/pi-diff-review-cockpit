@@ -101,16 +101,25 @@ test("finding cards focus and pulse the selected inline finding", () => {
   assert.equal(appJs.includes("pulseInlineFinding"), true);
   assert.equal(appJs.includes("data-ai-finding-id"), true);
   assert.equal(appJs.includes("toggleInlineFindingAtLine"), true);
+  assert.equal(appJs.includes("toggleInlineFinding({ finding, location })"), true);
   assert.equal(appJs.includes("review-ai-finding-glyph"), true);
+  assert.equal(appJs.includes("review-disclosure-expanded"), true);
+  assert.equal(appJs.includes("review-disclosure-collapsed"), true);
+  assert.equal(appJs.includes("Collapse AI review"), true);
+  assert.equal(appJs.includes("Expand AI review"), true);
+  assert.equal(appJs.includes('data-action="collapse-finding"'), true);
   assert.equal(appJs.includes("updateFocusedInlineFinding(side, startLine)"), true);
   assert.equal(appJs.includes("filter(({ finding }) => isAiFindingExpanded(finding.id))"), true);
   assert.equal(appJs.includes("moveDiffFocus(1)"), true);
-  assert.equal(appJs.includes("Click to focus the inline review."), true);
+  assert.equal(appJs.includes("aiFindingDisclosureLabel(finding)"), true);
   assert.equal(appJs.includes("getOpenInlineFindingEntriesForFile(file).length"), true);
   assert.equal(appJs.includes("Jump to first inline AI review item in this file"), true);
   assert.equal(css.includes("ai-finding-pulse"), true);
   assert.equal(css.includes("review-ai-finding-glyph"), true);
   assert.equal(css.includes("review-ai-finding-glyph:hover::before"), true);
+  assert.equal(css.includes('content: "⌄"'), true);
+  assert.equal(css.includes('content: "›"'), true);
+  assert.equal(css.includes('content: "✦"'), false);
 });
 
 test("review progress is file-first and keyboard friendly", () => {
