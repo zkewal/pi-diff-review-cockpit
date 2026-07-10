@@ -73,7 +73,14 @@ Use this only after checking GitHub. The prior request may already have succeede
 
 ## PI Review Configuration
 
-AI review defaults to the active PI model, `standard` depth, three parallel chapter agents, and per-phase reasoning of scout `low`, chapter agents `medium`, validation `high`, and synthesis `high`.
+AI review defaults to `standard` depth and three parallel chapter agents. Standard routing uses `openai-codex/gpt-5.6-luna` at `medium` for scouting, `openai-codex/gpt-5.6-terra` at `high` for chapter agents, `openai-codex/gpt-5.6-sol` at `xhigh` for validation, and Terra at `high` for synthesis. Pi 0.80.6 or newer is required to expose these model IDs; older 0.80.x installations fall back to the active Pi model with a warning.
+
+| Phase | Fast | Standard | Deep |
+| --- | --- | --- | --- |
+| Scout | Luna `low` | Luna `medium` | Terra `high` |
+| Chapter agents | Luna `medium` | Terra `high` | Sol `xhigh` |
+| Validation critic | Terra `high` | Sol `xhigh` | Sol `max` |
+| Synthesis | Luna `medium` | Terra `high` | Sol `xhigh` |
 
 Configuration is dependency-free JSON for now. The cockpit reads, in order:
 
@@ -104,16 +111,18 @@ Later files override earlier files. Example:
       "additionalInstructions": "Prefer fewer, higher-confidence comments."
     },
     "phases": {
-      "scout": { "reasoning": "medium" },
-      "chapter": { "provider": "openai-codex", "model": "your-model-id", "reasoning": "high" },
-      "validation": { "reasoning": "high" },
-      "synthesis": { "reasoning": "high" }
+      "scout": { "provider": "openai-codex", "model": "gpt-5.6-luna", "reasoning": "medium" },
+      "chapter": { "provider": "openai-codex", "model": "gpt-5.6-terra", "reasoning": "high" },
+      "validation": { "provider": "openai-codex", "model": "gpt-5.6-sol", "reasoning": "xhigh" },
+      "synthesis": { "provider": "openai-codex", "model": "gpt-5.6-terra", "reasoning": "high" }
     }
   }
 }
 ```
 
 Skill presets are `minimal`, `balanced`, `security`, and `exhaustive`. If `skills` is omitted, `balanced` is used. Unknown skills are ignored with a warning; if a config accidentally disables every skill, review falls back to `correctness`.
+
+Reasoning values are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. A configured level is used only when the selected model supports it.
 
 For a short explicit skill list, this is also accepted:
 
@@ -133,7 +142,7 @@ The cockpit workflow reads PR metadata when GitHub access is available. It will 
 
 - macOS
 - Node.js 22.19+
-- `pi` installed
+- Pi 0.80.6+ installed for GPT-5.6 routing
 - `gh` authenticated for private GitHub PRs in the cockpit workflow
 
 ## Renderer Assets

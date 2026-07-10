@@ -39,6 +39,10 @@ test("readme documents direct cli invocation and ref-based PR reviews", () => {
   assert.equal(readme.includes("isolated review worktree"), false);
   assert.equal(readme.includes("detached cache worktree"), true);
   assert.equal(readme.includes("macOS, Linux, or Windows"), false);
+  assert.match(readme, /gpt-5\.6-luna/);
+  assert.match(readme, /gpt-5\.6-terra/);
+  assert.match(readme, /gpt-5\.6-sol/);
+  assert.match(readme, /Pi 0\.80\.6/);
 });
 
 test("help and README document explicit ambiguous-intent abandonment and duplicate risk", () => {
