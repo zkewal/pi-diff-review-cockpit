@@ -127,6 +127,37 @@ test("attaches listeners before loading the static shell and waits for boot befo
   assert.deepEqual(dispatched, ["request-file"]);
 });
 
+test("host injection rejects malformed GitHub context results", () => {
+  const window = new FakeWindow();
+  const controller = createReviewWindowController({
+    window,
+    shellPath: "/shell.html",
+    title: "Diff review",
+    bootstrap: {} as never,
+    protocol,
+    onMessage: () => {},
+    onClosed: () => {},
+    onError: () => {},
+  });
+  controller.start();
+  window.emit("message", { type: "renderer-ready" });
+  const bootstrap = bootstrapFrom(window.sent[0]);
+  const context: RendererProtocolContext = { ...protocol, sessionId: bootstrap.sessionId, capability: bootstrap.capability };
+  window.emit("message", frame(context, { type: "renderer-booted" }));
+
+  assert.equal(controller.sendHostMessage({ type: "github-context-result", requestId: "context-1", ok: true, context: { owner: "broken" } }), false);
+  assert.equal(controller.sendHostMessage({
+    type: "github-context-result",
+    requestId: "context-1",
+    ok: true,
+    context: {
+      owner: "headout", repo: "magellan", pullNumber: 646,
+      reviewedHeadSha: "head", remoteHeadSha: "head", fetchedAt: "2026-07-10T12:00:00Z",
+      conversationComments: [], reviews: [], threads: [], diagnostics: [],
+    },
+  }), true);
+});
+
 test("queues authenticated commands until renderer boot completes", () => {
   const window = new FakeWindow();
   const dispatched: string[] = [];

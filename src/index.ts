@@ -9,6 +9,7 @@ import { analyzeReviewDataset } from "./analysis.js";
 import { parseDiffReviewArgs } from "./command.js";
 import { createReviewFilePatchLoader } from "./file-patch.js";
 import { loadReviewFileContents } from "./git.js";
+import { fetchGitHubReviewContext } from "./github-review-context.js";
 import {
   buildGitHubReviewPublishPlan,
   publishGitHubReview,
@@ -60,6 +61,9 @@ import type {
   ReviewPublishPayload,
   ReviewPublishGitHubReviewSuccessMessage,
   ReviewRunAiReviewPayload,
+  ReviewRefreshGitHubContextPayload,
+  ReviewOpenExternalUrlPayload,
+  GitHubReviewContextSnapshot,
   ReviewRequestFilePayload,
   ReviewRendererSessionSnapshot,
   ReviewSaveSessionPayload,
@@ -87,6 +91,14 @@ function isPublishPayload(value: ReviewWindowMessage): value is ReviewPublishPay
 
 function isRunAiReviewPayload(value: ReviewWindowMessage): value is ReviewRunAiReviewPayload {
   return value.type === "run-ai-review";
+}
+
+function isRefreshGitHubContextPayload(value: ReviewWindowMessage): value is ReviewRefreshGitHubContextPayload {
+  return value.type === "refresh-github-context";
+}
+
+function isOpenExternalUrlPayload(value: ReviewWindowMessage): value is ReviewOpenExternalUrlPayload {
+  return value.type === "open-external-url";
 }
 
 function isSaveSessionPayload(value: ReviewWindowMessage): value is ReviewSaveSessionPayload {
@@ -627,6 +639,7 @@ export default function (pi: ExtensionAPI) {
     let reviewLifecycle: ReviewHostPublishLifecycle<ReviewSubmitPayload | ReviewCancelPayload> | null = null;
     try {
       let aiReviewInFlight = false;
+      let githubContextInFlight: Promise<GitHubReviewContextSnapshot> | null = null;
       const cleanup = (): void => {
         windowController?.dispose();
         if (activeWindow === window) {
@@ -913,6 +926,74 @@ export default function (pi: ExtensionAPI) {
         }
       };
 
+      const matchingCachedGithubContext = (): GitHubReviewContextSnapshot | undefined => {
+        const github = dataset.source.github;
+        const context = sessionSnapshot?.githubContext;
+        if (github == null || context == null) return undefined;
+        return context.owner === github.owner
+          && context.repo === github.repo
+          && context.pullNumber === github.number
+          && context.reviewedHeadSha === dataset.source.headRevision
+          ? context
+          : undefined;
+      };
+
+      const refreshGithubContext = (): Promise<GitHubReviewContextSnapshot> => {
+        if (githubContextInFlight != null) return githubContextInFlight;
+        const github = dataset.source.github;
+        const reviewedHeadSha = dataset.source.headRevision;
+        if (github == null || reviewedHeadSha == null) {
+          return Promise.reject(new Error("This review source has no GitHub pull request context."));
+        }
+        githubContextInFlight = fetchGitHubReviewContext(pi, dataset.workingRoot, {
+          owner: github.owner,
+          repo: github.repo,
+          pullNumber: github.number,
+          reviewedHeadSha,
+        }).finally(() => { githubContextInFlight = null; });
+        return githubContextInFlight;
+      };
+
+      const safeGithubContextError = (error: unknown): string => {
+        const message = error instanceof Error ? error.message : String(error);
+        return /auth|authentication|login/i.test(message)
+          ? "GitHub authentication is required. Run gh auth login."
+          : "GitHub review context could not be loaded.";
+      };
+
+      const handleRefreshGithubContext = async (message: ReviewRefreshGitHubContextPayload): Promise<void> => {
+        try {
+          const context = await refreshGithubContext();
+          if (!canUpdateAiReview()) return;
+          const nextSnapshot = { ...(sessionSnapshot ?? {}), githubContext: context };
+          queueSessionSave(nextSnapshot);
+          if (!await flushSessionSave()) throw new Error("Could not save refreshed GitHub review context.");
+          if (!canUpdateAiReview()) return;
+          sendWindowMessage({ type: "github-context-result", requestId: message.requestId, ok: true, context });
+        } catch (error) {
+          if (!canUpdateAiReview()) return;
+          const messageText = safeGithubContextError(error);
+          sendWindowMessage({
+            type: "github-context-result",
+            requestId: message.requestId,
+            ok: false,
+            message: messageText,
+            ...(matchingCachedGithubContext() == null ? {} : { cachedContext: matchingCachedGithubContext() }),
+          });
+        }
+      };
+
+      const handleOpenExternalUrl = async (message: ReviewOpenExternalUrlPayload): Promise<void> => {
+        try {
+          const url = new URL(message.url);
+          if (url.protocol !== "https:") return;
+          const result = await pi.exec("open", [url.href], { cwd: dataset.workingRoot, timeout: 30_000 });
+          if (result.code !== 0) ctx.ui.notify("Could not open the GitHub link.", "warning");
+        } catch {
+          ctx.ui.notify("Could not open the GitHub link.", "warning");
+        }
+      };
+
       const onMessage = (data: unknown): void => {
         const message = data as ReviewWindowMessage;
         if (isSaveSessionPayload(message)) {
@@ -925,6 +1006,14 @@ export default function (pi: ExtensionAPI) {
         }
         if (isRunAiReviewPayload(message)) {
           void handleRunAiReview(message);
+          return;
+        }
+        if (isRefreshGitHubContextPayload(message)) {
+          void handleRefreshGithubContext(message);
+          return;
+        }
+        if (isOpenExternalUrlPayload(message)) {
+          void handleOpenExternalUrl(message);
           return;
         }
         if (isPublishPayload(message)) {

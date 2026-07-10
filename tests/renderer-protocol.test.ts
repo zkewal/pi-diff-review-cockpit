@@ -75,6 +75,8 @@ test("decodes each authenticated renderer command", () => {
     ["request", { type: "request-file", requestId: "request-1", fileId: "diff", scope: "git-diff" }, "request-file"],
     ["commit request", { type: "request-file", requestId: "request-1", fileId: "commit", scope: "commit", commitSha: "abc123" }, "request-file"],
     ["AI", { type: "run-ai-review", requestId: "ai-1" }, "run-ai-review"],
+    ["GitHub context", { type: "refresh-github-context", requestId: "context-1" }, "refresh-github-context"],
+    ["external URL", { type: "open-external-url", url: "https://github.com/headout/magellan/pull/646" }, "open-external-url"],
     ["checkpoint", { type: "checkpoint-session", snapshot: { activeFileId: "diff", comments: [] } }, "checkpoint-session"],
     ["save", { type: "save-session", requestId: "save-1", snapshot: { activeFileId: "diff", currentScope: "git-diff", selectedCommitSha: null, comments: [] } }, "save-session"],
     ["submit", submit(), "submit"],
@@ -191,7 +193,11 @@ test("rejects unknown fields and invalid enum values in privileged commands", ()
     snapshot: { activeFileId: "diff", currentScope: "git-diff", surprise: true },
   };
 
-  for (const message of [invalidPublish, invalidStatus, invalidSide, unknownSnapshotField]) {
+  const unsafeUrl = { type: "open-external-url", url: "javascript:alert(1)" };
+  const insecureUrl = { type: "open-external-url", url: "http://github.com/headout/magellan/pull/646" };
+  const forgedContext = { type: "github-context-result", requestId: "context-1", ok: true, context: {} };
+
+  for (const message of [invalidPublish, invalidStatus, invalidSide, unknownSnapshotField, unsafeUrl, insecureUrl, forgedContext]) {
     assert.equal(decodeRendererMessage(frame(message), context), null);
   }
 });
@@ -200,6 +206,7 @@ test("renderer checkpoints cannot overwrite host-owned analysis or publish state
   for (const snapshot of [
     { analysis: { status: "ready" } },
     { githubPublishIntent: { status: "confirmed" } },
+    { githubContext: { owner: "attacker" } },
   ]) {
     assert.equal(decodeRendererMessage(frame({ type: "checkpoint-session", snapshot }), context), null);
   }

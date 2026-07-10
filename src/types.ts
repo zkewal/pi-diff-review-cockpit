@@ -141,6 +141,16 @@ export interface ReviewRunAiReviewPayload {
   requestId: string;
 }
 
+export interface ReviewRefreshGitHubContextPayload {
+  type: "refresh-github-context";
+  requestId: string;
+}
+
+export interface ReviewOpenExternalUrlPayload {
+  type: "open-external-url";
+  url: string;
+}
+
 export type ReviewSessionRestoreStatus = "new" | "restored" | "stale" | "refreshed";
 
 export interface GitHubContextComment {
@@ -224,7 +234,7 @@ export interface ReviewSaveSessionPayload {
   snapshot: ReviewRendererSessionSnapshot;
 }
 
-export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewPublishPayload | ReviewRunAiReviewPayload | ReviewCheckpointSessionPayload | ReviewSaveSessionPayload;
+export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewPublishPayload | ReviewRunAiReviewPayload | ReviewRefreshGitHubContextPayload | ReviewOpenExternalUrlPayload | ReviewCheckpointSessionPayload | ReviewSaveSessionPayload;
 
 export interface ReviewFileDataMessage {
   type: "file-data";
@@ -253,6 +263,19 @@ export interface ReviewSaveSessionResultMessage {
   savedAt?: string;
   retryable?: boolean;
 }
+
+export type ReviewGitHubContextResultMessage = {
+  type: "github-context-result";
+  requestId: string;
+  ok: true;
+  context: GitHubReviewContextSnapshot;
+} | {
+  type: "github-context-result";
+  requestId: string;
+  ok: false;
+  message: string;
+  cachedContext?: GitHubReviewContextSnapshot;
+};
 
 export interface ReviewPublishGitHubReviewSuccessMessage {
   type: "publish-github-review-result";
@@ -377,7 +400,7 @@ export interface ReviewAiReviewErrorMessage {
   progress: AiReviewProgress;
 }
 
-export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewSaveSessionResultMessage | ReviewPublishGitHubReviewResultMessage | ReviewAiReviewProgressMessage | ReviewAiReviewPartialResultMessage | ReviewAiReviewResultMessage | ReviewAiReviewErrorMessage;
+export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewSaveSessionResultMessage | ReviewGitHubContextResultMessage | ReviewPublishGitHubReviewResultMessage | ReviewAiReviewProgressMessage | ReviewAiReviewPartialResultMessage | ReviewAiReviewResultMessage | ReviewAiReviewErrorMessage;
 
 export type ReviewFindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type ReviewFindingKind = "bug" | "security" | "migration-risk" | "api-contract" | "test-gap" | "performance" | "question" | "informational";

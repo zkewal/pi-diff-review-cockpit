@@ -8,6 +8,8 @@ import type {
   ReviewPublishPayload,
   ReviewRequestFilePayload,
   ReviewRunAiReviewPayload,
+  ReviewRefreshGitHubContextPayload,
+  ReviewOpenExternalUrlPayload,
   ReviewRendererSessionSnapshot,
   ReviewSaveSessionPayload,
   ReviewPublishGitHubReviewResultMessage,
@@ -57,6 +59,8 @@ export type DecodedRendererMessage =
   | ReviewRequestFilePayload
   | ReviewPublishPayload
   | ReviewRunAiReviewPayload
+  | ReviewRefreshGitHubContextPayload
+  | ReviewOpenExternalUrlPayload
   | ReviewCheckpointSessionPayload
   | ReviewSaveSessionPayload;
 
@@ -523,6 +527,22 @@ export function decodeRendererMessage(value: unknown, context: RendererProtocolC
       if (!hasKeys(message, ["type", "requestId"])) return null;
       const requestId = idValue(message.requestId);
       return requestId == null ? null : { type: "run-ai-review", requestId };
+    }
+    case "refresh-github-context": {
+      if (!hasKeys(message, ["type", "requestId"])) return null;
+      const requestId = idValue(message.requestId);
+      return requestId == null ? null : { type: "refresh-github-context", requestId };
+    }
+    case "open-external-url": {
+      if (!hasKeys(message, ["type", "url"])) return null;
+      const url = stringValue(message.url, 2_048, true);
+      if (url == null) return null;
+      try {
+        const parsed = new URL(url);
+        return parsed.protocol === "https:" ? { type: "open-external-url", url: parsed.href } : null;
+      } catch {
+        return null;
+      }
     }
     case "checkpoint-session": {
       if (!hasKeys(message, ["type", "snapshot"])) return null;

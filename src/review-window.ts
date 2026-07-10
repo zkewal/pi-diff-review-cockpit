@@ -7,6 +7,7 @@ import {
   type RendererProtocolContext,
 } from "./renderer-protocol.js";
 import type { ReviewRendererBootstrap, ReviewWindowData } from "./types.js";
+import { isGitHubReviewContextSnapshot } from "./session-store.js";
 
 interface ReviewWindowLike {
   on(event: "message", listener: (data: unknown) => void): unknown;
@@ -119,6 +120,19 @@ export class ReviewWindowController {
   sendHostMessage(message: unknown): boolean {
     if (!this.#rendererBooted || this.#protocol == null) return false;
     let decoded = message;
+    if (message != null
+      && typeof message === "object"
+      && !Array.isArray(message)
+      && (message as Record<string, unknown>).type === "github-context-result") {
+      const result = message as Record<string, unknown>;
+      if (typeof result.requestId !== "string" || result.requestId.length === 0 || typeof result.ok !== "boolean") return false;
+      if (result.ok === true) {
+        if (!isGitHubReviewContextSnapshot(result.context)) return false;
+      } else {
+        if (typeof result.message !== "string"
+          || (result.cachedContext !== undefined && !isGitHubReviewContextSnapshot(result.cachedContext))) return false;
+      }
+    }
     if (message != null
       && typeof message === "object"
       && !Array.isArray(message)
