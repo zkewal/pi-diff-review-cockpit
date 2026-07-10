@@ -58,6 +58,39 @@ export interface DiffReviewComment {
   status?: "staged" | "published";
   published?: boolean;
   publishedAt?: string;
+  githubReviewId?: number;
+  githubReviewUrl?: string;
+}
+
+export type GitHubReviewPublishIntentStatus = "pending" | "confirmed" | "ambiguous";
+
+export interface GitHubReviewPublishSourceLock {
+  sourceKey: string;
+  owner: string;
+  repo: string;
+  pullNumber: number;
+  reviewedBaseSha?: string;
+  reviewedHeadSha: string;
+}
+
+export interface GitHubReviewPublishIntentReceipt {
+  reviewId?: number;
+  reviewUrl?: string;
+  submittedAt?: string;
+  warnings: string[];
+}
+
+export interface GitHubReviewPublishIntent {
+  version: 1;
+  status: GitHubReviewPublishIntentStatus;
+  correlationId: string;
+  source: GitHubReviewPublishSourceLock;
+  representedCommentIds: string[];
+  submittedComments: DiffReviewComment[];
+  createdAt: string;
+  updatedAt: string;
+  lastError?: string;
+  receipt?: GitHubReviewPublishIntentReceipt;
 }
 
 export interface AcceptedFindingComment {
@@ -132,16 +165,27 @@ export interface ReviewSessionSnapshot {
   aiReviewCompleted?: boolean;
   aiReviewStatus?: AiReviewRunStatus;
   dismissedFindingLocationKeys?: string[];
+  githubPublishIntent?: GitHubReviewPublishIntent;
   updatedAt?: string;
+}
+
+export type ReviewRendererSessionSnapshot = Omit<
+  ReviewSessionSnapshot,
+  "analysis" | "githubPublishIntent"
+>;
+
+export interface ReviewCheckpointSessionPayload {
+  type: "checkpoint-session";
+  snapshot: ReviewRendererSessionSnapshot;
 }
 
 export interface ReviewSaveSessionPayload {
   type: "save-session";
   requestId?: string;
-  snapshot: ReviewSessionSnapshot;
+  snapshot: ReviewRendererSessionSnapshot;
 }
 
-export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewPublishPayload | ReviewRunAiReviewPayload | ReviewSaveSessionPayload;
+export type ReviewWindowMessage = ReviewSubmitPayload | ReviewCancelPayload | ReviewRequestFilePayload | ReviewPublishPayload | ReviewRunAiReviewPayload | ReviewCheckpointSessionPayload | ReviewSaveSessionPayload;
 
 export interface ReviewFileDataMessage {
   type: "file-data";
@@ -168,17 +212,32 @@ export interface ReviewSaveSessionResultMessage {
   ok: boolean;
   message?: string;
   savedAt?: string;
+  retryable?: boolean;
 }
 
-export interface ReviewPublishGitHubReviewResultMessage {
+export interface ReviewPublishGitHubReviewSuccessMessage {
   type: "publish-github-review-result";
   requestId: string;
-  ok: boolean;
-  message?: string;
-  publishedCommentIds?: string[];
-  skippedCount?: number;
-  submittedAt?: string;
+  ok: true;
+  message: string;
+  publishedCommentIds: string[];
+  publishedComments: DiffReviewComment[];
+  submittedAt: string;
+  reviewId?: number;
+  reviewUrl?: string;
+  warnings: string[];
 }
+
+export interface ReviewPublishGitHubReviewFailureMessage {
+  type: "publish-github-review-result";
+  requestId: string;
+  ok: false;
+  message: string;
+}
+
+export type ReviewPublishGitHubReviewResultMessage =
+  | ReviewPublishGitHubReviewSuccessMessage
+  | ReviewPublishGitHubReviewFailureMessage;
 
 export type AiReviewRunStatus = "idle" | "running" | "done" | "failed";
 export type AiReviewStepStatus = "queued" | "running" | "done" | "failed";
@@ -368,5 +427,14 @@ export interface ReviewWindowData {
     storagePath: string;
     updatedAt: string | null;
     snapshot: ReviewSessionSnapshot | null;
+    publishWarning?: string;
+    recoveryPath?: string;
   };
+}
+
+export interface ReviewRendererBootstrap {
+  protocol: 1;
+  sessionId: string;
+  capability: string;
+  data: ReviewWindowData;
 }

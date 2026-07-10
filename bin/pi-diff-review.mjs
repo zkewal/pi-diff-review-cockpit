@@ -78,6 +78,9 @@ Options:
   --repo, --cwd <path>       Run the review from this repository path
   --reset-review             Clear saved cockpit metadata for this review before opening
   --fresh                    Alias for --reset-review
+  --abandon-ambiguous-publish
+                             Preserve review progress but discard a blocked publish intent;
+                             retrying may create a duplicate GitHub review
   --with-pi-extensions       Also load your configured Pi extensions
   -h, --help                 Show this help
   -v, --version              Show the version

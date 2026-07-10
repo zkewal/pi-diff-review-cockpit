@@ -60,7 +60,7 @@ test("sanitizes private refs for unsafe owner and repo values", () => {
   assert.match(refs.headRef, /^refs\/pi-diff-review-cockpit\/github\/--head-out\/--magellan\/pr\/646\/head$/);
 });
 
-test("builds github pr dataset from private refs without creating a worktree", async () => {
+test("builds github pr dataset from immutable private-ref SHAs without creating a worktree", async () => {
   const ref = parseGitHubPrUrl("https://github.com/headout/magellan/pull/646");
   const privateRefs = buildPrPrivateRefs(ref);
   const calls: string[] = [];
@@ -75,7 +75,7 @@ test("builds github pr dataset from private refs without creating a worktree", a
         author: { login: "dev" },
         baseRefName: "main",
         headRefName: "feat/qa",
-        headRepositoryOwner: { login: "headout" },
+        headRepositoryOwner: { login: "fork-owner" },
         isDraft: false,
         state: "OPEN",
         url: ref.url,
@@ -83,10 +83,12 @@ test("builds github pr dataset from private refs without creating a worktree", a
     }],
     [["git", "fetch", "origin", `+refs/heads/main:${privateRefs.baseRef}`].join("\0"), { stdout: "" }],
     [["git", "fetch", "origin", `+pull/646/head:${privateRefs.headRef}`].join("\0"), { stdout: "" }],
-    [["git", "diff", "--find-renames", "-M", "--name-status", `${privateRefs.baseRef}...${privateRefs.headRef}`, "--"].join("\0"), {
+    [["git", "rev-parse", "--verify", `${privateRefs.baseRef}^{commit}`].join("\0"), { stdout: "base-immutable-sha\n" }],
+    [["git", "rev-parse", "--verify", `${privateRefs.headRef}^{commit}`].join("\0"), { stdout: "head-immutable-sha\n" }],
+    [["git", "diff", "--find-renames", "-M", "--name-status", "base-immutable-sha...head-immutable-sha", "--"].join("\0"), {
       stdout: "A\tsrc/app/api/qa_api.py\n",
     }],
-    [["git", "diff", "--find-renames", "-M", "--unified=0", "--no-color", `${privateRefs.baseRef}...${privateRefs.headRef}`, "--"].join("\0"), {
+    [["git", "diff", "--find-renames", "-M", "--unified=0", "--no-color", "base-immutable-sha...head-immutable-sha", "--"].join("\0"), {
       stdout: [
         "diff --git a/src/app/api/qa_api.py b/src/app/api/qa_api.py",
         "new file mode 100644",
@@ -97,13 +99,13 @@ test("builds github pr dataset from private refs without creating a worktree", a
         "+two",
       ].join("\n"),
     }],
-    [["git", "ls-tree", "-r", "--name-only", privateRefs.headRef].join("\0"), {
+    [["git", "ls-tree", "-r", "--name-only", "head-immutable-sha"].join("\0"), {
       stdout: "src/app/api/qa_api.py\n",
     }],
-    [["git", "diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", privateRefs.headRef].join("\0"), {
+    [["git", "diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", "head-immutable-sha"].join("\0"), {
       stdout: "A\tsrc/app/api/qa_api.py\n",
     }],
-    [["git", "log", "--max-count=50", "--format=%H%x09%h%x09%s", `${privateRefs.baseRef}..${privateRefs.headRef}`].join("\0"), {
+    [["git", "log", "--max-count=50", "--format=%H%x09%h%x09%s", "base-immutable-sha..head-immutable-sha"].join("\0"), {
       stdout: "",
     }],
   ]);
@@ -116,10 +118,11 @@ test("builds github pr dataset from private refs without creating a worktree", a
 
   assert.equal(dataset.repoRoot, "/repo");
   assert.equal(dataset.workingRoot, "/repo");
-  assert.equal(dataset.source.baseRevision, privateRefs.baseRef);
-  assert.equal(dataset.source.headRevision, privateRefs.headRef);
+  assert.equal(dataset.source.baseRevision, "base-immutable-sha");
+  assert.equal(dataset.source.headRevision, "head-immutable-sha");
   assert.deepEqual(dataset.analysisFileIds, [dataset.files[0]?.id]);
   assert.deepEqual(dataset.files.map((file) => file.path), ["src/app/api/qa_api.py"]);
   assert.equal(calls.some((call) => call.includes("\0worktree\0")), false);
   assert.equal(calls.some((call) => call.includes("\0apply\0")), false);
+  assert.equal(calls.some((call) => call.includes("fork-owner")), false);
 });

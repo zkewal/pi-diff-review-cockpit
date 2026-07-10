@@ -1,6 +1,6 @@
-import { readFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { extname } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readRepositoryTextFile } from "./repository-text.js";
 import type { ChangeStatus, ReviewFile, ReviewFileComparison, ReviewFileContents, ReviewLineRange, ReviewScope } from "./types.js";
 
 interface ChangedPath {
@@ -293,11 +293,7 @@ async function getRevisionContent(pi: ExtensionAPI, repoRoot: string, revision: 
 }
 
 async function getWorkingTreeContent(repoRoot: string, path: string): Promise<string> {
-  try {
-    return await readFile(join(repoRoot, path), "utf8");
-  } catch {
-    return "";
-  }
+  return readRepositoryTextFile(repoRoot, path);
 }
 
 async function getIndexContent(pi: ExtensionAPI, repoRoot: string, path: string): Promise<string> {

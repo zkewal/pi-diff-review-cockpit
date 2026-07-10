@@ -1,6 +1,6 @@
-import { completeSimple, type UserMessage } from "@earendil-works/pi-ai";
+import { completeSimple, type UserMessage } from "@earendil-works/pi-ai/compat";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { parseReviewAnalysisJson } from "./analysis.js";
+import { parseReviewAnalysisJson, validateAnalysisRelationships } from "./analysis.js";
 import type { ReviewDataset } from "./sources/types.js";
 import type {
   AiReviewPhase,
@@ -55,6 +55,8 @@ const VALIDATION_SYSTEM_PROMPT = `You are the validation critic for a PI diff re
 
 Return strict JSON only: {"decisions":[...]}.
 
+Return exactly one decision for every input candidate finding id. Do not omit candidate ids, repeat ids, or invent ids.
+
 Each decision must contain:
 - id: the candidate finding id
 - action: "keep", "drop", or "adjust"
@@ -64,10 +66,11 @@ Each decision must contain:
 - title: optional corrected title
 - explanation: optional corrected explanation
 - suggestedComment: optional corrected ready-to-post reviewer comment
-- locations: optional corrected locations using only input file ids and paths
+- locations: optional corrected locations using only exact input file ids and paths, side "original" or "modified", and positive changed-line numbers
 
 Keep only findings that are concrete, actionable, tied to a real changed line or file in the input, and supported by the candidate's own evidence. Drop speculative, duplicate, vague, or unverifiable claims.
 Use the supplied changed file patches to verify that each location points at the most relevant changed line for the finding. If the issue is real but the candidate line is imprecise, return action "adjust" with corrected locations.
+Every kept or adjusted finding must retain at least one location on a supplied commentable changed line.
 Use the active reviewSkills from the input as the validation rubric. Drop findings that do not satisfy at least one enabled skill or that apply a disabled/custom skill without evidence.`;
 
 const SYNTHESIS_SYSTEM_PROMPT = `You are synthesizing a PI diff review after scout, chapter subagents, and validation.
@@ -80,7 +83,8 @@ Return strict JSON only:
   "body": "markdown review summary"
 }
 
-The body should be concise, human-reviewer friendly, and grounded in the validated findings. Do not invent issues or claim tests ran unless the input says so.`;
+The body should be concise, human-reviewer friendly, and grounded in the validated findings. Do not invent issues or claim tests ran unless the input says so.
+The input suggestedVerdict is deterministic and must be returned unchanged.`;
 
 interface ChapterReviewResult {
   chapterId: string;
@@ -143,6 +147,37 @@ function completeProgress(progress: AiReviewProgress, status: AiReviewProgress["
     status,
     phase: status === "done" || status === "failed" ? "done" : progress.phase,
     message,
+  };
+}
+
+export function createValidationFailureResult(analysis: ReviewAnalysis, progress: AiReviewProgress, error: unknown): {
+  analysis: ReviewAnalysis;
+  progress: AiReviewProgress;
+} {
+  const detail = error instanceof Error ? error.message : String(error);
+  const message = `AI review validation failed: ${detail}`;
+  const withoutCandidates = rebuildFindingReferences(analysis, []);
+  const failedProgress = refreshProgressFindingCounts(progress, withoutCandidates);
+  return {
+    analysis: {
+      ...withoutCandidates,
+      status: "failed",
+      message,
+      approvalPacket: {
+        ...withoutCandidates.approvalPacket,
+        summary: "AI review findings are unavailable because validation failed.",
+        acceptedRisks: [],
+        suggestedVerdict: "comment",
+        body: "AI review validation failed before any findings could be accepted.",
+      },
+    },
+    progress: completeProgress({
+      ...failedProgress,
+      chapters: failedProgress.chapters.map((chapter) => ({
+        ...chapter,
+        message: "Validation failed; no AI review findings are available.",
+      })),
+    }, "failed", message),
   };
 }
 
@@ -402,10 +437,6 @@ function isSeverity(value: unknown): value is ReviewFindingSeverity {
   return value === "critical" || value === "high" || value === "medium" || value === "low" || value === "info";
 }
 
-function isVerdict(value: unknown): value is ApprovalPacket["suggestedVerdict"] {
-  return value === "approve" || value === "comment" || value === "request-changes";
-}
-
 export interface AiReviewValidationDecision {
   id: string;
   action: "keep" | "drop" | "adjust";
@@ -418,45 +449,83 @@ export interface AiReviewValidationDecision {
   locations?: ReviewLocation[];
 }
 
-function isCommentSide(value: unknown): value is ReviewLocation["side"] {
-  return value === "original" || value === "modified" || value === "file";
+type ValidationDecisionIdentity = Record<string, unknown> & {
+  id: string;
+  action: AiReviewValidationDecision["action"];
+};
+
+function assertValidationDecisionContract(
+  decisions: unknown[],
+  findingIds: Set<string>,
+): asserts decisions is ValidationDecisionIdentity[] {
+  const seenIds = new Set<string>();
+
+  for (const decision of decisions) {
+    if (!isRecord(decision)) {
+      throw new Error("AI validation returned malformed decision entry.");
+    }
+    const id = typeof decision.id === "string" ? decision.id : "";
+    if (!findingIds.has(id)) {
+      throw new Error(`AI validation returned decision for unknown candidate ${id || "<invalid>"}.`);
+    }
+    if (seenIds.has(id)) {
+      throw new Error(`AI validation returned duplicate decision for candidate ${id}.`);
+    }
+    seenIds.add(id);
+    if (decision.action !== "keep" && decision.action !== "drop" && decision.action !== "adjust") {
+      throw new Error(`AI validation returned invalid action for candidate ${id}.`);
+    }
+  }
+
+  const missingIds = [...findingIds].filter((id) => !seenIds.has(id));
+  if (missingIds.length > 0) {
+    throw new Error(`AI validation is missing decisions for candidate(s): ${missingIds.join(", ")}.`);
+  }
 }
 
-function normalizeDecisionLocations(value: unknown): ReviewLocation[] | undefined {
-  if (!Array.isArray(value)) return undefined;
+function normalizeDecisionLocations(value: unknown, candidateId: string): ReviewLocation[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`AI validation returned invalid location for candidate ${candidateId}.`);
+  }
   const locations: ReviewLocation[] = [];
 
   for (const item of value) {
-    if (!isRecord(item)) continue;
-    const fileId = typeof item.fileId === "string" && item.fileId.trim().length > 0 ? item.fileId.trim() : null;
-    const path = typeof item.path === "string" && item.path.trim().length > 0 ? item.path.trim() : null;
-    if (!fileId || !path || !isCommentSide(item.side)) continue;
-    const line = item.line == null
-      ? null
-      : Number.isInteger(item.line) && Number(item.line) > 0
-        ? Number(item.line)
-        : undefined;
-    if (line === undefined) continue;
+    if (!isRecord(item)) {
+      throw new Error(`AI validation returned invalid location for candidate ${candidateId}.`);
+    }
+    if (item.side !== "original" && item.side !== "modified") {
+      throw new Error(`AI validation returned invalid location for candidate ${candidateId}.`);
+    }
+    const fileId = typeof item.fileId === "string" && item.fileId.length > 0 ? item.fileId : null;
+    const path = typeof item.path === "string" && item.path.length > 0 ? item.path : null;
+    if (!fileId || !path) {
+      throw new Error(`AI validation returned invalid location for candidate ${candidateId}.`);
+    }
+    if (typeof item.line !== "number" || !Number.isInteger(item.line) || item.line <= 0) {
+      throw new Error(`AI validation returned invalid location for candidate ${candidateId}.`);
+    }
+    const line = item.line;
     locations.push({ fileId, path, side: item.side, line });
   }
 
-  return locations.length > 0 ? locations : undefined;
+  return locations;
 }
 
 export function normalizeValidationDecisionsJson(text: string, findingIds: Set<string>): AiReviewValidationDecision[] {
   const parsed = parseJsonObject(text);
-  const decisions = Array.isArray(parsed.decisions) ? parsed.decisions : [];
+  if (!Array.isArray(parsed.decisions)) {
+    throw new Error("AI validation must return decisions as an array.");
+  }
+  const decisions = parsed.decisions;
   const normalized: AiReviewValidationDecision[] = [];
+  assertValidationDecisionContract(decisions, findingIds);
 
   for (const decision of decisions) {
-    if (!isRecord(decision)) continue;
-    const id = typeof decision.id === "string" ? decision.id : "";
-    if (!findingIds.has(id)) continue;
-    const action = decision.action === "drop" || decision.action === "adjust" ? decision.action : "keep";
-    const locations = normalizeDecisionLocations(decision.locations);
+    const locations = normalizeDecisionLocations(decision.locations, decision.id);
     normalized.push({
-      id,
-      action,
+      id: decision.id,
+      action: decision.action,
       reason: typeof decision.reason === "string" && decision.reason.trim().length > 0 ? decision.reason.trim() : "Validated by AI review.",
       ...(isSeverity(decision.severity) ? { severity: decision.severity } : {}),
       ...(isSeverity(decision.confidence) ? { confidence: decision.confidence } : {}),
@@ -477,11 +546,7 @@ function rebuildFindingReferences(analysis: ReviewAnalysis, findings: ReviewFind
     findingIds: chapter.findingIds.filter((findingId) => findingIds.has(findingId)),
   }));
   const unresolvedFindings = findings.filter((finding) => finding.severity !== "info").map((finding) => finding.id);
-  const suggestedVerdict = findings.some((finding) => finding.severity === "critical" || finding.severity === "high")
-    ? "request-changes"
-    : findings.length > 0
-      ? "comment"
-      : "comment";
+  const suggestedVerdict = verdictForFindings(findings);
   return {
     ...analysis,
     chapters,
@@ -495,12 +560,13 @@ function rebuildFindingReferences(analysis: ReviewAnalysis, findings: ReviewFind
   };
 }
 
-function verdictForFindings(findings: ReviewFinding[], fallback: ApprovalPacket["suggestedVerdict"]): ApprovalPacket["suggestedVerdict"] {
-  return findings.some((finding) => finding.severity === "critical" || finding.severity === "high")
+function verdictForFindings(findings: ReviewFinding[]): ApprovalPacket["suggestedVerdict"] {
+  const unresolvedFindings = findings.filter((finding) => finding.severity !== "info");
+  return unresolvedFindings.some((finding) => finding.severity === "critical" || finding.severity === "high")
     ? "request-changes"
-    : findings.length > 0
+    : unresolvedFindings.length > 0
       ? "comment"
-      : fallback;
+      : "approve";
 }
 
 function refreshApprovalPacketForFindings(analysis: ReviewAnalysis, scoutSummary: string): ReviewAnalysis {
@@ -522,13 +588,14 @@ function refreshApprovalPacketForFindings(analysis: ReviewAnalysis, scoutSummary
         ? "AI review found no concrete issues in changed hunks."
         : `AI review produced ${analysis.findings.length} validated finding(s).`,
       unresolvedFindings,
-      suggestedVerdict: verdictForFindings(analysis.findings, "comment"),
+      suggestedVerdict: verdictForFindings(analysis.findings),
       body,
     },
   };
 }
 
-export function applyValidationDecisions(analysis: ReviewAnalysis, decisions: AiReviewValidationDecision[]): ReviewAnalysis {
+export function applyValidationDecisions(analysis: ReviewAnalysis, decisions: AiReviewValidationDecision[], dataset: ReviewDataset): ReviewAnalysis {
+  assertValidationDecisionContract(decisions, new Set(analysis.findings.map((finding) => finding.id)));
   const decisionsById = new Map(decisions.map((decision) => [decision.id, decision] as const));
   const findings: ReviewFinding[] = [];
 
@@ -546,7 +613,9 @@ export function applyValidationDecisions(analysis: ReviewAnalysis, decisions: Ai
     });
   }
 
-  return rebuildFindingReferences(analysis, findings);
+  const validated = rebuildFindingReferences(analysis, findings);
+  validateAnalysisRelationships(validated, dataset, true);
+  return validated;
 }
 
 async function buildValidationInput(
@@ -621,12 +690,8 @@ async function validateFindings(
   const findingIds = new Set(analysis.findings.map((finding) => finding.id));
   const text = await completeTextJson(ctx, config, "validation", VALIDATION_SYSTEM_PROMPT, await buildValidationInput(dataset, analysis, scoutSummary, config, getFilePatch));
   const decisions = normalizeValidationDecisionsJson(text, findingIds);
-  const fileById = new Map(dataset.files.map((file) => [file.id, file] as const));
-  const validated = applyValidationDecisions(analysis, decisions);
-  return refreshApprovalPacketForFindings({
-    ...validated,
-    findings: validated.findings.map((finding) => sanitizeFindingLocations(finding, fileById)),
-  }, scoutSummary);
+  const validated = applyValidationDecisions(analysis, decisions, dataset);
+  return refreshApprovalPacketForFindings(validated, scoutSummary);
 }
 
 export interface AiReviewSynthesisJson {
@@ -640,7 +705,7 @@ export function normalizeSynthesisJson(text: string, fallback: ApprovalPacket): 
   const parsed = parseJsonObject(text);
   return {
     summary: typeof parsed.summary === "string" && parsed.summary.trim().length > 0 ? parsed.summary.trim() : fallback.summary,
-    suggestedVerdict: isVerdict(parsed.suggestedVerdict) ? parsed.suggestedVerdict : fallback.suggestedVerdict,
+    suggestedVerdict: fallback.suggestedVerdict,
     acceptedRisks: Array.isArray(parsed.acceptedRisks) ? parsed.acceptedRisks.filter((risk): risk is string => typeof risk === "string" && risk.trim().length > 0).map((risk) => risk.trim()) : fallback.acceptedRisks,
     body: typeof parsed.body === "string" && parsed.body.trim().length > 0 ? parsed.body.trim() : fallback.body,
   };
@@ -653,6 +718,8 @@ function buildSynthesisInput(dataset: ReviewDataset, analysis: ReviewAnalysis, s
     reviewSkills: reviewSkillsForInput(config),
     scoutSummary,
     failedChapterCount,
+    suggestedVerdict: analysis.approvalPacket.suggestedVerdict,
+    unresolvedFindingIds: analysis.approvalPacket.unresolvedFindings,
     coverage: analysis.coverage,
     chapters: analysis.chapters.map((chapter) => ({
       id: chapter.id,
@@ -720,11 +787,7 @@ function mergeChapterResults(baseAnalysis: ReviewAnalysis, dataset: ReviewDatase
   });
 
   const unresolvedFindings = findings.filter((finding) => finding.severity !== "info").map((finding) => finding.id);
-  const suggestedVerdict: ApprovalPacket["suggestedVerdict"] = findings.some((finding) => finding.severity === "critical" || finding.severity === "high")
-    ? "request-changes"
-    : findings.length > 0
-      ? "comment"
-      : baseAnalysis.approvalPacket.suggestedVerdict;
+  const suggestedVerdict = verdictForFindings(findings);
   const body = [
     baseAnalysis.approvalPacket.body,
     "",
@@ -753,6 +816,41 @@ function mergeChapterResults(baseAnalysis: ReviewAnalysis, dataset: ReviewDatase
       body,
     },
   };
+}
+
+export function finalizeAiReviewResult(options: {
+  analysis: ReviewAnalysis;
+  progress: AiReviewProgress;
+  completedChapterCount: number;
+  failedChapterCount: number;
+  finalNotes: string[];
+}): { analysis: ReviewAnalysis; progress: AiReviewProgress } {
+  const noteSuffix = options.finalNotes.length > 0 ? ` ${options.finalNotes.join(" ")}` : "";
+  if (options.failedChapterCount > 0) {
+    const warning = `AI review incomplete: ${options.failedChapterCount} review area(s) failed. Manual review is required for the failed areas before approval.`;
+    const analysis: ReviewAnalysis = {
+      ...options.analysis,
+      status: "failed",
+      message: `${warning} ${options.analysis.findings.length} validated finding(s) are available from ${options.completedChapterCount} completed review area(s).${noteSuffix}`,
+      approvalPacket: {
+        ...options.analysis.approvalPacket,
+        summary: `${warning} ${options.analysis.approvalPacket.summary}`,
+        suggestedVerdict: options.analysis.approvalPacket.suggestedVerdict === "request-changes"
+          ? "request-changes"
+          : "comment",
+        body: `${options.analysis.approvalPacket.body}\n\n> ${warning}`.trim(),
+      },
+    };
+    const progress = refreshProgressFindingCounts(options.progress, analysis);
+    return { analysis, progress: completeProgress(progress, "failed", analysis.message) };
+  }
+
+  const analysis: ReviewAnalysis = {
+    ...options.analysis,
+    message: `AI review complete: ${options.analysis.findings.length} validated finding(s) across ${options.completedChapterCount} review area(s).${noteSuffix}`,
+  };
+  const progress = refreshProgressFindingCounts(options.progress, analysis);
+  return { analysis, progress: completeProgress(progress, "done", analysis.message) };
 }
 
 export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewDataset, analysis: ReviewAnalysis, options: RunAiReviewOptions): Promise<{ analysis: ReviewAnalysis; progress: AiReviewProgress }> {
@@ -853,13 +951,9 @@ export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewD
     };
     options.onProgress(progress);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    finalNotes.push(`Validation critic failed: ${message}`);
-    progress = {
-      ...progress,
-      message: "Validation failed; using structurally valid findings.",
-    };
-    options.onProgress(progress);
+    const failure = createValidationFailureResult(nextAnalysis, progress, error);
+    options.onProgress(failure.progress);
+    return failure;
   }
 
   progress = {
@@ -876,16 +970,13 @@ export async function runAiReview(ctx: ExtensionCommandContext, dataset: ReviewD
     finalNotes.push(`Synthesis failed: ${message}`);
   }
 
-  nextAnalysis.message = `AI review complete: ${nextAnalysis.findings.length} validated finding(s) across ${results.length} review area(s).`;
-  if (finalNotes.length > 0) {
-    nextAnalysis.message = `${nextAnalysis.message} ${finalNotes.join(" ")}`;
-  }
-  if (failedChapterCount > 0) {
-    nextAnalysis.message = `${nextAnalysis.message} ${failedChapterCount} review area(s) failed.`;
-  }
-  progress = refreshProgressFindingCounts(progress, nextAnalysis);
-  progress = completeProgress(progress, "done", nextAnalysis.message);
-  return { analysis: nextAnalysis, progress };
+  return finalizeAiReviewResult({
+    analysis: nextAnalysis,
+    progress,
+    completedChapterCount: results.length,
+    failedChapterCount,
+    finalNotes,
+  });
 }
 
 export function createAiReviewFailedProgress(analysis: ReviewAnalysis, message: string, config?: AiReviewRuntimeConfig): AiReviewProgress {

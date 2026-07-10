@@ -1,4 +1,137 @@
-const reviewData = JSON.parse(document.getElementById("diff-review-data").textContent || "{}");
+import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
+import "monaco-editor/esm/vs/language/typescript/monaco.contribution.js";
+import "monaco-editor/esm/vs/language/json/monaco.contribution.js";
+import "monaco-editor/esm/vs/language/css/monaco.contribution.js";
+import "monaco-editor/esm/vs/language/html/monaco.contribution.js";
+import "monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution.js";
+import "monaco-editor/esm/vs/basic-languages/shell/shell.contribution.js";
+import "monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution.js";
+import "monaco-editor/esm/vs/basic-languages/rust/rust.contribution.js";
+import "monaco-editor/esm/vs/basic-languages/java/java.contribution.js";
+import "monaco-editor/esm/vs/basic-languages/kotlin/kotlin.contribution.js";
+import "monaco-editor/esm/vs/basic-languages/python/python.contribution.js";
+import "monaco-editor/esm/vs/basic-languages/go/go.contribution.js";
+import editorWorkerSource from "review-worker:editor";
+import jsonWorkerSource from "review-worker:json";
+import cssWorkerSource from "review-worker:css";
+import htmlWorkerSource from "review-worker:html";
+import typescriptWorkerSource from "review-worker:typescript";
+import { createCommentEditorSavePolicy } from "./comment-editor-save-policy.js";
+import { createCommentEditBuffer } from "./comment-edit-buffer.js";
+import { replaceDiffEditorModels } from "./model-lifecycle.js";
+import { applyAuthoritativePublishedCommentState } from "./publish-comment-state.js";
+import { createSessionSaveScheduler } from "./session-save-scheduler.js";
+
+const localWorkerSources = Object.freeze({
+  editor: editorWorkerSource,
+  json: jsonWorkerSource,
+  css: cssWorkerSource,
+  html: htmlWorkerSource,
+  typescript: typescriptWorkerSource,
+});
+const workerObjectUrls = new Map();
+const workerProbe = Object.freeze({ __piDiffReviewWorkerProbe: "v1" });
+
+function workerKindForLabel(label) {
+  return {
+    json: "json",
+    css: "css",
+    scss: "css",
+    less: "css",
+    html: "html",
+    handlebars: "html",
+    razor: "html",
+    typescript: "typescript",
+    javascript: "typescript",
+  }[label] || "editor";
+}
+
+function workerObjectUrl(kind) {
+  const existing = workerObjectUrls.get(kind);
+  if (existing) return existing;
+  const source = localWorkerSources[kind];
+  const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+  workerObjectUrls.set(kind, url);
+  return url;
+}
+
+function createLocalMonacoWorker(label) {
+  const kind = workerKindForLabel(label);
+  return { kind, worker: new Worker(workerObjectUrl(kind)) };
+}
+
+function disposeWorkerObjectUrls() {
+  for (const url of workerObjectUrls.values()) URL.revokeObjectURL(url);
+  workerObjectUrls.clear();
+}
+
+self.MonacoEnvironment = {
+  getWorker(_workerId, label) {
+    return createLocalMonacoWorker(label).worker;
+  },
+};
+
+async function verifyLocalWorkers() {
+  const workers = [
+    ["editor", "editorWorkerService"],
+    ["json", "json"],
+    ["css", "css"],
+    ["html", "html"],
+    ["typescript", "typescript"],
+  ];
+  const verified = [];
+  for (const [name, label] of workers) {
+    const { worker } = createLocalMonacoWorker(label);
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => finish(new Error(`${name} worker probe timed out.`)), 4_000);
+      const onMessage = (event) => {
+        if (event.data?.__piDiffReviewWorkerProbe !== "v1") return;
+        finish();
+      };
+      const onError = (event) => finish(new Error(`${name} worker failed: ${event.message || "unknown error"}`));
+      const finish = (error) => {
+        clearTimeout(timeout);
+        worker.removeEventListener("message", onMessage);
+        worker.removeEventListener("error", onError);
+        worker.terminate();
+        if (error) reject(error);
+        else resolve();
+      };
+      worker.addEventListener("message", onMessage);
+      worker.addEventListener("error", onError);
+      worker.postMessage(workerProbe);
+    });
+    verified.push(name);
+  }
+  return verified;
+}
+
+window.__reviewWorkerDiagnostics = Object.freeze({
+  verifyLocalWorkers,
+  activeObjectUrlCount: () => workerObjectUrls.size,
+  dispose: disposeWorkerObjectUrls,
+});
+window.addEventListener("beforeunload", disposeWorkerObjectUrls);
+
+let rendererSession = null;
+let reviewAppStarted = false;
+
+function canSendRendererMessage() {
+  return rendererSession != null && typeof window.glimpse?.send === "function";
+}
+
+function sendRendererMessage(message) {
+  if (!canSendRendererMessage()) return false;
+  window.glimpse.send({
+    protocol: 1,
+    sessionId: rendererSession.sessionId,
+    capability: rendererSession.capability,
+    message,
+  });
+  return true;
+}
+
+function startReviewApp(reviewData) {
 const restoredSession = reviewData.session?.snapshot || {};
 const restoredFindingIds = new Set((reviewData.analysis?.findings || []).map((finding) => finding.id));
 
@@ -78,6 +211,7 @@ const restoredAiReviewCompleted = restoredForCurrentDiff && (restoredSession.aiR
 const restoredAiReviewStatus = restoredForCurrentDiff && ["done", "failed"].includes(restoredSession.aiReviewStatus)
   ? restoredSession.aiReviewStatus
   : restoredAiReviewCompleted ? "done" : "idle";
+const commentEditBuffer = createCommentEditBuffer();
 
 const state = {
   activeFileId: typeof restoredSession.activeFileId === "string" ? restoredSession.activeFileId : null,
@@ -154,6 +288,7 @@ const sourceLabelEl = document.getElementById("source-label");
 const analysisStatusEl = document.getElementById("analysis-status");
 const submitButton = document.getElementById("submit-button");
 const autosaveStatusButton = document.getElementById("autosave-status");
+const sessionNoticeEl = document.getElementById("session-notice");
 const fileCommentButton = document.getElementById("file-comment-button");
 const toggleReviewedButton = document.getElementById("toggle-reviewed-button");
 const toggleUnchangedButton = document.getElementById("toggle-unchanged-button");
@@ -186,6 +321,26 @@ repoRootEl.textContent = workflowTitle.subtitle;
 windowTitleEl.textContent = workflowTitle.title;
 document.title = workflowTitle.documentTitle;
 
+function updateSessionNotice() {
+  const labels = [];
+  const details = [];
+  if (reviewData.session?.publishWarning) {
+    labels.push("Publishing blocked");
+    details.push(reviewData.session.publishWarning);
+  }
+  if (reviewData.session?.recoveryPath) {
+    labels.push("Recovery saved");
+    details.push(`Previous local review state: ${reviewData.session.recoveryPath}`);
+  }
+  sessionNoticeEl.textContent = labels.join(" • ");
+  sessionNoticeEl.title = details.join("\n");
+  sessionNoticeEl.className = labels.length === 0
+    ? "hidden"
+    : "shrink-0 text-[10px] font-medium text-[#d29922]";
+}
+
+updateSessionNotice();
+
 function workflowCrumbLabel() {
   const github = reviewData.source?.github;
   return github ? `PR #${github.number}` : workflowTitle.title;
@@ -206,7 +361,6 @@ let modifiedKeyboardDecorations = [];
 let activeViewZones = [];
 let editorResizeObserver = null;
 let requestSequence = 0;
-let sessionSaveTimer = null;
 let saveRequestSequence = 0;
 let latestSaveRequestId = null;
 
@@ -220,9 +374,8 @@ function escapeHtml(value) {
 
 function buildSessionSnapshot() {
   return {
-    analysis: reviewData.analysis,
     overallComment: state.overallComment,
-    comments: state.comments,
+    comments: commentEditBuffer.snapshot(state.comments),
     acceptedFindingComments: state.acceptedFindingComments,
     findingStatuses: state.findingStatuses,
     reviewedFiles: state.reviewedFiles,
@@ -252,29 +405,33 @@ function setAutosaveStatus(status, message, detail = "") {
     saving: "shrink-0 cursor-default rounded px-1.5 py-0.5 text-[10px] font-medium text-review-muted",
     saved: "shrink-0 cursor-default rounded px-1.5 py-0.5 text-[10px] font-medium text-[#3fb950]",
     failed: "shrink-0 cursor-pointer rounded bg-[#f85149]/10 px-1.5 py-0.5 text-[10px] font-medium text-[#ff7b72] hover:bg-[#f85149]/15",
+    blocked: "shrink-0 cursor-default rounded bg-[#d29922]/10 px-1.5 py-0.5 text-[10px] font-medium text-[#e3b341]",
   }[status] || "shrink-0 cursor-default rounded px-1.5 py-0.5 text-[10px] font-medium text-review-muted";
 }
 
 function saveSessionNow(options = {}) {
-  if (!window.glimpse?.send) return;
+  if (!canSendRendererMessage()) return;
   syncCommentBodiesFromDOM();
   const requestId = `save:${Date.now()}:${++saveRequestSequence}`;
   latestSaveRequestId = requestId;
   if (options.showStatus !== false) setAutosaveStatus("saving", "Saving...");
-  window.glimpse.send({
+  sendRendererMessage({
     type: "save-session",
     requestId,
     snapshot: buildSessionSnapshot(),
   });
 }
 
+const sessionSaveScheduler = createSessionSaveScheduler(() => saveSessionNow(), 500);
+
 function scheduleSessionSave() {
-  if (!window.glimpse?.send) return;
-  if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
-  sessionSaveTimer = setTimeout(() => {
-    sessionSaveTimer = null;
-    saveSessionNow();
-  }, 500);
+  if (!canSendRendererMessage()) return;
+  syncCommentBodiesFromDOM();
+  sendRendererMessage({
+    type: "checkpoint-session",
+    snapshot: buildSessionSnapshot(),
+  });
+  sessionSaveScheduler.schedule();
 }
 
 function inferLanguage(path) {
@@ -863,12 +1020,17 @@ function aiReviewStatusSummary() {
     return `✦ ${state.aiReview.message || "Scanning changed hunks..."}`;
   }
 
-  if (state.aiReview.status === "failed") return "AI scan failed";
+  if (state.aiReview.status === "failed") {
+    if ((reviewData.analysis?.findings || []).length > 0) {
+      return `AI analysis incomplete • ${counts.open} finding${counts.open === 1 ? "" : "s"} • manual review required`;
+    }
+    return "AI scan failed";
+  }
   if (state.aiReview.status === "done" || state.aiReviewCompleted) {
     return `✓ AI analysis complete • ${counts.open} finding${counts.open === 1 ? "" : "s"}`;
   }
 
-  return window.glimpse?.send ? "✦ AI analysis queued" : "AI analysis ready";
+  return canSendRendererMessage() ? "✦ AI analysis queued" : "AI analysis ready";
 }
 
 function commentLocationLabel(comment) {
@@ -1255,8 +1417,8 @@ function ensureFileLoaded(fileId, scope = state.currentScope) {
   const requestId = `request:${Date.now()}:${++requestSequence}`;
   state.pendingRequestIds[key] = requestId;
   renderTree();
-  if (window.glimpse?.send) {
-    window.glimpse.send({ type: "request-file", requestId, fileId, scope, commitSha: scope === "commit" ? state.selectedCommitSha : undefined });
+  if (canSendRendererMessage()) {
+    sendRendererMessage({ type: "request-file", requestId, fileId, scope, commitSha: scope === "commit" ? state.selectedCommitSha : undefined });
   }
 }
 
@@ -2073,11 +2235,17 @@ function renderTree() {
   fileTreeEl.innerHTML = "";
   updateSidebarTabs();
   sourceLabelEl.textContent = workflowTitle.title;
-  analysisStatusEl.textContent = state.aiReview.status === "running"
+  const analysisStatus = state.aiReview.status === "running"
     ? state.aiReview.message
     : state.aiReview.status === "done" || state.aiReview.status === "failed"
       ? state.aiReview.message
       : reviewData.session?.message || reviewData.analysis?.message || "";
+  analysisStatusEl.textContent = reviewData.session?.recoveryPath
+    ? `${analysisStatus} • Recovery copy saved`
+    : analysisStatus;
+  analysisStatusEl.title = reviewData.session?.recoveryPath
+    ? `Previous local review state: ${reviewData.session.recoveryPath}`
+    : analysisStatus;
 
   const scopedFiles = getScopedFiles();
   const comments = getDraftComments().length;
@@ -2222,18 +2390,11 @@ function setPublishUiState(status, message = "") {
   statusEl.textContent = message;
 }
 
-function markCommentsPublished(commentIds, publishedAt = new Date().toISOString()) {
-  const publishedIds = new Set(commentIds || []);
+function markCommentsPublished(publishedComments) {
+  const publishedIds = new Set((publishedComments || []).map((comment) => comment.id));
   if (publishedIds.size === 0) return;
-  state.comments = state.comments.map((comment) => publishedIds.has(comment.id)
-    ? {
-        ...comment,
-        status: "published",
-        published: true,
-        publishedAt,
-      }
-    : comment
-  );
+  state.comments = applyAuthoritativePublishedCommentState(state.comments, publishedComments);
+  publishedIds.forEach((commentId) => commentEditBuffer.remove(commentId));
 }
 
 function handlePublishGitHubReviewResult(message) {
@@ -2245,7 +2406,9 @@ function handlePublishGitHubReviewResult(message) {
     return;
   }
 
-  markCommentsPublished(message.publishedCommentIds || [], message.submittedAt);
+  markCommentsPublished(message.publishedComments || []);
+  if (reviewData.session) reviewData.session.publishWarning = null;
+  updateSessionNotice();
   setPublishUiState("done", message.message || "Submitted GitHub review.");
   updateCommentsUI();
   saveSessionNow({ showStatus: false });
@@ -2304,25 +2467,29 @@ function showPublishGitHubModal() {
     if (state.publishRequestId) return;
     syncCommentBodiesFromDOM();
     const requestId = `publish:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+    const submit = buildSubmitPayload();
     state.publishRequestId = requestId;
     setPublishUiState("submitting", "Submitting review to GitHub...");
-    if (!window.glimpse?.send) {
+    if (!canSendRendererMessage()) {
       state.publishRequestId = null;
       setPublishUiState("failed", "GitHub review submission is only available inside the review app.");
       return;
     }
-    window.glimpse.send({
+    sendRendererMessage({
       type: "publish-github-review",
       requestId,
       event: eventSelect.value,
       body: textarea.value.trim(),
-      submit: buildSubmitPayload(),
+      submit,
     });
   };
 
   eventSelect.value = suggestedGitHubReviewEvent();
   insightContentEl.querySelector("#github-publish-cancel").addEventListener("click", closeCheckoutDrawer);
   insightContentEl.querySelector("#github-publish-submit").addEventListener("click", publish);
+  if (reviewData.session?.publishWarning) {
+    setPublishUiState("failed", `${reviewData.session.publishWarning} Submit review will retry reconciliation.`);
+  }
   insightPanelEl.onkeydown = (event) => {
     if (event.key === "Escape") {
       if (state.publishRequestId) return;
@@ -2360,6 +2527,7 @@ function showFileCommentModal() {
       });
       submitButton.disabled = false;
       updateCommentsUI();
+      scheduleSessionSave();
     },
   });
 }
@@ -2469,8 +2637,19 @@ function updatePlainTextEditorMetrics(textarea) {
 }
 
 function bindPlainTextCommentEditor(textarea, comment, container) {
+  commentEditBuffer.begin(comment);
+  const block = container.querySelector("[data-comment-block-id]");
+  const savePolicy = createCommentEditorSavePolicy(() => sessionSaveScheduler.flush());
   updatePlainTextEditorMetrics(textarea);
-  textarea.addEventListener("input", () => updatePlainTextEditorMetrics(textarea));
+  textarea.addEventListener("input", () => {
+    commentEditBuffer.update(comment, textarea.value);
+    updatePlainTextEditorMetrics(textarea);
+    scheduleSessionSave();
+  });
+  textarea.addEventListener("blur", (event) => {
+    const nextAction = event.relatedTarget?.closest?.("[data-comment-action]");
+    savePolicy.onBlur({ movingToCommentAction: nextAction?.closest("[data-comment-block-id]") === block });
+  });
   textarea.addEventListener("keydown", (event) => {
     if (event.key === "Tab") {
       event.preventDefault();
@@ -2479,11 +2658,13 @@ function bindPlainTextCommentEditor(textarea, comment, container) {
     }
     if (event.key === "Escape") {
       event.preventDefault();
+      savePolicy.beforeAction();
       cancelCommentEdit(comment);
       return;
     }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
+      savePolicy.beforeAction();
       saveCommentEdit(comment, container.querySelector("[data-comment-block-id]"));
     }
   });
@@ -2492,6 +2673,7 @@ function bindPlainTextCommentEditor(textarea, comment, container) {
 function deleteComment(comment) {
   if (commentLifecycleState(comment) === "published") return;
   state.comments = state.comments.filter((item) => item.id !== comment.id);
+  commentEditBuffer.remove(comment.id);
   state.editingCommentIds.delete(comment.id);
   state.collapsedCommentIds.delete(comment.id);
   const findingId = aiFindingIdForComment(comment);
@@ -2499,11 +2681,13 @@ function deleteComment(comment) {
     state.findingStatuses[findingId] = "new";
   }
   updateCommentsUI();
+  scheduleSessionSave();
 }
 
 function enterCommentEdit(comment) {
   if (commentLifecycleState(comment) === "published") return;
   state.collapsedCommentIds.delete(comment.id);
+  commentEditBuffer.begin(comment);
   state.editingCommentIds.add(comment.id);
   updateCommentsUI();
   setTimeout(() => focusCommentTextarea(comment.id), 50);
@@ -2511,26 +2695,27 @@ function enterCommentEdit(comment) {
 
 function saveCommentEdit(comment, block) {
   const textarea = block?.querySelector("textarea[data-comment-id]");
-  const nextBody = String(textarea?.value || "").trim();
-  if (!nextBody) {
+  if (textarea) commentEditBuffer.update(comment, textarea.value);
+  if (commentEditBuffer.save(comment).deleteComment) {
     deleteComment(comment);
     return;
   }
-  comment.body = nextBody;
   state.editingCommentIds.delete(comment.id);
   updateCommentsUI();
+  scheduleSessionSave();
   if (comment.side !== "file") {
     setTimeout(() => focusDiffLine(comment.side, comment.startLine, comment.endLine ?? comment.startLine), 0);
   }
 }
 
 function cancelCommentEdit(comment) {
-  if (!String(comment.body || "").trim()) {
+  if (commentEditBuffer.cancel(comment).deleteComment) {
     deleteComment(comment);
     return;
   }
   state.editingCommentIds.delete(comment.id);
   updateCommentsUI();
+  scheduleSessionSave();
   if (comment.side !== "file") {
     setTimeout(() => focusDiffLine(comment.side, comment.startLine, comment.endLine ?? comment.startLine), 0);
   }
@@ -2561,7 +2746,8 @@ function stagedCommentInnerHtml(comment) {
   const lifecycleBadgeClass = commentLifecycleBadgeClass(comment);
   const published = commentLifecycleState(comment) === "published";
   const editing = isCommentEditing(comment);
-  const body = String(comment.body || "");
+  if (editing) commentEditBuffer.begin(comment);
+  const body = commentEditBuffer.bodyFor(comment);
 
   if (editing) {
     return `
@@ -2673,6 +2859,7 @@ function createDraftCommentFromFinding(finding, location) {
   delete state.acceptedFindingComments[finding.id];
   state.expandedFindingIds.delete(finding.id);
   state.collapsedCommentIds.delete(comment.id);
+  commentEditBuffer.begin(comment);
   state.editingCommentIds.add(comment.id);
   state.activeInsight = { type: "finding", id: finding.id };
   updateCommentsUI();
@@ -3058,11 +3245,16 @@ function mountFile(options = {}) {
   if (!file) {
     currentFileLabelEl.textContent = "No file selected";
     clearViewZones();
-    if (originalModel) originalModel.dispose();
-    if (modifiedModel) modifiedModel.dispose();
-    originalModel = monacoApi.editor.createModel("", "plaintext");
-    modifiedModel = monacoApi.editor.createModel("", "plaintext");
-    diffEditor.setModel({ original: originalModel, modified: modifiedModel });
+    const nextModels = replaceDiffEditorModels(
+      diffEditor,
+      { original: originalModel, modified: modifiedModel },
+      {
+        createOriginal: () => monacoApi.editor.createModel("", "plaintext"),
+        createModified: () => monacoApi.editor.createModel("", "plaintext"),
+      },
+    );
+    originalModel = nextModels.original;
+    modifiedModel = nextModels.modified;
     applyEditorOptions();
     updateDecorations();
     renderFileComments();
@@ -3091,13 +3283,16 @@ function mountFile(options = {}) {
     </span>
   `;
 
-  if (originalModel) originalModel.dispose();
-  if (modifiedModel) modifiedModel.dispose();
-
-  originalModel = monacoApi.editor.createModel(contents.originalContent, language);
-  modifiedModel = monacoApi.editor.createModel(contents.modifiedContent, language);
-
-  diffEditor.setModel({ original: originalModel, modified: modifiedModel });
+  const nextModels = replaceDiffEditorModels(
+    diffEditor,
+    { original: originalModel, modified: modifiedModel },
+    {
+      createOriginal: () => monacoApi.editor.createModel(contents.originalContent, language),
+      createModified: () => monacoApi.editor.createModel(contents.modifiedContent, language),
+    },
+  );
+  originalModel = nextModels.original;
+  modifiedModel = nextModels.modified;
   applyEditorOptions();
   syncViewZones();
   updateDecorations();
@@ -3121,10 +3316,9 @@ function mountFile(options = {}) {
 function syncCommentBodiesFromDOM() {
   const textareas = document.querySelectorAll("textarea[data-comment-id]");
   textareas.forEach((textarea) => {
-    if (textarea.getAttribute("data-comment-editing") === "true") return;
     const commentId = textarea.getAttribute("data-comment-id");
     const comment = state.comments.find((item) => item.id === commentId);
-    if (comment) comment.body = textarea.value;
+    if (comment) commentEditBuffer.update(comment, textarea.value);
   });
 }
 
@@ -3175,6 +3369,8 @@ function addInlineComment(side, startLine, endLine = startLine) {
     body: "",
   };
   state.comments.push(comment);
+  commentEditBuffer.begin(comment);
+  state.editingCommentIds.add(comment.id);
   state.collapsedCommentIds.delete(comment.id);
   state.activeInsight = { type: "comment", id: comment.id };
   updateCommentsUI();
@@ -3253,6 +3449,8 @@ window.__reviewReceive = function (message) {
       const savedAt = message.savedAt ? new Date(message.savedAt) : null;
       const detail = savedAt && !Number.isNaN(savedAt.getTime()) ? `Saved at ${savedAt.toLocaleTimeString()}` : "Saved";
       setAutosaveStatus("saved", "Saved", detail);
+    } else if (message.retryable === false) {
+      setAutosaveStatus("blocked", "Reopen required", message.message || "This review changed in another window.");
     } else {
       setAutosaveStatus("failed", "Save failed", message.message || "Click to retry autosave.");
     }
@@ -3353,14 +3551,7 @@ window.__reviewReceive = function (message) {
 };
 
 function setupMonaco() {
-  window.require.config({
-    paths: {
-      vs: "https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.52.2/min/vs",
-    },
-  });
-
-  window.require(["vs/editor/editor.main"], function () {
-    monacoApi = window.monaco;
+    monacoApi = monaco;
 
     monacoApi.editor.defineTheme("review-dark", {
       base: "vs-dark",
@@ -3412,7 +3603,6 @@ function setupMonaco() {
     });
 
     mountFile();
-  });
 }
 
 function populateCommitSelect() {
@@ -3463,7 +3653,7 @@ function applyAiReviewAnalysis(analysis) {
 }
 
 function shouldAutoStartAiReview() {
-  return Boolean(window.glimpse?.send)
+  return Boolean(canSendRendererMessage())
     && state.aiReview.status === "idle"
     && !state.aiReviewCompleted
     && state.currentScope !== "all-files"
@@ -3477,7 +3667,7 @@ function maybeStartAiReview() {
 
 function runAiReviewFromUi(options = {}) {
   if (state.aiReview.status === "running") return;
-  if (!window.glimpse?.send) {
+  if (!canSendRendererMessage()) {
     state.aiReview = {
       ...state.aiReview,
       status: "failed",
@@ -3508,14 +3698,14 @@ function runAiReviewFromUi(options = {}) {
     },
   };
   renderTree();
-  window.glimpse.send({ type: "run-ai-review", requestId });
+  sendRendererMessage({ type: "run-ai-review", requestId });
 }
 
 function buildSubmitPayload() {
   return {
     type: "submit",
     overallComment: state.overallComment.trim(),
-    comments: state.comments
+    comments: commentEditBuffer.snapshot(state.comments)
       .filter((comment) => commentLifecycleState(comment) !== "published")
       .map((comment) => ({ ...comment, body: comment.body.trim() }))
       .filter((comment) => comment.body.length > 0),
@@ -3535,8 +3725,7 @@ function buildSubmitPayload() {
 function finishReview() {
   syncCommentBodiesFromDOM();
   saveSessionNow();
-  window.glimpse.send(buildSubmitPayload());
-  window.glimpse.close();
+  sendRendererMessage(buildSubmitPayload());
 }
 
 function submitReview() {
@@ -3885,6 +4074,8 @@ autosaveStatusButton?.addEventListener("click", () => {
 });
 
 window.addEventListener("beforeunload", () => {
+  syncCommentBodiesFromDOM();
+  sessionSaveScheduler.cancel();
   saveSessionNow({ showStatus: false });
 });
 
@@ -3962,3 +4153,17 @@ renderFileComments();
 updateSidebarLayout();
 setupMonaco();
 setTimeout(maybeStartAiReview, 250);
+}
+
+window.__reviewBootstrap = function (bootstrap) {
+  if (reviewAppStarted || !bootstrap || typeof bootstrap !== "object") return;
+  if (bootstrap.protocol !== 1 || typeof bootstrap.sessionId !== "string" || typeof bootstrap.capability !== "string") return;
+  reviewAppStarted = true;
+  rendererSession = bootstrap;
+  sendRendererMessage({ type: "renderer-booted" });
+  startReviewApp(bootstrap.data);
+};
+
+if (typeof window.glimpse?.send === "function") {
+  window.glimpse.send({ type: "renderer-ready" });
+}

@@ -1,4 +1,4 @@
-import { complete, type UserMessage } from "@earendil-works/pi-ai";
+import { complete, type UserMessage } from "@earendil-works/pi-ai/compat";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { ReviewDataset } from "./sources/types.js";
 import type {
@@ -635,7 +635,7 @@ function requireUniqueIds(values: readonly { id: string }[], field: "chapters" |
   }
 }
 
-function validateAnalysisRelationships(analysis: ReviewAnalysis, dataset: ReviewDataset): void {
+export function validateAnalysisRelationships(analysis: ReviewAnalysis, dataset: ReviewDataset, requireChangedLineAnchors = false): void {
   const analysisFiles = getAnalysisFiles(dataset);
   const fileById = new Map(analysisFiles.map((file) => [file.id, file] as const));
   const validRanges = analysisFiles.flatMap(getFileCoverageRanges);
@@ -691,14 +691,30 @@ function validateAnalysisRelationships(analysis: ReviewAnalysis, dataset: Review
   }
 
   for (const [findingIndex, finding] of analysis.findings.entries()) {
+    let hasChangedLineAnchor = false;
     for (const [locationIndex, location] of finding.locations.entries()) {
       const file = fileById.get(location.fileId);
       if (!file) {
-        throw new Error(`AI analysis JSON references unknown findings[${findingIndex}].locations[${locationIndex}].fileId.`);
+        throw new Error(`AI analysis JSON has unknown location for finding ${finding.id}: file ${location.fileId} at findings[${findingIndex}].locations[${locationIndex}].fileId.`);
       }
       if (location.path !== file.path) {
-        throw new Error(`AI analysis JSON has mismatched findings[${findingIndex}].locations[${locationIndex}].path.`);
+        throw new Error(`AI analysis JSON has mismatched path for finding ${finding.id}: ${location.path} at findings[${findingIndex}].locations[${locationIndex}].path.`);
       }
+      if (requireChangedLineAnchors) {
+        if (location.side === "file" || location.line == null) continue;
+        const isChangedLine = validRanges.some((range) => range.fileId === location.fileId
+            && range.path === location.path
+            && range.side === location.side
+            && location.line! >= range.startLine
+            && location.line! <= range.endLine);
+        if (!isChangedLine) {
+          throw new Error(`AI analysis JSON has non-commentable location for finding ${finding.id}: ${location.side} line ${location.line ?? "null"}.`);
+        }
+        hasChangedLineAnchor = true;
+      }
+    }
+    if (requireChangedLineAnchors && !hasChangedLineAnchor) {
+      throw new Error(`AI analysis JSON finding ${finding.id} has no changed-line anchored location.`);
     }
   }
 

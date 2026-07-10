@@ -16,6 +16,11 @@ export interface GitHubPrPrivateRefs {
   headRef: string;
 }
 
+interface GitHubPrRevisions {
+  baseRevision: string;
+  headRevision: string;
+}
+
 interface GitHubRemoteRef {
   owner: string;
   repo: string;
@@ -202,13 +207,23 @@ async function preparePrRefs(pi: ExtensionAPI, repoRoot: string, ref: GitHubPrRe
   return privateRefs;
 }
 
+async function resolvePrRevisions(pi: ExtensionAPI, repoRoot: string, privateRefs: GitHubPrPrivateRefs): Promise<GitHubPrRevisions> {
+  const baseRevision = (await run(pi, repoRoot, "git", ["rev-parse", "--verify", `${privateRefs.baseRef}^{commit}`])).trim();
+  const headRevision = (await run(pi, repoRoot, "git", ["rev-parse", "--verify", `${privateRefs.headRef}^{commit}`])).trim();
+  if (baseRevision.length === 0 || headRevision.length === 0) {
+    throw new Error("Fetched GitHub PR refs did not resolve to immutable commits.");
+  }
+  return { baseRevision, headRevision };
+}
+
 export async function buildGitHubPrReviewDataset(pi: ExtensionAPI, ctx: ExtensionCommandContext, url: string): Promise<ReviewDataset> {
   const ref = parseGitHubPrUrl(url);
   const repoRoot = await getRepoRoot(pi, ctx.cwd);
   await verifyOriginMatchesPr(pi, repoRoot, ref);
   const metadata = await readPrMetadata(pi, repoRoot, ref);
   const privateRefs = await preparePrRefs(pi, repoRoot, ref, metadata);
-  const data = await getRevisionDiffReviewData(pi, repoRoot, privateRefs.baseRef, privateRefs.headRef);
+  const revisions = await resolvePrRevisions(pi, repoRoot, privateRefs);
+  const data = await getRevisionDiffReviewData(pi, repoRoot, revisions.baseRevision, revisions.headRevision);
 
   return {
     repoRoot,
@@ -221,8 +236,8 @@ export async function buildGitHubPrReviewDataset(pi: ExtensionAPI, ctx: Extensio
       label: `PR #${metadata.number}: ${metadata.title}`,
       repoRoot,
       workingRoot: repoRoot,
-      baseRevision: privateRefs.baseRef,
-      headRevision: privateRefs.headRef,
+      baseRevision: revisions.baseRevision,
+      headRevision: revisions.headRevision,
       github: metadata,
       canPublishGitHubReview: true,
     },

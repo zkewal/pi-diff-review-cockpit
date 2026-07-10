@@ -1,5 +1,5 @@
-import { readFile } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { open, type GlimpseWindow } from "glimpseui";
@@ -7,37 +7,67 @@ import { createAiReviewFailedProgress, runAiReview } from "./ai-review.js";
 import { loadAiReviewRuntimeConfig } from "./ai-review-config.js";
 import { analyzeReviewDataset } from "./analysis.js";
 import { parseDiffReviewArgs } from "./command.js";
+import { createReviewFilePatchLoader } from "./file-patch.js";
 import { loadReviewFileContents } from "./git.js";
-import { buildGitHubReviewPayload, countSkippedGitHubReviewComments, listPublishableGitHubReviewCommentIds, publishGitHubReview } from "./github-publish.js";
+import {
+  buildGitHubReviewPublishPlan,
+  publishGitHubReview,
+  reconcileGitHubReview,
+  revalidateGitHubReviewPublishPlan,
+  type BuildGitHubReviewPublishPlanOptions,
+  type GitHubReviewPublishPlan,
+} from "./github-publish.js";
 import { composeReviewPrompt } from "./prompt.js";
+import { type RendererProtocolContext } from "./renderer-protocol.js";
+import {
+  createReviewHostPublishLifecycle,
+  type ReviewHostPublishLifecycle,
+} from "./review-host-publish-lifecycle.js";
+import { runReviewSessionStartupPersistence } from "./review-session-startup.js";
+import { createReviewWindowController, type ReviewWindowController } from "./review-window.js";
 import { buildGitHubPrReviewDataset } from "./sources/github-pr.js";
 import { buildLocalReviewDataset } from "./sources/local.js";
 import {
   buildReviewDiffFingerprint,
   buildReviewSessionRecord,
+  createGitHubPublishSessionController,
   getReviewSessionDescriptor,
   loadReviewSession,
+  mergeAuthoritativePublishedComments,
+  publishedCommentsFromSnapshot,
+  publishedCommentsFromConfirmedIntent,
+  resolveSubmittedCommentsFromSnapshot,
   resolveReviewSession,
   resetReviewSession,
+  ReviewSessionConflictError,
+  reviewSessionRecoveryPath,
+  reviewSessionRecordState,
   saveReviewSession,
+  type GitHubPublishIntentTransition,
+  type GitHubPublishSessionController,
+  type ReviewSessionRecord,
+  type ReviewSessionRecordState,
 } from "./session-store.js";
 import type {
   ReviewCancelPayload,
+  ReviewCheckpointSessionPayload,
+  DiffReviewComment,
   ReviewFile,
   ReviewFileContents,
   ReviewHostMessage,
   ReviewAnalysis,
+  GitHubReviewPublishIntent,
   ReviewPublishPayload,
+  ReviewPublishGitHubReviewSuccessMessage,
   ReviewRunAiReviewPayload,
   ReviewRequestFilePayload,
+  ReviewRendererSessionSnapshot,
   ReviewSaveSessionPayload,
   ReviewSessionSnapshot,
   ReviewSubmitPayload,
   ReviewWindowMessage,
 } from "./types.js";
-import { buildReviewHtml } from "./ui.js";
-
-const PATCH_COMMAND_TIMEOUT_MS = 120_000;
+import { getReviewShellPath } from "./ui.js";
 
 function isSubmitPayload(value: ReviewWindowMessage): value is ReviewSubmitPayload {
   return value.type === "submit";
@@ -63,10 +93,109 @@ function isSaveSessionPayload(value: ReviewWindowMessage): value is ReviewSaveSe
   return value.type === "save-session";
 }
 
+function isCheckpointSessionPayload(value: ReviewWindowMessage): value is ReviewCheckpointSessionPayload {
+  return value.type === "checkpoint-session";
+}
+
+export function mergeRendererSessionCheckpoint(
+  current: ReviewSessionSnapshot | null | undefined,
+  checkpoint: ReviewRendererSessionSnapshot,
+): ReviewSessionSnapshot {
+  return { ...(current ?? {}), ...checkpoint };
+}
+
 type WaitingEditorResult = "escape" | "window-settled";
 
-function escapeForInlineScript(value: string): string {
-  return value.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
+export { createReviewHostPublishLifecycle } from "./review-host-publish-lifecycle.js";
+
+const ABANDON_AMBIGUOUS_PUBLISH_FLAG = "--abandon-ambiguous-publish";
+
+export function extractReviewHostOptions(args: string[]): {
+  commandArgs: string[];
+  abandonAmbiguousPublish: boolean;
+} {
+  return {
+    commandArgs: args.filter((arg) => arg !== ABANDON_AMBIGUOUS_PUBLISH_FLAG),
+    abandonAmbiguousPublish: args.includes(ABANDON_AMBIGUOUS_PUBLISH_FLAG),
+  };
+}
+
+export async function reconcileGitHubPublishForReviewOpen(options: {
+  controller: Pick<GitHubPublishSessionController, "reconcileOutstanding" | "abandonOutstanding">;
+  reconcileRemote: Parameters<GitHubPublishSessionController["reconcileOutstanding"]>[0];
+  abandonAmbiguousPublish: boolean;
+  warn: (message: string) => void;
+}): ReturnType<GitHubPublishSessionController["reconcileOutstanding"]> {
+  try {
+    if (options.abandonAmbiguousPublish) {
+      const abandoned = await options.controller.abandonOutstanding();
+      if (abandoned.warning != null) options.warn(abandoned.warning);
+    }
+    const reconciliation = await options.controller.reconcileOutstanding(options.reconcileRemote);
+    if (reconciliation.status === "blocked" && reconciliation.warning != null) {
+      options.warn(reconciliation.warning);
+    }
+    return reconciliation;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    const warning = `GitHub review reconciliation could not complete: ${detail}. Review can continue, but publishing is blocked until reconciliation succeeds.`;
+    options.warn(warning);
+    return { status: "blocked", warning };
+  }
+}
+
+export async function prepareGitHubPublishPost(options: {
+  loadPersistedSession: () => Promise<Pick<ReviewSessionRecord, "snapshot" | "revision" | "recordHash"> | null>;
+  expectedPlan: GitHubReviewPublishPlan;
+  originalOptions: BuildGitHubReviewPublishPlanOptions;
+  acceptPersistedRecord: (
+    record: Pick<ReviewSessionRecord, "snapshot" | "revision" | "recordHash">,
+  ) => void;
+  markPostStarting: () => Promise<void>;
+}): Promise<void> {
+  const persisted = await options.loadPersistedSession();
+  if (persisted == null) {
+    throw new Error("The durable review session disappeared before GitHub publish. Refresh the review before retrying.");
+  }
+  const revalidated = revalidateGitHubReviewPublishPlan({
+    expectedPlan: options.expectedPlan,
+    originalOptions: options.originalOptions,
+    persistedSnapshot: persisted.snapshot,
+  });
+  if (revalidated.payload == null) {
+    throw new Error(revalidated.errors.map((error) => error.message).join(" "));
+  }
+  options.acceptPersistedRecord(persisted);
+  await options.markPostStarting();
+}
+
+export function buildGitHubPublishSuccessResult(options: {
+  requestId: string;
+  message: string;
+  confirmedIntent: GitHubReviewPublishIntent | null;
+}): ReviewPublishGitHubReviewSuccessMessage {
+  const intent = options.confirmedIntent;
+  if (intent?.status !== "confirmed" || intent.receipt == null) {
+    throw new Error("A GitHub publish success result requires a durably confirmed publish intent.");
+  }
+  const publishedComments = publishedCommentsFromConfirmedIntent(intent);
+  if (publishedComments.length !== intent.representedCommentIds.length
+    || publishedComments.some((comment, index) => comment.id !== intent.representedCommentIds[index])) {
+    throw new Error("The confirmed GitHub publish intent does not represent its authoritative comments exactly once.");
+  }
+  const submittedAt = intent.receipt.submittedAt ?? publishedComments[0]?.publishedAt ?? intent.updatedAt;
+  return {
+    type: "publish-github-review-result",
+    requestId: options.requestId,
+    ok: true,
+    message: options.message,
+    publishedCommentIds: [...intent.representedCommentIds],
+    publishedComments,
+    submittedAt,
+    ...(intent.receipt.reviewId == null ? {} : { reviewId: intent.receipt.reviewId }),
+    ...(intent.receipt.reviewUrl == null ? {} : { reviewUrl: intent.receipt.reviewUrl }),
+    warnings: [...intent.receipt.warnings],
+  };
 }
 
 function reviewWindowTitle(dataset: { repoRoot: string; source: { github?: { owner: string; repo: string; number: number } } }): string {
@@ -77,9 +206,28 @@ function reviewWindowTitle(dataset: { repoRoot: string; source: { github?: { own
   return `Diff review · ${basename(dataset.repoRoot) || "repository"}`;
 }
 
+function rendererProtocolContext(files: ReviewFile[], commits: { sha: string }[], analysis: ReviewAnalysis): Omit<RendererProtocolContext, "sessionId" | "capability"> {
+  return {
+    files: new Map(files.map((file) => {
+      const scopes = new Set<"git-diff" | "last-commit" | "commit" | "all-files">();
+      if (file.inGitDiff) scopes.add("git-diff");
+      if (file.inLastCommit) scopes.add("last-commit");
+      if (file.hasWorkingTreeFile) scopes.add("all-files");
+      const commitShas = new Set(Object.keys(file.commitComparisons));
+      if (commitShas.size > 0) scopes.add("commit");
+      return [file.id, { scopes, commitShas }];
+    })),
+    commitShas: new Set(commits.map((commit) => commit.sha)),
+    findingIds: new Set(analysis.findings.map((finding) => finding.id)),
+    chapterIds: new Set(analysis.chapters.map((chapter) => chapter.id)),
+  };
+}
+
 export default function (pi: ExtensionAPI) {
   let activeWindow: GlimpseWindow | null = null;
   let activeWaitingUIDismiss: (() => void) | null = null;
+  let activeReviewCompletion: Promise<void> | null = null;
+  let activeReviewLifecycle: ReviewHostPublishLifecycle<ReviewSubmitPayload | ReviewCancelPayload> | null = null;
 
   function closeActiveWindow(): void {
     if (activeWindow == null) return;
@@ -157,12 +305,13 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function reviewRepository(args: string[], ctx: ExtensionCommandContext): Promise<void> {
-    if (activeWindow != null) {
-      ctx.ui.notify("A review window is already open.", "warning");
+    if (activeWindow != null || activeReviewLifecycle?.active === true || activeReviewCompletion != null) {
+      ctx.ui.notify("A review is already open or finishing publication.", "warning");
       return;
     }
 
-    const command = parseDiffReviewArgs(args);
+    const hostOptions = extractReviewHostOptions(args);
+    const command = parseDiffReviewArgs(hostOptions.commandArgs);
     const dataset = command.mode === "github-pr"
       ? await buildGitHubPrReviewDataset(pi, ctx, command.url)
       : await buildLocalReviewDataset(pi, ctx);
@@ -176,50 +325,11 @@ export default function (pi: ExtensionAPI) {
       ? { baseRevision: dataset.source.baseRevision, headRevision: dataset.source.headRevision }
       : undefined;
 
-    const loadFilePatch = async (file: ReviewFile): Promise<string> => {
-      const comparison = file.gitDiff ?? file.lastCommit ?? Object.values(file.commitComparisons)[0] ?? null;
-      if (comparison == null) return "";
-      const paths = [...new Set([
-        comparison.oldPath,
-        comparison.newPath,
-        file.path,
-      ].filter((path): path is string => path != null && path.length > 0))];
-      if (paths.length === 0) return "";
-
-      const args = file.gitDiff != null && revisionDiff != null
-        ? ["diff", "--no-color", "--unified=80", `${revisionDiff.baseRevision}...${revisionDiff.headRevision}`, "--", ...paths]
-        : file.gitDiff != null
-        ? ["diff", "--no-color", "--unified=80", "HEAD", "--", ...paths]
-        : file.lastCommit != null && revisionDiff != null
-          ? ["diff", "--no-color", "--unified=80", `${revisionDiff.headRevision}^`, revisionDiff.headRevision, "--", ...paths]
-        : file.lastCommit != null
-          ? ["diff", "--no-color", "--unified=80", "HEAD^", "HEAD", "--", ...paths]
-          : ["diff", "--no-color", "--unified=80", "HEAD", "--", ...paths];
-      const result = await pi.exec("git", args, {
-        cwd: revisionDiff != null ? dataset.repoRoot : workingRoot,
-        timeout: PATCH_COMMAND_TIMEOUT_MS,
-      });
-      if (result.code === 0 && result.stdout.length > 0) {
-        return result.stdout;
-      }
-
-      if (comparison.status === "added" && comparison.oldPath == null && comparison.newPath != null) {
-        if (revisionDiff != null) {
-          const showResult = await pi.exec("git", ["show", `${revisionDiff.headRevision}:${comparison.newPath}`], {
-            cwd: dataset.repoRoot,
-            timeout: PATCH_COMMAND_TIMEOUT_MS,
-          });
-          return showResult.code === 0 ? showResult.stdout : "";
-        }
-        try {
-          return await readFile(join(workingRoot, comparison.newPath), "utf8");
-        } catch {
-          return "";
-        }
-      }
-
-      return "";
-    };
+    const loadFilePatch = createReviewFilePatchLoader(pi, {
+      repoRoot: dataset.repoRoot,
+      workingRoot,
+      revisionDiff,
+    });
 
     ctx.ui.notify("Preparing review session.", "info");
     const sessionDescriptor = await getReviewSessionDescriptor(pi, dataset);
@@ -228,13 +338,23 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify("Reset saved review metadata for this source.", "info");
     }
     const fingerprint = await buildReviewDiffFingerprint(pi, dataset, loadFilePatch);
-    const storedSession = await loadReviewSession(sessionDescriptor.storagePath);
+    let storedSession: Awaited<ReturnType<typeof loadReviewSession>>;
+    try {
+      storedSession = await loadReviewSession(sessionDescriptor.storagePath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(`Review session metadata could not be trusted: ${message}`, "error");
+      throw error;
+    }
     const sessionResolution = resolveReviewSession({
       stored: storedSession,
       sourceKey: sessionDescriptor.sourceKey,
       currentFingerprint: fingerprint,
       dataset,
     });
+    const recoveryPath = sessionResolution.status === "stale" && storedSession != null
+      ? reviewSessionRecoveryPath(sessionDescriptor.storagePath, storedSession)
+      : null;
 
     let analysis: ReviewAnalysis;
     if (sessionResolution.analysis == null) {
@@ -247,40 +367,84 @@ export default function (pi: ExtensionAPI) {
     const aiReviewConfig = await loadAiReviewRuntimeConfig(ctx, dataset);
 
     let sessionSnapshot: ReviewSessionSnapshot | null = sessionResolution.snapshot;
+    let persistedSessionState: ReviewSessionRecordState | null = reviewSessionRecordState(storedSession);
+    let publishSessionController: GitHubPublishSessionController | null = null;
+    let publishWarning: string | null = null;
+    const authoritativePublishedComments = new Map<string, DiffReviewComment>();
+    const refreshAuthoritativePublishedComments = (): void => {
+      for (const comment of publishedCommentsFromSnapshot(sessionSnapshot)) {
+        authoritativePublishedComments.set(comment.id, { ...comment, status: "published", published: true });
+      }
+    };
+    refreshAuthoritativePublishedComments();
+    const mergeSessionSnapshot = (snapshot: ReviewSessionSnapshot): ReviewSessionSnapshot => {
+      const withPublished = mergeAuthoritativePublishedComments(snapshot, authoritativePublishedComments.values());
+      return publishSessionController?.mergeSnapshot(withPublished) ?? withPublished;
+    };
     let saveChain: Promise<void> = Promise.resolve();
-    let sendSaveResult: ((requestId: string, ok: boolean, message?: string) => void) | null = null;
-    const queueSessionSave = (snapshot: ReviewSessionSnapshot, requestId?: string): void => {
-      sessionSnapshot = snapshot;
-      const analysisToSave = snapshot.analysis?.approvalPacket
-        ? {
-            ...analysis,
-            approvalPacket: snapshot.analysis.approvalPacket,
-          }
-        : analysis;
+    let saveRevision = 0;
+    let pendingRendererCheckpoint: ReviewRendererSessionSnapshot | null = null;
+    let sendSaveResult: ((requestId: string, ok: boolean, message?: string, retryable?: boolean) => void) | null = null;
+    const queueSessionSave = (
+      snapshot: ReviewSessionSnapshot,
+      requestId?: string,
+      publishIntentTransition?: GitHubPublishIntentTransition,
+    ): void => {
+      activeReviewLifecycle?.markDirty();
+      const checkpoint = pendingRendererCheckpoint;
+      pendingRendererCheckpoint = null;
+      const snapshotToSave = checkpoint == null
+        ? snapshot
+        : mergeRendererSessionCheckpoint(snapshot, checkpoint);
+      const revision = ++saveRevision;
+      sessionSnapshot = mergeSessionSnapshot(snapshotToSave);
       saveChain = saveChain
         .catch(() => undefined)
         .then(async () => {
           try {
-            await saveReviewSession(sessionDescriptor.storagePath, buildReviewSessionRecord({
+            const mergedSnapshot = mergeSessionSnapshot(snapshotToSave);
+            const analysisToSave = mergedSnapshot.analysis?.approvalPacket
+              ? {
+                  ...analysis,
+                  approvalPacket: mergedSnapshot.analysis.approvalPacket,
+                }
+              : analysis;
+            const persisted = await saveReviewSession(sessionDescriptor.storagePath, buildReviewSessionRecord({
               sourceKey: sessionDescriptor.sourceKey,
               fingerprint,
               analysis: analysisToSave,
-              snapshot,
-            }));
+              snapshot: mergedSnapshot,
+            }), {
+              expectedRecordState: publishIntentTransition?.expectedRecordState ?? persistedSessionState,
+              publishIntentTransition,
+            });
+            persistedSessionState = reviewSessionRecordState(persisted);
+            if (revision === saveRevision) {
+              sessionSnapshot = persisted.snapshot;
+              refreshAuthoritativePublishedComments();
+            }
             if (requestId != null) {
               sendSaveResult?.(requestId, true);
             }
           } catch (error) {
             if (requestId != null) {
               const message = error instanceof Error ? error.message : String(error);
-              sendSaveResult?.(requestId, false, message);
+              sendSaveResult?.(requestId, false, message, !(error instanceof ReviewSessionConflictError));
             }
             throw error;
           }
         });
     };
+    const checkpointRendererSession = (snapshot: ReviewRendererSessionSnapshot): void => {
+      pendingRendererCheckpoint = snapshot;
+      sessionSnapshot = mergeSessionSnapshot(mergeRendererSessionCheckpoint(sessionSnapshot, snapshot));
+      activeReviewLifecycle?.markDirty();
+    };
     const flushSessionSave = async (): Promise<boolean> => {
       try {
+        if (pendingRendererCheckpoint != null) {
+          queueSessionSave(sessionSnapshot ?? {});
+        }
         await saveChain;
         return true;
       } catch (error) {
@@ -289,7 +453,7 @@ export default function (pi: ExtensionAPI) {
         return false;
       }
     };
-    const snapshotFromSubmit = (message: ReviewSubmitPayload): ReviewSessionSnapshot => ({
+    const snapshotFromSubmit = (message: ReviewSubmitPayload): ReviewSessionSnapshot => mergeSessionSnapshot({
       ...(sessionSnapshot ?? {}),
       analysis,
       overallComment: message.overallComment,
@@ -298,13 +462,100 @@ export default function (pi: ExtensionAPI) {
       findingStatuses: Object.fromEntries(message.findingStatuses.map((finding) => [finding.findingId, finding.status])),
     });
 
-    queueSessionSave({
-      ...(sessionSnapshot ?? {}),
-      analysis,
-    });
-    await flushSessionSave();
+    const reconcilePublishIntent = async (intent: GitHubReviewPublishIntent) => {
+      const github = dataset.source.github;
+      if (github == null) {
+        throw new Error("A saved GitHub publish intent cannot be reconciled for a non-GitHub review source.");
+      }
+      return await reconcileGitHubReview(pi, dataset.workingRoot, github, {
+        correlationId: intent.correlationId,
+        reviewedHeadSha: intent.source.reviewedHeadSha,
+      });
+    };
 
-    const html = buildReviewHtml({
+    await runReviewSessionStartupPersistence({
+      confirmedIntent: sessionResolution.confirmedPublishIntentToRetire,
+      snapshot: sessionSnapshot,
+      recordState: persistedSessionState,
+      persistConfirmedRetirement: async (snapshot, transition) => await saveReviewSession(
+        sessionDescriptor.storagePath,
+        buildReviewSessionRecord({
+          sourceKey: sessionDescriptor.sourceKey,
+          fingerprint,
+          analysis,
+          snapshot,
+        }),
+        {
+          expectedRecordState: transition.expectedRecordState,
+          publishIntentTransition: transition,
+        },
+      ),
+      initializeRuntime: async (state) => {
+        sessionSnapshot = state.snapshot;
+        persistedSessionState = state.recordState;
+        if (sessionResolution.confirmedPublishIntentToRetire != null) {
+          refreshAuthoritativePublishedComments();
+          ctx.ui.notify("Preserved published comments for unchanged patches and retired the prior confirmed publish receipt.", "info");
+        }
+
+        const github = dataset.source.github;
+        const reviewedBaseSha = dataset.source.baseRevision;
+        const reviewedHeadSha = dataset.source.headRevision;
+        if (github == null || reviewedBaseSha == null || reviewedHeadSha == null) return;
+
+        const controller = createGitHubPublishSessionController({
+          source: {
+            sourceKey: sessionDescriptor.sourceKey,
+            owner: github.owner,
+            repo: github.repo,
+            pullNumber: github.number,
+            reviewedBaseSha,
+            reviewedHeadSha,
+          },
+          initialIntent: sessionSnapshot.githubPublishIntent ?? null,
+          getSnapshot: () => sessionSnapshot ?? {},
+          getRecordState: () => persistedSessionState,
+          persistSnapshot: async (snapshot, transition) => {
+            let selectedTransition = transition;
+            if (transition.expected?.status === "ambiguous") {
+              if (!await flushSessionSave()) return false;
+              selectedTransition = {
+                ...transition,
+                expectedRecordState: persistedSessionState,
+              };
+            }
+            queueSessionSave(snapshot, undefined, selectedTransition);
+            return await flushSessionSave();
+          },
+        });
+        publishSessionController = controller;
+        const reconciliation = await reconcileGitHubPublishForReviewOpen({
+          controller,
+          reconcileRemote: reconcilePublishIntent,
+          abandonAmbiguousPublish: hostOptions.abandonAmbiguousPublish,
+          warn: (message) => ctx.ui.notify(message, "warning"),
+        });
+        publishWarning = reconciliation.status === "blocked"
+          ? reconciliation.warning ?? "GitHub publishing is blocked until the prior review can be reconciled."
+          : null;
+        if (reconciliation.status === "confirmed") {
+          refreshAuthoritativePublishedComments();
+          ctx.ui.notify("Reconciled a previously ambiguous GitHub review submission.", "info");
+        }
+      },
+      persistInitialSnapshot: async () => {
+        queueSessionSave({
+          ...(sessionSnapshot ?? {}),
+          analysis,
+        });
+        return await flushSessionSave();
+      },
+    });
+    if (recoveryPath != null) {
+      ctx.ui.notify(`Previous local review state was preserved at ${recoveryPath}.`, "warning");
+    }
+
+    const reviewData = {
       ...dataset,
       analysis,
       aiReviewConfig: aiReviewConfig.public,
@@ -314,33 +565,41 @@ export default function (pi: ExtensionAPI) {
         storagePath: sessionDescriptor.storagePath,
         updatedAt: sessionResolution.updatedAt,
         snapshot: sessionSnapshot,
+        ...(publishWarning == null ? {} : { publishWarning }),
+        ...(recoveryPath == null ? {} : { recoveryPath }),
       },
-    });
+    };
     const title = reviewWindowTitle(dataset);
-    const window = open(html, {
+    const window = open("", {
       width: 1680,
       height: 1020,
       title,
+      hidden: true,
     });
     activeWindow = window;
-    window.show({ title });
+    let finishActiveReview!: () => void;
+    const reviewCompletion = new Promise<void>((resolve) => {
+      finishActiveReview = resolve;
+    });
+    activeReviewCompletion = reviewCompletion;
 
     const waitingUI = showWaitingUI(ctx);
     const fileMap = new Map(files.map((file) => [file.id, file]));
     const contentCache = new Map<string, Promise<ReviewFileContents>>();
+    let windowController: ReviewWindowController | null = null;
 
     const sendWindowMessage = (message: ReviewHostMessage): void => {
       if (activeWindow !== window) return;
-      const payload = escapeForInlineScript(JSON.stringify(message));
-      window.send(`window.__reviewReceive(${payload});`);
+      windowController?.sendHostMessage(message);
     };
-    sendSaveResult = (requestId, ok, message): void => {
+    sendSaveResult = (requestId, ok, message, retryable): void => {
       sendWindowMessage({
         type: "save-session-result",
         requestId,
         ok,
         message,
         savedAt: ok ? new Date().toISOString() : undefined,
+        ...(ok || retryable === undefined ? {} : { retryable }),
       });
     };
 
@@ -359,42 +618,30 @@ export default function (pi: ExtensionAPI) {
 
     ctx.ui.notify("Opened native review window.", "info");
 
+    let reviewLifecycle: ReviewHostPublishLifecycle<ReviewSubmitPayload | ReviewCancelPayload> | null = null;
     try {
-      const terminalMessagePromise = new Promise<ReviewSubmitPayload | ReviewCancelPayload | null>((resolve, reject) => {
-        let settled = false;
-        let publishInFlight = false;
-        let aiReviewInFlight = false;
+      let aiReviewInFlight = false;
+      const cleanup = (): void => {
+        windowController?.dispose();
+        if (activeWindow === window) {
+          activeWindow = null;
+        }
+      };
+      const lifecycle = createReviewHostPublishLifecycle<ReviewSubmitPayload | ReviewCancelPayload>({
+        closeWindow: closeActiveWindow,
+        persist: flushSessionSave,
+        onSettling: cleanup,
+      });
+      reviewLifecycle = lifecycle;
+      activeReviewLifecycle = lifecycle;
+      const terminalMessagePromise = lifecycle.terminal;
+      const canUpdateAiReview = (): boolean => !lifecycle.terminalRequested && activeWindow === window;
 
-        const cleanup = (): void => {
-          window.removeListener("message", onMessage);
-          window.removeListener("closed", onClosed);
-          window.removeListener("error", onError);
-          if (activeWindow === window) {
-            activeWindow = null;
-          }
-        };
-
-        const settle = (value: ReviewSubmitPayload | ReviewCancelPayload | null): void => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          resolve(value);
-        };
-
-        const canUpdateAiReview = (): boolean => !settled && activeWindow === window;
-
-        const handlePublishGitHubReview = async (message: ReviewPublishPayload): Promise<void> => {
-          if (publishInFlight) {
-            ctx.ui.notify("A GitHub review submission is already in progress.", "warning");
-            sendWindowMessage({
-              type: "publish-github-review-result",
-              requestId: message.requestId,
-              ok: false,
-              message: "A GitHub review submission is already in progress.",
-            });
-            return;
-          }
-          if (!dataset.source.github) {
+      const handlePublishGitHubReview = (message: ReviewPublishPayload): void => {
+        const pending = lifecycle.startPublish(async () => {
+          const github = dataset.source.github;
+          const controller = publishSessionController;
+          if (github == null || controller == null) {
             ctx.ui.notify("This review source cannot submit GitHub reviews.", "error");
             sendWindowMessage({
               type: "publish-github-review-result",
@@ -405,8 +652,56 @@ export default function (pi: ExtensionAPI) {
             return;
           }
 
-          publishInFlight = true;
+          const reportSuccess = (
+            receipt: Awaited<ReturnType<typeof publishGitHubReview>>,
+            reconciled: boolean,
+          ): void => {
+            const receiptDetails = [
+              receipt.reviewId != null ? `Review #${receipt.reviewId}.` : undefined,
+              receipt.reviewUrl,
+              receipt.submittedAt != null ? `Submitted at ${receipt.submittedAt}.` : undefined,
+              receipt.warnings.length > 0 ? `Warnings: ${receipt.warnings.join(" ")}` : undefined,
+            ].filter((detail): detail is string => detail != null && detail.length > 0);
+            const messageText = [
+              reconciled ? "Reconciled the previously ambiguous GitHub review." : "Submitted GitHub review.",
+              ...receiptDetails,
+            ].join(" ");
+            ctx.ui.notify(messageText, receipt.warnings.length > 0 ? "warning" : "info");
+            sendWindowMessage(buildGitHubPublishSuccessResult({
+              requestId: message.requestId,
+              message: messageText,
+              confirmedIntent: controller.intent,
+            }));
+          };
+
           try {
+            if (!await flushSessionSave()) {
+              throw new Error("Could not durably save the latest review session before GitHub publish.");
+            }
+            const outstanding = await controller.reconcileOutstanding(reconcilePublishIntent);
+            if (outstanding.status === "confirmed" && outstanding.receipt != null) {
+              refreshAuthoritativePublishedComments();
+              reportSuccess(
+                outstanding.receipt,
+                true,
+              );
+              return;
+            }
+            if (outstanding.status === "blocked") {
+              const messageText = outstanding.warning
+                ?? "The prior GitHub review submission remains ambiguous, so publishing is blocked.";
+              ctx.ui.notify(messageText, "warning");
+              sendWindowMessage({
+                type: "publish-github-review-result",
+                requestId: message.requestId,
+                ok: false,
+                message: messageText,
+              });
+              return;
+            }
+
+            const submittedSnapshot = snapshotFromSubmit(message.submit);
+            const reviewedHeadSha = dataset.source.headRevision;
             const filePathById = new Map(files.map((file) => [file.id, file.gitDiff?.newPath ?? file.gitDiff?.oldPath ?? file.path]));
             const commentableLinesByFileId = new Map(files.map((file) => [
               file.id,
@@ -415,33 +710,69 @@ export default function (pi: ExtensionAPI) {
                 modified: file.gitDiff?.commentableModifiedLines ?? [],
               },
             ]));
-            const buildOptions = {
+            const submit = {
+              ...message.submit,
+              comments: resolveSubmittedCommentsFromSnapshot(message.submit.comments, submittedSnapshot),
+            };
+            const correlationId = randomUUID();
+            const planOptions: BuildGitHubReviewPublishPlanOptions = {
               event: message.event,
               body: message.body,
-              submit: message.submit,
+              submit,
               filePathById,
               commentableLinesByFileId,
+              reviewedHeadSha: reviewedHeadSha ?? "",
+              correlationId,
             };
-            const skippedCount = countSkippedGitHubReviewComments(buildOptions);
-            const publishedCommentIds = listPublishableGitHubReviewCommentIds(buildOptions);
-            const payload = buildGitHubReviewPayload(buildOptions);
-
-            await publishGitHubReview(pi, dataset.workingRoot, dataset.source.github, payload);
-            ctx.ui.notify("Submitted GitHub review.", "info");
-            sendWindowMessage({
-              type: "publish-github-review-result",
-              requestId: message.requestId,
-              ok: true,
-              message: skippedCount > 0
-                ? `Submitted review. Skipped ${skippedCount} unsupported local comment(s).`
-                : "Submitted GitHub review.",
-              publishedCommentIds,
-              skippedCount,
-              submittedAt: new Date().toISOString(),
-            });
-            if (skippedCount > 0) {
-              ctx.ui.notify(`Skipped ${skippedCount} unsupported manual comment(s) that are not GitHub PR diff coordinates.`, "warning");
+            const plan = buildGitHubReviewPublishPlan(planOptions);
+            if (plan.payload == null) {
+              const messageText = plan.errors.map((error) => error.message).join(" ");
+              ctx.ui.notify(`GitHub review submission was not sent: ${messageText}`, "warning");
+              sendWindowMessage({
+                type: "publish-github-review-result",
+                requestId: message.requestId,
+                ok: false,
+                message: messageText,
+              });
+              return;
             }
+
+            const receipt = await controller.runPublish({
+              correlationId,
+              snapshot: submittedSnapshot,
+              representedCommentIds: plan.representedCommentIds,
+              submittedComments: submit.comments,
+            }, async (beforePost) => await publishGitHubReview(
+              pi,
+              dataset.workingRoot,
+              github,
+              plan.payload!,
+              {
+                correlationId,
+                reviewedBaseSha: dataset.source.baseRevision ?? "",
+                beforePost: async () => {
+                  if (!await flushSessionSave()) {
+                    throw new Error("Could not durably save the latest review session before GitHub POST.");
+                  }
+                  await prepareGitHubPublishPost({
+                    loadPersistedSession: async () => await loadReviewSession(sessionDescriptor.storagePath),
+                    expectedPlan: plan,
+                    originalOptions: planOptions,
+                    acceptPersistedRecord: (persisted) => {
+                      persistedSessionState = {
+                        revision: persisted.revision,
+                        recordHash: persisted.recordHash,
+                      };
+                      sessionSnapshot = mergeSessionSnapshot(persisted.snapshot);
+                      refreshAuthoritativePublishedComments();
+                    },
+                    markPostStarting: beforePost,
+                  });
+                },
+              },
+            ));
+            refreshAuthoritativePublishedComments();
+            reportSuccess(receipt, false);
           } catch (error) {
             const messageText = error instanceof Error ? error.message : String(error);
             ctx.ui.notify(`GitHub review submission failed: ${messageText}`, "error");
@@ -451,154 +782,177 @@ export default function (pi: ExtensionAPI) {
               ok: false,
               message: messageText,
             });
-          } finally {
-            publishInFlight = false;
           }
-        };
-
-        const handleRequestFile = async (message: ReviewRequestFilePayload): Promise<void> => {
-          const file = fileMap.get(message.fileId);
-          if (file == null) {
-            sendWindowMessage({
-              type: "file-error",
-              requestId: message.requestId,
-              fileId: message.fileId,
-              scope: message.scope,
-              commitSha: message.commitSha,
-              message: "Unknown file requested.",
-            });
-            return;
-          }
-
-          try {
-            const contents = await loadContents(file, message.scope, message.commitSha);
-            sendWindowMessage({
-              type: "file-data",
-              requestId: message.requestId,
-              fileId: message.fileId,
-              scope: message.scope,
-              commitSha: message.commitSha,
-              originalContent: contents.originalContent,
-              modifiedContent: contents.modifiedContent,
-            });
-          } catch (error) {
+        });
+        if (pending != null) {
+          void pending.catch((error) => {
             const messageText = error instanceof Error ? error.message : String(error);
-            sendWindowMessage({
-              type: "file-error",
-              requestId: message.requestId,
-              fileId: message.fileId,
-              scope: message.scope,
-              commitSha: message.commitSha,
-              message: messageText,
-            });
-          }
-        };
+            ctx.ui.notify(`GitHub review submission failed: ${messageText}`, "error");
+          });
+          return;
+        }
 
-        const handleRunAiReview = async (message: ReviewRunAiReviewPayload): Promise<void> => {
-          if (aiReviewInFlight) {
-            sendWindowMessage({
-              type: "ai-review-error",
-              requestId: message.requestId,
-              message: "An AI review is already running.",
-              progress: createAiReviewFailedProgress(analysis, "An AI review is already running.", aiReviewConfig),
-            });
-            return;
-          }
+        ctx.ui.notify("A GitHub review submission is already in progress.", "warning");
+        sendWindowMessage({
+          type: "publish-github-review-result",
+          requestId: message.requestId,
+          ok: false,
+          message: "A GitHub review submission is already in progress.",
+        });
+      };
 
-          aiReviewInFlight = true;
-          try {
-            const result = await runAiReview(ctx, dataset, analysis, {
-              getFilePatch: loadFilePatch,
-              config: aiReviewConfig,
-              onProgress: (progress) => {
-                if (!canUpdateAiReview()) return;
-                sendWindowMessage({
-                  type: "ai-review-progress",
-                  requestId: message.requestId,
-                  progress,
-                });
-              },
-              onPartialResult: (partial) => {
-                if (!canUpdateAiReview()) return;
-                analysis = partial.analysis;
-                queueSessionSave({
-                  ...(sessionSnapshot ?? {}),
-                  analysis,
-                });
-                sendWindowMessage({
-                  type: "ai-review-partial-result",
-                  requestId: message.requestId,
-                  chapterId: partial.chapterId,
-                  analysis: partial.analysis,
-                  progress: partial.progress,
-                });
-              },
-            });
-            if (!canUpdateAiReview()) return;
-            analysis = result.analysis;
-            queueSessionSave({
-              ...(sessionSnapshot ?? {}),
-              analysis,
-            });
-            sendWindowMessage({
-              type: "ai-review-result",
-              requestId: message.requestId,
-              analysis: result.analysis,
-              progress: result.progress,
-            });
-          } catch (error) {
-            if (!canUpdateAiReview()) return;
-            const messageText = error instanceof Error ? error.message : String(error);
-            sendWindowMessage({
-              type: "ai-review-error",
-              requestId: message.requestId,
-              message: messageText,
-              progress: createAiReviewFailedProgress(analysis, messageText, aiReviewConfig),
-            });
-          } finally {
-            aiReviewInFlight = false;
-          }
-        };
+      const handleRequestFile = async (message: ReviewRequestFilePayload): Promise<void> => {
+        const file = fileMap.get(message.fileId);
+        if (file == null) {
+          sendWindowMessage({
+            type: "file-error",
+            requestId: message.requestId,
+            fileId: message.fileId,
+            scope: message.scope,
+            commitSha: message.commitSha,
+            message: "Unknown file requested.",
+          });
+          return;
+        }
 
-        const onMessage = (data: unknown): void => {
-          const message = data as ReviewWindowMessage;
-          if (isSaveSessionPayload(message)) {
-            queueSessionSave(message.snapshot, message.requestId);
-            return;
-          }
-          if (isRunAiReviewPayload(message)) {
-            void handleRunAiReview(message);
-            return;
-          }
-          if (isPublishPayload(message)) {
-            queueSessionSave(snapshotFromSubmit(message.submit));
-            void handlePublishGitHubReview(message);
-            return;
-          }
-          if (isRequestFilePayload(message)) {
-            void handleRequestFile(message);
-            return;
-          }
-          if (isSubmitPayload(message) || isCancelPayload(message)) {
-            settle(message);
-          }
-        };
+        try {
+          const contents = await loadContents(file, message.scope, message.commitSha);
+          sendWindowMessage({
+            type: "file-data",
+            requestId: message.requestId,
+            fileId: message.fileId,
+            scope: message.scope,
+            commitSha: message.commitSha,
+            originalContent: contents.originalContent,
+            modifiedContent: contents.modifiedContent,
+          });
+        } catch (error) {
+          const messageText = error instanceof Error ? error.message : String(error);
+          sendWindowMessage({
+            type: "file-error",
+            requestId: message.requestId,
+            fileId: message.fileId,
+            scope: message.scope,
+            commitSha: message.commitSha,
+            message: messageText,
+          });
+        }
+      };
 
-        const onClosed = (): void => {
-          settle(null);
-        };
+      const handleRunAiReview = async (message: ReviewRunAiReviewPayload): Promise<void> => {
+        if (aiReviewInFlight) {
+          sendWindowMessage({
+            type: "ai-review-error",
+            requestId: message.requestId,
+            message: "An AI review is already running.",
+            progress: createAiReviewFailedProgress(analysis, "An AI review is already running.", aiReviewConfig),
+          });
+          return;
+        }
 
-        const onError = (error: Error): void => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(error);
-        };
+        aiReviewInFlight = true;
+        try {
+          const result = await runAiReview(ctx, dataset, analysis, {
+            getFilePatch: loadFilePatch,
+            config: aiReviewConfig,
+            onProgress: (progress) => {
+              if (!canUpdateAiReview()) return;
+              sendWindowMessage({
+                type: "ai-review-progress",
+                requestId: message.requestId,
+                progress,
+              });
+            },
+            onPartialResult: (partial) => {
+              if (!canUpdateAiReview()) return;
+              analysis = partial.analysis;
+              windowController?.updateProtocolContext(rendererProtocolContext(files, dataset.commits, analysis));
+              queueSessionSave({
+                ...(sessionSnapshot ?? {}),
+                analysis,
+              });
+              sendWindowMessage({
+                type: "ai-review-partial-result",
+                requestId: message.requestId,
+                chapterId: partial.chapterId,
+                analysis: partial.analysis,
+                progress: partial.progress,
+              });
+            },
+          });
+          if (!canUpdateAiReview()) return;
+          analysis = result.analysis;
+          windowController?.updateProtocolContext(rendererProtocolContext(files, dataset.commits, analysis));
+          queueSessionSave({
+            ...(sessionSnapshot ?? {}),
+            analysis,
+          });
+          sendWindowMessage({
+            type: "ai-review-result",
+            requestId: message.requestId,
+            analysis: result.analysis,
+            progress: result.progress,
+          });
+        } catch (error) {
+          if (!canUpdateAiReview()) return;
+          const messageText = error instanceof Error ? error.message : String(error);
+          sendWindowMessage({
+            type: "ai-review-error",
+            requestId: message.requestId,
+            message: messageText,
+            progress: createAiReviewFailedProgress(analysis, messageText, aiReviewConfig),
+          });
+        } finally {
+          aiReviewInFlight = false;
+        }
+      };
 
-        window.on("message", onMessage);
-        window.on("closed", onClosed);
-        window.on("error", onError);
-      });
+      const onMessage = (data: unknown): void => {
+        const message = data as ReviewWindowMessage;
+        if (isSaveSessionPayload(message)) {
+          queueSessionSave(message.snapshot, message.requestId);
+          return;
+        }
+        if (isCheckpointSessionPayload(message)) {
+          checkpointRendererSession(message.snapshot);
+          return;
+        }
+        if (isRunAiReviewPayload(message)) {
+          void handleRunAiReview(message);
+          return;
+        }
+        if (isPublishPayload(message)) {
+          handlePublishGitHubReview(message);
+          return;
+        }
+        if (isRequestFilePayload(message)) {
+          void handleRequestFile(message);
+          return;
+        }
+        if (isSubmitPayload(message) || isCancelPayload(message)) {
+          if (isSubmitPayload(message)) {
+            queueSessionSave(snapshotFromSubmit(message));
+          }
+          lifecycle.callbacks.onAuthenticatedTerminal(message);
+        }
+      };
+
+      try {
+        windowController = createReviewWindowController({
+          window,
+          shellPath: getReviewShellPath(),
+          title,
+          bootstrap: reviewData,
+          protocol: rendererProtocolContext(files, dataset.commits, analysis),
+          onMessage,
+          onClosed: lifecycle.callbacks.onRendererClosed,
+          onError: lifecycle.callbacks.onControllerError,
+        });
+        windowController.start();
+      } catch (error) {
+        const controllerError = error instanceof Error ? error : new Error(String(error));
+        lifecycle.callbacks.onControllerError(controllerError);
+      }
 
       const result = await Promise.race([
         terminalMessagePromise.then((message) => ({ type: "window" as const, message })),
@@ -606,8 +960,7 @@ export default function (pi: ExtensionAPI) {
       ]);
 
       if (result.type === "ui" && result.reason === "escape") {
-        closeActiveWindow();
-        await terminalMessagePromise.catch(() => null);
+        await lifecycle.onTerminalEscape().catch(() => null);
         ctx.ui.notify("Review cancelled.", "info");
         return;
       }
@@ -616,10 +969,7 @@ export default function (pi: ExtensionAPI) {
 
       waitingUI.dismiss();
       await waitingUI.promise;
-      if (message?.type === "submit") {
-        queueSessionSave(snapshotFromSubmit(message));
-      }
-      const saveOk = await flushSessionSave();
+      const saveOk = await lifecycle.persist();
       closeActiveWindow();
 
       if (message == null) {
@@ -640,6 +990,14 @@ export default function (pi: ExtensionAPI) {
       closeActiveWindow();
       const message = error instanceof Error ? error.message : String(error);
       ctx.ui.notify(`Review failed: ${message}`, "error");
+    } finally {
+      if (activeReviewLifecycle === reviewLifecycle) {
+        activeReviewLifecycle = null;
+      }
+      if (activeReviewCompletion === reviewCompletion) {
+        activeReviewCompletion = null;
+      }
+      finishActiveReview();
     }
   }
 
@@ -651,7 +1009,14 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async () => {
+    const reviewCompletion = activeReviewCompletion;
+    const lifecycle = activeReviewLifecycle;
     activeWaitingUIDismiss?.();
-    closeActiveWindow();
+    if (lifecycle == null) {
+      closeActiveWindow();
+    } else {
+      await lifecycle.onSessionShutdown().catch(() => undefined);
+    }
+    await reviewCompletion?.catch(() => undefined);
   });
 }

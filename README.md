@@ -63,6 +63,14 @@ pi-diff-review pr https://github.com/owner/repo/pull/123 --reset-review
 
 This removes the saved review map, AI findings, staged local comments, and review progress for that one review source. It does not reset Git files, branches, refs, or worktrees. `--fresh` is accepted as a short alias, but `--reset-review` is the preferred spelling.
 
+If an earlier GitHub submission remains ambiguous after reconciliation, the cockpit opens in review-only mode and blocks another publish. `--abandon-ambiguous-publish` explicitly discards only that publish intent while preserving comments and review progress:
+
+```bash
+pi-diff-review --abandon-ambiguous-publish pr https://github.com/owner/repo/pull/123
+```
+
+Use this only after checking GitHub. The prior request may already have succeeded, so publishing again can create a duplicate GitHub review.
+
 ## PI Review Configuration
 
 AI review defaults to the active PI model, `standard` depth, three parallel chapter agents, and per-phase reasoning of scout `low`, chapter agents `medium`, validation `high`, and synthesis `high`.
@@ -123,8 +131,13 @@ The cockpit workflow reads PR metadata when GitHub access is available. It will 
 
 ## Requirements
 
-- macOS, Linux, or Windows
-- Node.js 20+
+- macOS
+- Node.js 22.19+
 - `pi` installed
 - `gh` authenticated for private GitHub PRs in the cockpit workflow
-- internet access for the Tailwind and Monaco CDNs used by the review window
+
+## Renderer Assets
+
+The review renderer is built locally during `prepare`; Tailwind, Monaco, and the five worker programs used by the UI are bundled into `web/dist` and the review shell does not request remote scripts, styles, or modules. Build tools are development dependencies: source and git installs can run `prepare`, while packed runtime installs consume the included `web/dist` assets without installing Tailwind, esbuild, or Monaco.
+
+Glimpse 0.8.1's macOS `loadFileURL` path also does not execute local ES module scripts, and WKWebView cannot start Monaco workers directly from the shell's `file:` URLs. The renderer therefore ships as a prebundled local classic script and starts its embedded worker programs from revocable `blob:` URLs. The CSP keeps scripts local, denies connections, and permits `blob:` only for workers.
