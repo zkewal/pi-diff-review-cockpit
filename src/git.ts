@@ -25,6 +25,11 @@ interface CommentableLineRanges {
   modified: ReviewLineRange[];
 }
 
+interface DiffLineStats {
+  added: number;
+  deleted: number;
+}
+
 export type ReviewGitDiffMode = "working-tree" | "index";
 
 export interface ReviewWindowDataOptions {
@@ -139,9 +144,14 @@ function parseDiffPath(value: string, prefix: "a/" | "b/"): string | null {
   return path.startsWith(prefix) ? path.slice(prefix.length) : path;
 }
 
-function addCommentableRange(ranges: ReviewLineRange[], start: number, count: number): void {
-  if (count <= 0) return;
-  ranges.push({ start, end: start + count - 1 });
+function addCommentableLine(ranges: ReviewLineRange[], line: number): void {
+  if (line <= 0) return;
+  const previous = ranges[ranges.length - 1];
+  if (previous != null && previous.end + 1 === line) {
+    previous.end = line;
+    return;
+  }
+  ranges.push({ start: line, end: line });
 }
 
 function parseHunkHeader(line: string): { oldStart: number; oldCount: number; newStart: number; newCount: number } | null {
@@ -163,6 +173,8 @@ function parseCommentableLineRanges(output: string): Map<string, CommentableLine
     newPath: string | null;
     ranges: CommentableLineRanges;
   } | null = null;
+  let originalLine: number | null = null;
+  let modifiedLine: number | null = null;
 
   const finishCurrentFile = (): void => {
     if (current == null) return;
@@ -181,10 +193,36 @@ function parseCommentableLineRanges(output: string): Map<string, CommentableLine
         newPath: null,
         ranges: { original: [], modified: [] },
       };
+      originalLine = null;
+      modifiedLine = null;
       continue;
     }
 
     if (current == null) continue;
+
+    const hunk = parseHunkHeader(line);
+    if (hunk != null) {
+      originalLine = hunk.oldStart;
+      modifiedLine = hunk.newStart;
+      continue;
+    }
+
+    if (originalLine != null && modifiedLine != null) {
+      if (line.startsWith(" ")) {
+        originalLine += 1;
+        modifiedLine += 1;
+      } else if (line.startsWith("-")) {
+        addCommentableLine(current.ranges.original, originalLine);
+        originalLine += 1;
+      } else if (line.startsWith("+")) {
+        addCommentableLine(current.ranges.modified, modifiedLine);
+        modifiedLine += 1;
+      } else if (!line.startsWith("\\ No newline at end of file")) {
+        originalLine = null;
+        modifiedLine = null;
+      }
+      continue;
+    }
 
     if (line.startsWith("--- ")) {
       current.oldPath = parseDiffPath(line.slice(4), "a/");
@@ -195,16 +233,51 @@ function parseCommentableLineRanges(output: string): Map<string, CommentableLine
       current.newPath = parseDiffPath(line.slice(4), "b/");
       continue;
     }
-
-    const hunk = parseHunkHeader(line);
-    if (hunk == null) continue;
-
-    addCommentableRange(current.ranges.original, hunk.oldStart, hunk.oldCount);
-    addCommentableRange(current.ranges.modified, hunk.newStart, hunk.newCount);
   }
 
   finishCurrentFile();
   return rangesByPath;
+}
+
+function parseNumstatCount(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const count = Number.parseInt(value, 10);
+  return Number.isSafeInteger(count) ? count : null;
+}
+
+function parseDiffLineStats(output: string): Map<string, DiffLineStats> {
+  const statsByPath = new Map<string, DiffLineStats>();
+  const records = output.split("\0");
+
+  for (let index = 0; index < records.length;) {
+    const record = records[index++] ?? "";
+    if (record.length === 0) continue;
+    const firstTab = record.indexOf("\t");
+    const secondTab = firstTab < 0 ? -1 : record.indexOf("\t", firstTab + 1);
+    if (firstTab < 0 || secondTab < 0) continue;
+
+    const added = parseNumstatCount(record.slice(0, firstTab));
+    const deleted = parseNumstatCount(record.slice(firstTab + 1, secondTab));
+    const inlinePath = record.slice(secondTab + 1);
+    if (added == null || deleted == null) continue;
+    const stats = { added, deleted };
+
+    if (inlinePath.length > 0) {
+      statsByPath.set(inlinePath, stats);
+      continue;
+    }
+
+    const oldPath = records[index++] ?? "";
+    const newPath = records[index++] ?? "";
+    if (oldPath.length > 0) statsByPath.set(oldPath, stats);
+    if (newPath.length > 0) statsByPath.set(newPath, stats);
+  }
+
+  return statsByPath;
+}
+
+function countLineRanges(ranges: ReviewLineRange[]): number {
+  return ranges.reduce((total, range) => total + range.end - range.start + 1, 0);
 }
 
 function mergeChangedPaths(tracked: ChangedPath[], untracked: ChangedPath[]): ChangedPath[] {
@@ -232,7 +305,28 @@ function toDisplayPath(change: ChangedPath): string {
   return change.newPath ?? change.oldPath ?? "(unknown)";
 }
 
-function toComparison(change: ChangedPath, commentableLines?: CommentableLineRanges): ReviewFileComparison {
+function toComparison(change: ChangedPath, commentableLines?: CommentableLineRanges, stats?: DiffLineStats): ReviewFileComparison {
+  const path = change.newPath ?? change.oldPath ?? toDisplayPath(change);
+  const anchorStats = commentableLines == null
+    ? null
+    : {
+        added: countLineRanges(commentableLines.modified),
+        deleted: countLineRanges(commentableLines.original),
+      };
+  if (stats != null && anchorStats == null && (stats.added > 0 || stats.deleted > 0)) {
+    throw new Error(`Diff metadata for ${path} is inconsistent: canonical numstat has changed lines, but patch anchors are missing.`);
+  }
+  if (stats == null && anchorStats != null && (anchorStats.added > 0 || anchorStats.deleted > 0)) {
+    throw new Error(`Diff metadata for ${path} is inconsistent: patch anchors have changed lines, but canonical numstat is missing.`);
+  }
+  if (commentableLines != null && stats != null) {
+    if (anchorStats?.added !== stats.added || anchorStats.deleted !== stats.deleted) {
+      throw new Error(
+        `Diff metadata for ${path} is inconsistent: patch anchors are +${anchorStats?.added ?? 0} -${anchorStats?.deleted ?? 0}, but numstat is +${stats.added} -${stats.deleted}.`,
+      );
+    }
+  }
+
   return {
     status: change.status,
     oldPath: change.oldPath,
@@ -240,6 +334,7 @@ function toComparison(change: ChangedPath, commentableLines?: CommentableLineRan
     displayPath: toDisplayPath(change),
     hasOriginal: change.oldPath != null,
     hasModified: change.newPath != null,
+    ...(stats == null ? {} : { addedLines: stats.added, deletedLines: stats.deleted }),
     ...(commentableLines == null
       ? {}
       : {
@@ -379,7 +474,10 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string, options
     ? await runGit(pi, repoRoot, ["diff", ...diffModeArgs, "--find-renames", "-M", "--name-status", "HEAD", "--"])
     : "";
   const commentableDiffOutput = repositoryHasHead
-    ? await runGitAllowFailure(pi, repoRoot, ["diff", ...diffModeArgs, "--find-renames", "-M", "--unified=0", "--no-color", "HEAD", "--"])
+    ? await runGit(pi, repoRoot, ["diff", ...diffModeArgs, "--find-renames", "-M", "--no-color", "HEAD", "--"])
+    : "";
+  const diffstatOutput = repositoryHasHead
+    ? await runGit(pi, repoRoot, ["diff", ...diffModeArgs, "--find-renames", "-M", "--numstat", "-z", "HEAD", "--"])
     : "";
   const untrackedOutput = gitDiffMode === "working-tree"
     ? await runGitAllowFailure(pi, repoRoot, ["ls-files", "--others", "--exclude-standard"])
@@ -403,6 +501,7 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string, options
   const worktreeChanges = mergeChangedPaths(parseNameStatus(trackedDiffOutput), parseUntrackedPaths(untrackedOutput))
     .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? ""));
   const commentableLinesByPath = parseCommentableLineRanges(commentableDiffOutput);
+  const diffstatsByPath = parseDiffLineStats(diffstatOutput);
   const deletedPaths = new Set(parseTrackedPaths(deletedFilesOutput));
   const currentPaths = uniquePaths([...parseTrackedPaths(trackedFilesOutput), ...parseTrackedPaths(untrackedOutput)])
     .filter((path) => !deletedPaths.has(path))
@@ -440,7 +539,8 @@ export async function getReviewWindowData(pi: ExtensionAPI, cwd: string, options
     seed.worktreeStatus = change.status;
     seed.hasWorkingTreeFile = change.newPath != null;
     seed.inGitDiff = true;
-    seed.gitDiff = toComparison(change, commentableLinesByPath.get(change.newPath ?? change.oldPath ?? ""));
+    const changedPath = change.newPath ?? change.oldPath ?? "";
+    seed.gitDiff = toComparison(change, commentableLinesByPath.get(changedPath), diffstatsByPath.get(changedPath));
   }
 
   for (const change of lastCommitChanges) {
@@ -491,7 +591,8 @@ export async function getRevisionDiffReviewData(
 ): Promise<{ repoRoot: string; files: ReviewFile[]; commits: { sha: string; shortSha: string; subject: string }[] }> {
   const diffRange = `${baseRevision}...${headRevision}`;
   const trackedDiffOutput = await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--name-status", diffRange, "--"]);
-  const commentableDiffOutput = await runGitAllowFailure(pi, repoRoot, ["diff", "--find-renames", "-M", "--unified=0", "--no-color", diffRange, "--"]);
+  const commentableDiffOutput = await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--no-color", diffRange, "--"]);
+  const diffstatOutput = await runGit(pi, repoRoot, ["diff", "--find-renames", "-M", "--numstat", "-z", diffRange, "--"]);
   const trackedFilesOutput = await runGitAllowFailure(pi, repoRoot, ["ls-tree", "-r", "--name-only", headRevision]);
   const lastCommitOutput = await runGitAllowFailure(pi, repoRoot, ["diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", headRevision]);
   const commits = parseCommitLog(await runGitAllowFailure(pi, repoRoot, ["log", "--max-count=50", "--format=%H%x09%h%x09%s", `${baseRevision}..${headRevision}`]));
@@ -504,6 +605,7 @@ export async function getRevisionDiffReviewData(
   const diffChanges = parseNameStatus(trackedDiffOutput)
     .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? ""));
   const commentableLinesByPath = parseCommentableLineRanges(commentableDiffOutput);
+  const diffstatsByPath = parseDiffLineStats(diffstatOutput);
   const currentPaths = parseTrackedPaths(trackedFilesOutput).filter(isReviewableFilePath);
   const lastCommitChanges = parseNameStatus(lastCommitOutput)
     .filter((change) => isReviewableFilePath(change.newPath ?? change.oldPath ?? ""));
@@ -538,7 +640,8 @@ export async function getRevisionDiffReviewData(
     seed.worktreeStatus = change.status;
     seed.hasWorkingTreeFile = change.newPath != null;
     seed.inGitDiff = true;
-    seed.gitDiff = toComparison(change, commentableLinesByPath.get(change.newPath ?? change.oldPath ?? ""));
+    const changedPath = change.newPath ?? change.oldPath ?? "";
+    seed.gitDiff = toComparison(change, commentableLinesByPath.get(changedPath), diffstatsByPath.get(changedPath));
   }
 
   for (const change of lastCommitChanges) {

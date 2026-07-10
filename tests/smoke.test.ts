@@ -140,6 +140,13 @@ test("review progress is file-first and keyboard friendly", () => {
   assert.equal(html.includes("Mark this file reviewed and advance"), true);
 });
 
+test("renderer prefers canonical diffstats over derived comment anchors", () => {
+  const appJs = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
+
+  assert.match(appJs, /Number\.isSafeInteger\(comparison\.addedLines\)[\s\S]*?comparison\.addedLines/);
+  assert.match(appJs, /Number\.isSafeInteger\(comparison\.deletedLines\)[\s\S]*?comparison\.deletedLines/);
+});
+
 test("review workspace is consolidated around one sidebar and checkout drawer", () => {
   const appJs = readFileSync(new URL("../web/app.js", import.meta.url), "utf8");
   const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");

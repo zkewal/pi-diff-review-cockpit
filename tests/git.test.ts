@@ -37,7 +37,7 @@ test("attaches commentable git-diff hunk ranges to worktree comparisons", async 
         "R100\told-name.ts\trenamed.ts",
       ].join("\n"),
     }],
-    [["diff", "--find-renames", "-M", "--unified=0", "--no-color", "HEAD", "--"].join("\0"), {
+    [["diff", "--find-renames", "-M", "--no-color", "HEAD", "--"].join("\0"), {
       stdout: [
         "diff --git a/modified.ts b/modified.ts",
         "--- a/modified.ts",
@@ -72,6 +72,9 @@ test("attaches commentable git-diff hunk ranges to worktree comparisons", async 
         "+new",
       ].join("\n"),
     }],
+    [["diff", "--find-renames", "-M", "--numstat", "-z", "HEAD", "--"].join("\0"), {
+      stdout: ["2\t1\tmodified.ts", "3\t0\tadded.ts", "0\t2\tdeleted.ts", "1\t1\t", "old-name.ts", "renamed.ts", ""].join("\0"),
+    }],
     [["ls-files", "--others", "--exclude-standard"].join("\0"), { stdout: "" }],
     [["ls-files", "--cached"].join("\0"), { stdout: "modified.ts\nadded.ts\nrenamed.ts\n" }],
     [["ls-files", "--deleted"].join("\0"), { stdout: "deleted.ts\n" }],
@@ -90,6 +93,8 @@ test("attaches commentable git-diff hunk ranges to worktree comparisons", async 
   assert.deepEqual(byPath.get("deleted.ts")?.gitDiff?.commentableModifiedLines, []);
   assert.deepEqual(byPath.get("renamed.ts")?.gitDiff?.commentableOriginalLines, [{ start: 20, end: 20 }]);
   assert.deepEqual(byPath.get("renamed.ts")?.gitDiff?.commentableModifiedLines, [{ start: 21, end: 21 }]);
+  assert.equal(byPath.get("renamed.ts")?.gitDiff?.addedLines, 1);
+  assert.equal(byPath.get("renamed.ts")?.gitDiff?.deletedLines, 1);
 });
 
 test("index git-diff mode ignores unrelated unstaged worktree changes", async () => {
@@ -99,7 +104,7 @@ test("index git-diff mode ignores unrelated unstaged worktree changes", async ()
     [["diff", "--cached", "--find-renames", "-M", "--name-status", "HEAD", "--"].join("\0"), {
       stdout: "M\tpr-file.ts\n",
     }],
-    [["diff", "--cached", "--find-renames", "-M", "--unified=0", "--no-color", "HEAD", "--"].join("\0"), {
+    [["diff", "--cached", "--find-renames", "-M", "--no-color", "HEAD", "--"].join("\0"), {
       stdout: [
         "diff --git a/pr-file.ts b/pr-file.ts",
         "--- a/pr-file.ts",
@@ -110,6 +115,9 @@ test("index git-diff mode ignores unrelated unstaged worktree changes", async ()
         "+newer",
       ].join("\n"),
     }],
+    [["diff", "--cached", "--find-renames", "-M", "--numstat", "-z", "HEAD", "--"].join("\0"), {
+      stdout: "2\t1\tpr-file.ts\0",
+    }],
     [["ls-files", "--cached"].join("\0"), { stdout: "pr-file.ts\nlarge-dirty.csv\n" }],
     [["diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", "HEAD"].join("\0"), { stdout: "" }],
     [["log", "--max-count=50", "--format=%H%x09%h%x09%s"].join("\0"), { stdout: "" }],
@@ -119,6 +127,8 @@ test("index git-diff mode ignores unrelated unstaged worktree changes", async ()
   const diffFiles = files.filter((file) => file.inGitDiff);
 
   assert.deepEqual(diffFiles.map((file) => file.path), ["pr-file.ts"]);
+  assert.equal(diffFiles[0]?.gitDiff?.addedLines, 2);
+  assert.equal(diffFiles[0]?.gitDiff?.deletedLines, 1);
   assert.deepEqual(diffFiles[0]?.gitDiff?.commentableModifiedLines, [{ start: 10, end: 11 }]);
   assert.deepEqual(diffFiles[0]?.gitDiff?.commentableOriginalLines, [{ start: 10, end: 10 }]);
 });
@@ -132,7 +142,7 @@ test("revision diff review data does not require a checkout worktree", async () 
         "D\tdeleted.ts",
       ].join("\n"),
     }],
-    [["diff", "--find-renames", "-M", "--unified=0", "--no-color", "refs/review/base...refs/review/head", "--"].join("\0"), {
+    [["diff", "--find-renames", "-M", "--no-color", "refs/review/base...refs/review/head", "--"].join("\0"), {
       stdout: [
         "diff --git a/modified.ts b/modified.ts",
         "--- a/modified.ts",
@@ -156,6 +166,9 @@ test("revision diff review data does not require a checkout worktree", async () 
         "-one",
         "-two",
       ].join("\n"),
+    }],
+    [["diff", "--find-renames", "-M", "--numstat", "-z", "refs/review/base...refs/review/head", "--"].join("\0"), {
+      stdout: ["2\t1\tmodified.ts", "2\t0\tadded.ts", "0\t2\tdeleted.ts", ""].join("\0"),
     }],
     [["ls-tree", "-r", "--name-only", "refs/review/head"].join("\0"), {
       stdout: "modified.ts\nadded.ts\nunchanged.ts\n",
@@ -204,4 +217,74 @@ test("revision diff review data does not require a checkout worktree", async () 
     originalContent: "same\n",
     modifiedContent: "same\n",
   });
+});
+
+test("revision diffs keep canonical stats separate from exact comment anchors", async () => {
+  const range = "refs/review/base...refs/review/head";
+  const outputs = new Map<string, Partial<FakeExecResult>>([
+    [["diff", "--find-renames", "-M", "--name-status", range, "--"].join("\0"), {
+      stdout: "M\tlarge.py\n",
+    }],
+    [["diff", "--find-renames", "-M", "--no-color", range, "--"].join("\0"), {
+      stdout: [
+        "diff --git a/large.py b/large.py",
+        "--- a/large.py",
+        "+++ b/large.py",
+        "@@ -10,4 +10,4 @@",
+        " context one",
+        "-old one",
+        "+new one",
+        " context two",
+        "-old two",
+        "+new two",
+      ].join("\n"),
+    }],
+    [["diff", "--find-renames", "-M", "--numstat", "-z", range, "--"].join("\0"), {
+      stdout: "2\t2\tlarge.py\0",
+    }],
+    [["ls-tree", "-r", "--name-only", "refs/review/head"].join("\0"), { stdout: "large.py\n" }],
+    [["diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", "refs/review/head"].join("\0"), { stdout: "" }],
+    [["log", "--max-count=50", "--format=%H%x09%h%x09%s", "refs/review/base..refs/review/head"].join("\0"), { stdout: "" }],
+  ]);
+
+  const { files } = await getRevisionDiffReviewData(fakePi(outputs), "/repo", "refs/review/base", "refs/review/head");
+  const comparison = files.find((file) => file.path === "large.py")?.gitDiff;
+
+  assert.ok(comparison);
+  assert.equal(comparison.addedLines, 2);
+  assert.equal(comparison.deletedLines, 2);
+  assert.deepEqual(comparison.commentableOriginalLines, [{ start: 11, end: 11 }, { start: 13, end: 13 }]);
+  assert.deepEqual(comparison.commentableModifiedLines, [{ start: 11, end: 11 }, { start: 13, end: 13 }]);
+});
+
+test("revision diffs reject comment anchors that disagree with canonical stats", async () => {
+  const range = "refs/review/base...refs/review/head";
+  const outputs = new Map<string, Partial<FakeExecResult>>([
+    [["diff", "--find-renames", "-M", "--name-status", range, "--"].join("\0"), {
+      stdout: "M\tlarge.py\n",
+    }],
+    [["diff", "--find-renames", "-M", "--no-color", range, "--"].join("\0"), {
+      stdout: [
+        "diff --git a/large.py b/large.py",
+        "--- a/large.py",
+        "+++ b/large.py",
+        "@@ -10,2 +10,2 @@",
+        "-old one",
+        "-old two",
+        "+new one",
+        "+new two",
+      ].join("\n"),
+    }],
+    [["diff", "--find-renames", "-M", "--numstat", "-z", range, "--"].join("\0"), {
+      stdout: "1\t1\tlarge.py\0",
+    }],
+    [["ls-tree", "-r", "--name-only", "refs/review/head"].join("\0"), { stdout: "large.py\n" }],
+    [["diff-tree", "--root", "--find-renames", "-M", "--name-status", "--no-commit-id", "-r", "refs/review/head"].join("\0"), { stdout: "" }],
+    [["log", "--max-count=50", "--format=%H%x09%h%x09%s", "refs/review/base..refs/review/head"].join("\0"), { stdout: "" }],
+  ]);
+
+  await assert.rejects(
+    getRevisionDiffReviewData(fakePi(outputs), "/repo", "refs/review/base", "refs/review/head"),
+    /Diff metadata for large\.py is inconsistent/,
+  );
 });

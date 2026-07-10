@@ -88,7 +88,7 @@ test("builds github pr dataset from immutable private-ref SHAs without creating 
     [["git", "diff", "--find-renames", "-M", "--name-status", "base-immutable-sha...head-immutable-sha", "--"].join("\0"), {
       stdout: "A\tsrc/app/api/qa_api.py\n",
     }],
-    [["git", "diff", "--find-renames", "-M", "--unified=0", "--no-color", "base-immutable-sha...head-immutable-sha", "--"].join("\0"), {
+    [["git", "diff", "--find-renames", "-M", "--no-color", "base-immutable-sha...head-immutable-sha", "--"].join("\0"), {
       stdout: [
         "diff --git a/src/app/api/qa_api.py b/src/app/api/qa_api.py",
         "new file mode 100644",
@@ -98,6 +98,9 @@ test("builds github pr dataset from immutable private-ref SHAs without creating 
         "+one",
         "+two",
       ].join("\n"),
+    }],
+    [["git", "diff", "--find-renames", "-M", "--numstat", "-z", "base-immutable-sha...head-immutable-sha", "--"].join("\0"), {
+      stdout: "2\t0\tsrc/app/api/qa_api.py\0",
     }],
     [["git", "ls-tree", "-r", "--name-only", "head-immutable-sha"].join("\0"), {
       stdout: "src/app/api/qa_api.py\n",
@@ -122,6 +125,8 @@ test("builds github pr dataset from immutable private-ref SHAs without creating 
   assert.equal(dataset.source.headRevision, "head-immutable-sha");
   assert.deepEqual(dataset.analysisFileIds, [dataset.files[0]?.id]);
   assert.deepEqual(dataset.files.map((file) => file.path), ["src/app/api/qa_api.py"]);
+  assert.equal(dataset.files[0]?.gitDiff?.addedLines, 2);
+  assert.equal(dataset.files[0]?.gitDiff?.deletedLines, 0);
   assert.equal(calls.some((call) => call.includes("\0worktree\0")), false);
   assert.equal(calls.some((call) => call.includes("\0apply\0")), false);
   assert.equal(calls.some((call) => call.includes("fork-owner")), false);

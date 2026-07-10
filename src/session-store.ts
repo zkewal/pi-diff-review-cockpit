@@ -18,6 +18,7 @@ import type {
 } from "./types.js";
 
 const REVIEW_DIFF_FINGERPRINT_VERSION = 1;
+const REVIEW_DIFF_SEMANTICS_VERSION = 2;
 const REVIEW_SESSION_RECORD_VERSION = 2;
 const SESSION_DIR = "pi-diff-review-cockpit";
 
@@ -595,6 +596,7 @@ export async function buildReviewDiffFingerprint(
   const baseRevision = await resolveRevision(pi, dataset.repoRoot, dataset.source.baseRevision);
   const headRevision = await resolveRevision(pi, dataset.repoRoot, dataset.source.headRevision);
   const hashInput = {
+    reviewDiffSemanticsVersion: REVIEW_DIFF_SEMANTICS_VERSION,
     sourceKey,
     sourceKind: dataset.source.kind,
     baseRevision,

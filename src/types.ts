@@ -17,6 +17,8 @@ export interface ReviewFileComparison {
   displayPath: string;
   hasOriginal: boolean;
   hasModified: boolean;
+  addedLines?: number;
+  deletedLines?: number;
   commentableOriginalLines?: ReviewLineRange[];
   commentableModifiedLines?: ReviewLineRange[];
 }

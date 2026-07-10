@@ -498,8 +498,12 @@ function countLineRanges(ranges) {
 function diffstatCountsFromComparison(comparison) {
   if (!comparison) return null;
   return {
-    added: countLineRanges(comparison.commentableModifiedLines),
-    deleted: countLineRanges(comparison.commentableOriginalLines),
+    added: Number.isSafeInteger(comparison.addedLines)
+      ? comparison.addedLines
+      : countLineRanges(comparison.commentableModifiedLines),
+    deleted: Number.isSafeInteger(comparison.deletedLines)
+      ? comparison.deletedLines
+      : countLineRanges(comparison.commentableOriginalLines),
   };
 }
 
