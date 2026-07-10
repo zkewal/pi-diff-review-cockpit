@@ -20,6 +20,7 @@ import { createCommentEditorSavePolicy } from "./comment-editor-save-policy.js";
 import { createCommentEditBuffer } from "./comment-edit-buffer.js";
 import { replaceDiffEditorModels } from "./model-lifecycle.js";
 import { applyAuthoritativePublishedCommentState } from "./publish-comment-state.js";
+import { isFileCanvasActive } from "./review-navigation-state.js";
 import { createSessionSaveScheduler } from "./session-save-scheduler.js";
 
 const localWorkerSources = Object.freeze({
@@ -1423,8 +1424,12 @@ function ensureFileLoaded(fileId, scope = state.currentScope) {
 }
 
 function openFile(fileId) {
+  const alreadyOpen = isFileCanvasActive(state.activeCanvas, state.activeFileId, fileId);
   state.activeCanvas = "file";
-  if (state.activeFileId === fileId) {
+  if (state.activeInsight.type === "chapter") {
+    state.activeInsight = { type: "default", id: null };
+  }
+  if (alreadyOpen) {
     ensureFileLoaded(fileId, state.currentScope);
     requestAnimationFrame(applyPendingHunkFocus);
     return;
@@ -1825,7 +1830,7 @@ function bindFindingBadgeActions(container) {
 
 function renderFileRow(file, options = {}) {
   const reviewed = isFileReviewed(file.id);
-  const active = file.id === state.activeFileId;
+  const active = isFileCanvasActive(state.activeCanvas, state.activeFileId, file.id);
   const label = options.label || getScopeDisplayPath(file, state.currentScope) || file.path;
   const display = fileDisplayParts(file, label);
   const row = document.createElement("div");
@@ -1887,7 +1892,7 @@ function getReviewNavigationGroups(files) {
 function renderReviewGroup(group) {
   const progress = fileReviewProgress(group.files);
   const complete = progress.total > 0 && progress.reviewed >= progress.total;
-  const activeFileInGroup = group.files.some((file) => file.id === state.activeFileId);
+  const activeFileInGroup = group.files.some((file) => isFileCanvasActive(state.activeCanvas, state.activeFileId, file.id));
   const active = (state.activeCanvas === "chapter" && state.activeInsight.type === "chapter" && state.activeInsight.id === group.chapter?.id) || activeFileInGroup;
   if (complete && state.collapsedDirs[group.id] == null && !active) {
     state.collapsedDirs[group.id] = true;
