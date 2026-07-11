@@ -77,6 +77,10 @@ Use this only after checking GitHub. The prior request may already have succeede
 
 ## PI Review Configuration
 
+The diff opens with a deterministic provisional review plan. Semantic mapping then runs in the background through bounded scouts, a global planner, an adversarial critic, and an exact-coverage compiler. Only a map that owns every changed line exactly once is published to the UI. If semantic mapping fails, the provisional plan remains usable and is labeled as fallback rather than being presented as AI-generated.
+
+Review progress is stored per semantic visit. Different changed ranges in one large file may therefore belong to different chapters; the file is complete only after every visit is complete. A matching diff fingerprint and mapping strategy restore the cached map without repeating model work. A changed PR head invalidates generated maps and findings while retaining only human state that can be reconciled safely.
+
 AI review defaults to `standard` depth and three parallel chapter agents. Standard routing uses `openai-codex/gpt-5.6-luna` at `medium` for scouting, `openai-codex/gpt-5.6-terra` at `high` for chapter agents, `openai-codex/gpt-5.6-sol` at `xhigh` for validation, and Terra at `high` for synthesis. Pi 0.80.6 or newer is required to expose these model IDs; older 0.80.x installations fall back to the active Pi model with a warning.
 
 | Phase | Fast | Standard | Deep |
@@ -119,6 +123,11 @@ Later files override earlier files. Example:
       "chapter": { "provider": "openai-codex", "model": "gpt-5.6-terra", "reasoning": "high" },
       "validation": { "provider": "openai-codex", "model": "gpt-5.6-sol", "reasoning": "xhigh" },
       "synthesis": { "provider": "openai-codex", "model": "gpt-5.6-terra", "reasoning": "high" }
+    },
+    "map": {
+      "scout": { "provider": "openai-codex", "model": "gpt-5.6-luna", "reasoning": "medium" },
+      "planner": { "provider": "openai-codex", "model": "gpt-5.6-terra", "reasoning": "high" },
+      "critic": { "provider": "openai-codex", "model": "gpt-5.6-sol", "reasoning": "xhigh" }
     }
   }
 }
