@@ -1206,6 +1206,9 @@ function aiReviewActiveTargetLabel() {
 
 function aiReviewStatusSummary() {
   const counts = findingStatusCounts();
+  if (["provisional", "mapping"].includes(reviewData.map?.status) || (state.reviewMapProgress && !["done", "failed"].includes(state.reviewMapProgress.phase))) {
+    return `✦ ${state.reviewMapProgress?.message || "Preparing review plan..."}`;
+  }
   if (state.aiReview.status === "running") {
     if (state.aiReview.progress?.phase === "scout") return "✦ Mapping PR...";
     if (state.aiReview.progress?.phase === "validation") return "✦ Validating findings...";
@@ -2446,6 +2449,8 @@ function renderTree() {
   sourceLabelEl.textContent = workflowTitle.title;
   const analysisStatus = state.aiReview.status === "running"
     ? state.aiReview.message
+    : state.reviewMapProgress && !["done", "failed"].includes(state.reviewMapProgress.phase)
+      ? state.reviewMapProgress.message
     : state.aiReview.status === "done" || state.aiReview.status === "failed"
       ? state.aiReview.message
       : reviewData.session?.message || reviewData.analysis?.message || "";

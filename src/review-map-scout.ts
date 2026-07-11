@@ -43,19 +43,28 @@ function groupsFor(units: ReviewChangeUnit[]): ReviewChangeUnit[][] {
   while (pending.length > 0) {
     const group = [pending.shift()!];
     const commits = new Set(group[0]!.commitIds);
-    for (let index = 0; index < pending.length;) {
-      const candidate = pending[index]!;
-      if (candidate.commitIds.some((id) => commits.has(id))) {
-        group.push(candidate);
-        candidate.commitIds.forEach((id) => commits.add(id));
-        pending.splice(index, 1);
-      } else {
-        index += 1;
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (let index = 0; index < pending.length;) {
+        const candidate = pending[index]!;
+        if (candidate.commitIds.some((id) => commits.has(id))) {
+          group.push(candidate);
+          candidate.commitIds.forEach((id) => commits.add(id));
+          pending.splice(index, 1);
+          expanded = true;
+        } else {
+          index += 1;
+        }
       }
     }
     groups.push(group);
   }
-  return groups;
+  return groups.flatMap((group) => {
+    const chunks: ReviewChangeUnit[][] = [];
+    for (let index = 0; index < group.length; index += 8) chunks.push(group.slice(index, index + 8));
+    return chunks;
+  });
 }
 
 function cacheKey(options: RunReviewMapScoutsOptions, units: ReviewChangeUnit[]): string {

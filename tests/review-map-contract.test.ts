@@ -118,3 +118,10 @@ test("review map v2 rejects unsupported versions and duplicate visit ids", () =>
   duplicated.chapters[1]!.visits[0]!.id = "visit-contract";
   assert.equal(isReviewMap(duplicated), false);
 });
+
+test("review map v2 rejects duplicate semantic ownership across visits", () => {
+  const map = mapFixture();
+  map.chapters[1]!.visits[0]!.changeUnitIds = ["unit-contract"];
+  map.chapters[1]!.visits[0]!.fileId = "src/runtime.ts";
+  assert.equal(isReviewMap(map), false);
+});

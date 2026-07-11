@@ -82,3 +82,22 @@ test("semantic scouts reject invented unit references without failing other grou
   assert.equal(result.diagnostics.length, 1);
   assert.match(result.diagnostics[0]!, /invented|unknown/i);
 });
+
+test("semantic scout grouping closes transitive commit relationships", async () => {
+  const units = [
+    unit("left", "a.py", ["c1"]),
+    unit("right", "b.py", ["c2"]),
+    unit("bridge", "z.py", ["c1", "c2"]),
+  ];
+  const groups: string[][] = [];
+  await runReviewMapScouts({
+    sourceFingerprint: "sha256:a", strategyVersion: "semantic-map-v1", units,
+    getPatch: async () => "patch", cache: new Map(), maxInputChars: 4_000, concurrency: 1,
+    complete: async (input) => {
+      const ids = (JSON.parse(input).units as Array<{ id: string }>).map((item) => item.id);
+      groups.push(ids);
+      return JSON.stringify({ facts: [{ unitIds: ids, intent: "intent", changedContracts: [], callersAndDependencies: [], removedBehavior: [], invariants: [], testEvidence: [], evidenceGaps: [], candidateRelationships: [], confidence: "medium", unresolvedQuestions: [] }] });
+    },
+  });
+  assert.deepEqual(groups, [["left", "bridge", "right"]]);
+});

@@ -805,6 +805,7 @@ export function isReviewMap(value: unknown): value is ReviewMap {
 
   const chapterIds = new Set<string>();
   const visitIds = new Set<string>();
+  const assignedUnitIds = new Set<string>();
   let expectedOrder = 1;
   for (const chapter of value.chapters) {
     if (!isRecord(chapter)
@@ -847,6 +848,8 @@ export function isReviewMap(value: unknown): value is ReviewMap {
         || !isNonemptyString(visit.reason)
         || !isStringArray(visit.focus)
         || visit.changeUnitIds.some((id) => !unitIds.has(id) || unitFileIds.get(id) !== visit.fileId)) return false;
+      if (visit.changeUnitIds.some((id) => assignedUnitIds.has(id))) return false;
+      visit.changeUnitIds.forEach((id) => assignedUnitIds.add(id));
       visitIds.add(visit.id);
     }
     for (const evidence of chapter.testEvidence) {
