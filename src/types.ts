@@ -222,7 +222,7 @@ export interface ReviewSessionSnapshot {
 
 export type ReviewRendererSessionSnapshot = Omit<
   ReviewSessionSnapshot,
-  "analysis" | "githubPublishIntent" | "githubContext"
+  "map" | "analysis" | "githubPublishIntent" | "githubContext"
 >;
 
 export interface ReviewCheckpointSessionPayload {
@@ -548,6 +548,7 @@ export interface ReviewWindowData {
   analysisFileIds: string[];
   commits: ReviewCommit[];
   source: ReviewSourceMetadata;
+  map: ReviewMap;
   analysis: ReviewAnalysis;
   aiReviewConfig?: AiReviewResolvedConfig;
   session?: {

@@ -19,6 +19,8 @@ import {
   type GitHubReviewPublishPlan,
 } from "./github-publish.js";
 import { composeReviewPrompt } from "./prompt.js";
+import { compileProvisionalReviewMap } from "./provisional-review-map.js";
+import { extractReviewChangeUnits } from "./review-change-units.js";
 import { type RendererProtocolContext } from "./renderer-protocol.js";
 import {
   createReviewHostPublishLifecycle,
@@ -56,6 +58,7 @@ import type {
   ReviewFile,
   ReviewFileContents,
   ReviewHostMessage,
+  ReviewMap,
   ReviewAnalysis,
   GitHubReviewPublishIntent,
   ReviewPublishPayload,
@@ -114,6 +117,7 @@ export function mergeRendererSessionCheckpoint(
   checkpoint: ReviewRendererSessionSnapshot,
 ): ReviewSessionSnapshot {
   const {
+    map: _map,
     analysis: _analysis,
     githubPublishIntent: _githubPublishIntent,
     githubContext: _githubContext,
@@ -224,7 +228,7 @@ function reviewWindowTitle(dataset: { repoRoot: string; source: { github?: { own
   return `Diff review · ${basename(dataset.repoRoot) || "repository"}`;
 }
 
-function rendererProtocolContext(files: ReviewFile[], commits: { sha: string }[], analysis: ReviewAnalysis): Omit<RendererProtocolContext, "sessionId" | "capability"> {
+function rendererProtocolContext(files: ReviewFile[], commits: { sha: string }[], analysis: ReviewAnalysis, map?: ReviewMap): Omit<RendererProtocolContext, "sessionId" | "capability"> {
   return {
     files: new Map(files.map((file) => {
       const scopes = new Set<"git-diff" | "last-commit" | "commit" | "all-files">();
@@ -237,7 +241,7 @@ function rendererProtocolContext(files: ReviewFile[], commits: { sha: string }[]
     })),
     commitShas: new Set(commits.map((commit) => commit.sha)),
     findingIds: new Set(analysis.findings.map((finding) => finding.id)),
-    chapterIds: new Set(analysis.chapters.map((chapter) => chapter.id)),
+    chapterIds: new Set((map?.chapters ?? analysis.chapters).map((chapter) => chapter.id)),
   };
 }
 
@@ -343,11 +347,19 @@ export default function (pi: ExtensionAPI) {
       ? { baseRevision: dataset.source.baseRevision, headRevision: dataset.source.headRevision }
       : undefined;
 
-    const loadFilePatch = createReviewFilePatchLoader(pi, {
+    const rawLoadFilePatch = createReviewFilePatchLoader(pi, {
       repoRoot: dataset.repoRoot,
       workingRoot,
       revisionDiff,
     });
+    const patchCache = new Map<string, Promise<string>>();
+    const loadFilePatch = (file: ReviewFile): Promise<string> => {
+      const cached = patchCache.get(file.id);
+      if (cached != null) return cached;
+      const pending = rawLoadFilePatch(file);
+      patchCache.set(file.id, pending);
+      return pending;
+    };
 
     ctx.ui.notify("Preparing review session.", "info");
     const sessionDescriptor = await getReviewSessionDescriptor(pi, dataset);
@@ -374,6 +386,26 @@ export default function (pi: ExtensionAPI) {
       ? reviewSessionRecoveryPath(sessionDescriptor.storagePath, storedSession)
       : null;
 
+    const focusedFiles = dataset.analysisFileIds
+      .map((fileId) => dataset.files.find((file) => file.id === fileId))
+      .filter((file): file is ReviewFile => file != null);
+    const units = (await Promise.all(focusedFiles.map(async (file) => extractReviewChangeUnits({
+      sourceFingerprint: fingerprint.hash,
+      file,
+      patch: await loadFilePatch(file),
+      commitIds: Object.keys(file.commitComparisons),
+    })))).flat();
+    const restoredMap = sessionResolution.snapshot?.map;
+    const reviewMap = restoredMap?.version === 2
+      && restoredMap.sourceFingerprint === fingerprint.hash
+      && restoredMap.strategyVersion === "provisional-map-v1"
+      ? restoredMap
+      : compileProvisionalReviewMap({
+          sourceFingerprint: fingerprint.hash,
+          units,
+          commits: dataset.commits,
+        });
+
     let analysis: ReviewAnalysis;
     if (sessionResolution.analysis == null) {
       ctx.ui.notify("Analyzing diff for review map and findings.", "info");
@@ -384,7 +416,10 @@ export default function (pi: ExtensionAPI) {
     }
     const aiReviewConfig = await loadAiReviewRuntimeConfig(ctx, dataset);
 
-    let sessionSnapshot: ReviewSessionSnapshot | null = sessionResolution.snapshot;
+    let sessionSnapshot: ReviewSessionSnapshot | null = {
+      ...(sessionResolution.snapshot ?? {}),
+      map: reviewMap,
+    };
     let persistedSessionState: ReviewSessionRecordState | null = reviewSessionRecordState(storedSession);
     let publishSessionController: GitHubPublishSessionController | null = null;
     let publishWarning: string | null = null;
@@ -473,6 +508,7 @@ export default function (pi: ExtensionAPI) {
     };
     const snapshotFromSubmit = (message: ReviewSubmitPayload): ReviewSessionSnapshot => mergeSessionSnapshot({
       ...(sessionSnapshot ?? {}),
+      map: reviewMap,
       analysis,
       overallComment: message.overallComment,
       comments: message.comments,
@@ -564,6 +600,7 @@ export default function (pi: ExtensionAPI) {
       persistInitialSnapshot: async () => {
         queueSessionSave({
           ...(sessionSnapshot ?? {}),
+          map: reviewMap,
           analysis,
         });
         return await flushSessionSave();
@@ -575,6 +612,7 @@ export default function (pi: ExtensionAPI) {
 
     const reviewData = {
       ...dataset,
+      map: reviewMap,
       analysis,
       aiReviewConfig: aiReviewConfig.public,
       session: {
