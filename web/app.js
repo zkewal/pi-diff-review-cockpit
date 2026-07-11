@@ -22,7 +22,7 @@ import { replaceDiffEditorModels } from "./model-lifecycle.js";
 import { applyAuthoritativePublishedCommentState } from "./publish-comment-state.js";
 import { expandDisclosure, isDisclosureExpanded, toggleDisclosure } from "./review-disclosure-state.js";
 import { isFileCanvasActive } from "./review-navigation-state.js";
-import { isFileReviewComplete, reconcileReviewMapState } from "./review-visit-state.js";
+import { isFileReviewComplete, nextReviewVisit, reconcileReviewMapState } from "./review-visit-state.js";
 import { createSessionSaveScheduler } from "./session-save-scheduler.js";
 import { renderSafeMarkdown, safeExternalUrl } from "./safe-markdown.js";
 import {
@@ -1014,7 +1014,11 @@ function visitsForFile(fileId) {
 
 function selectVisitForFile(fileId) {
   const visits = visitsForFile(fileId);
+  const preferredChapter = state.activeInsight.type === "chapter" ? getReviewChapter(state.activeInsight.id) : null;
+  const preferredVisitIds = new Set((preferredChapter?.visits || []).map((visit) => visit.id));
   const selected = visits.find((visit) => visit.id === state.activeVisitId)
+    || visits.find((visit) => preferredVisitIds.has(visit.id) && state.reviewedVisits[visit.id] !== true)
+    || visits.find((visit) => preferredVisitIds.has(visit.id))
     || visits.find((visit) => state.reviewedVisits[visit.id] !== true)
     || visits[0]
     || null;
@@ -3455,7 +3459,8 @@ function chapterBriefHtml(chapter) {
   const progress = chapterReviewProgress(chapter);
   const counts = chapterDiffstatCounts(chapter);
   const findings = chapterFindings(chapter).filter((finding) => (state.findingStatuses[finding.id] || "new") === "new");
-  const tags = (chapter.attentionTags || []).slice(0, 5);
+  const visits = chapter.visits || [];
+  const evidence = chapter.testEvidence || [];
   const firstFileId = firstExistingChapterFileId(chapter);
   const reviewedLabel = progress.total > 0 ? `${progress.reviewed}/${progress.total} reviewed` : "No files";
 
@@ -3471,15 +3476,14 @@ function chapterBriefHtml(chapter) {
           <h1 class="max-w-3xl text-2xl font-semibold leading-tight text-white">${escapeHtml(chapterDisplayTitle(chapter))}</h1>
           <p class="mt-3 max-w-3xl text-sm leading-6 text-review-muted">${escapeHtml(chapter.summary || "Review the changed files in this area before marking it complete.")}</p>
         </div>
-        ${firstFileId ? `<button type="button" data-open-chapter-file="${escapeHtml(firstFileId)}" class="cursor-pointer rounded-md border border-[#1f6feb]/40 bg-[#1f6feb] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#388bfd]">Open first file</button>` : ""}
+        ${firstFileId ? `<button type="button" data-open-chapter-file="${escapeHtml(firstFileId)}" class="cursor-pointer rounded-md border border-[#1f6feb]/40 bg-[#1f6feb] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#388bfd]">Start review</button>` : ""}
       </div>
 
       <div class="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
         <section class="rounded-lg border border-review-border bg-[#010409] p-4">
-          <div class="mb-3 text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review scope</div>
-          <div class="flex flex-wrap gap-2">
-            ${tags.length > 0 ? tags.map((tag) => `<span class="rounded bg-[#30363d]/50 px-2 py-1 text-xs font-medium text-review-text">${escapeHtml(tag)}</span>`).join("") : `<span class="text-sm text-review-muted">No attention tags.</span>`}
-          </div>
+          <div class="mb-2 text-[11px] font-semibold uppercase tracking-wider text-review-muted">Why this matters</div>
+          <p class="text-sm leading-6 text-review-text">${escapeHtml(chapter.whyItMatters || chapter.summary)}</p>
+          ${chapter.priorityReason ? `<p class="mt-2 text-xs leading-5 text-review-muted">${escapeHtml(chapter.priorityReason)}</p>` : ""}
           <div class="mt-4 grid grid-cols-3 gap-2">
             <div class="rounded-md bg-[#161b22] px-3 py-2">
               <div class="text-base font-semibold text-white">${files.length}</div>
@@ -3516,16 +3520,26 @@ function chapterBriefHtml(chapter) {
         </section>
       </div>
 
+      ${chapter.reviewQuestions?.length ? `<section class="mt-4 border-y border-review-border py-4">
+        <div class="mb-2 text-[11px] font-semibold uppercase tracking-wider text-review-muted">Questions to answer</div>
+        <ul class="space-y-1.5 text-sm leading-5 text-review-text">${chapter.reviewQuestions.map((question) => `<li class="flex gap-2"><span class="text-[#d2a8ff]">•</span><span>${escapeHtml(question)}</span></li>`).join("")}</ul>
+      </section>` : ""}
+
       <section class="mt-4 rounded-lg border border-review-border bg-[#010409] p-4">
-        <div class="mb-3 text-[11px] font-semibold uppercase tracking-wider text-review-muted">Files in this area</div>
+        <div class="mb-3 text-[11px] font-semibold uppercase tracking-wider text-review-muted">Review order</div>
         <div class="divide-y divide-review-border/70">
-          ${files.map((file) => {
+          ${(visits.length > 0 ? visits : files.map((file) => ({ id: `file-${file.id}`, fileId: file.id, role: "implementation", reason: "Review this changed file.", focus: [] }))).map((visit, index) => {
+            const file = getFileById(visit.fileId);
+            if (!file) return "";
             const display = fileDisplayParts(file, getScopeDisplayPath(file, state.currentScope) || file.path);
             return `
-              <button type="button" data-open-chapter-file="${escapeHtml(file.id)}" class="flex w-full cursor-pointer items-center justify-between gap-3 py-2 text-left hover:text-white">
-                <span class="min-w-0">
-                  <span class="block truncate text-sm font-medium text-review-text">${escapeHtml(display.filename)}</span>
-                  ${display.directory ? `<span class="mt-0.5 block truncate text-[11px] text-review-muted">${escapeHtml(display.directory)}</span>` : ""}
+              <button type="button" data-open-chapter-file="${escapeHtml(file.id)}" data-review-visit-id="${escapeHtml(visit.id)}" class="flex w-full cursor-pointer items-center justify-between gap-3 py-2 text-left hover:text-white">
+                <span class="flex min-w-0 items-start gap-3">
+                  <span class="mt-0.5 w-5 shrink-0 text-xs font-semibold text-review-muted">${index + 1}</span>
+                  <span class="min-w-0">
+                    <span class="block truncate text-sm font-medium text-review-text">${escapeHtml(display.filename)}</span>
+                    <span class="mt-0.5 block text-[11px] leading-4 text-review-muted">${escapeHtml(humanizeToken(visit.role))} · ${escapeHtml(visit.reason || display.directory || "Review changed behavior")}</span>
+                  </span>
                 </span>
                 <span class="shrink-0">${diffstatHtml(fileDiffstatCounts(file), { compact: true, blocks: 0 })}</span>
               </button>
@@ -3533,6 +3547,17 @@ function chapterBriefHtml(chapter) {
           }).join("")}
         </div>
       </section>
+
+      ${(evidence.length > 0 || chapter.exitCriteria?.length) ? `<section class="mt-4 grid gap-4 border-t border-review-border pt-4 lg:grid-cols-2">
+        <div>
+          <div class="mb-2 text-[11px] font-semibold uppercase tracking-wider text-review-muted">Evidence and gaps</div>
+          ${evidence.length > 0 ? evidence.map((item) => `<div class="mb-2 text-xs leading-5"><span class="text-[#3fb950]">Proves:</span> ${escapeHtml((item.proves || []).join(" · ") || "Linked verification")}${item.doesNotProve?.length ? `<br><span class="text-[#d29922]">Does not prove:</span> ${escapeHtml(item.doesNotProve.join(" · "))}` : ""}</div>`).join("") : `<p class="text-xs text-review-muted">No explicit verification evidence was identified.</p>`}
+        </div>
+        <div>
+          <div class="mb-2 text-[11px] font-semibold uppercase tracking-wider text-review-muted">Done when</div>
+          <ul class="space-y-1 text-xs leading-5 text-review-text">${(chapter.exitCriteria || []).map((criterion) => `<li>• ${escapeHtml(criterion)}</li>`).join("")}</ul>
+        </div>
+      </section>` : ""}
     </div>
   `;
 }
@@ -3553,7 +3578,11 @@ function mountChapterBrief(chapter) {
   modeHintEl.textContent = chapter.summary || "Review area";
   chapterBriefContainerEl.innerHTML = chapterBriefHtml(chapter);
   chapterBriefContainerEl.querySelectorAll("[data-open-chapter-file]").forEach((button) => {
-    button.addEventListener("click", () => openFile(button.getAttribute("data-open-chapter-file")));
+    button.addEventListener("click", () => {
+      const visitId = button.getAttribute("data-review-visit-id");
+      if (visitId && visitsForFile(button.getAttribute("data-open-chapter-file")).some((visit) => visit.id === visitId)) state.activeVisitId = visitId;
+      openFile(button.getAttribute("data-open-chapter-file"));
+    });
   });
   chapterBriefContainerEl.querySelectorAll("[data-finding-id]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -3598,7 +3627,11 @@ function mountFile(options = {}) {
   const contents = getMountedContents(file, state.currentScope);
   const reviewed = isFileReviewed(file.id);
   const chapter = chapterForFile(file.id);
-  const chapterLabel = chapter ? chapterDisplayTitle(chapter) : "";
+  const activeVisit = visitsForFile(file.id).find((visit) => visit.id === state.activeVisitId) || null;
+  const visitChapter = activeVisit == null ? null : getReviewChapters().find((item) => (item.visits || []).some((visit) => visit.id === activeVisit.id)) || null;
+  const visibleChapter = visitChapter || chapter;
+  const chapterLabel = visibleChapter ? chapterDisplayTitle(visibleChapter) : "";
+  const visitIndex = visibleChapter && activeVisit ? (visibleChapter.visits || []).findIndex((visit) => visit.id === activeVisit.id) : -1;
   const displayPath = getScopeDisplayPath(file, state.currentScope);
 
   clearViewZones();
@@ -3606,6 +3639,7 @@ function mountFile(options = {}) {
     <span class="flex min-w-0 items-center gap-2 ${reviewed ? "opacity-70" : ""}">
       ${reviewed ? `<span class="shrink-0 text-[12px] text-[#3fb950]">✓</span>` : ""}
       ${chapterLabel ? `<span class="min-w-0 truncate text-review-muted">${escapeHtml(chapterLabel)}</span><span class="shrink-0 text-review-muted">→</span>` : ""}
+      ${activeVisit ? `<span class="shrink-0 rounded bg-[#8957e5]/12 px-1.5 py-0.5 text-[10px] font-medium text-[#d2a8ff]">${escapeHtml(humanizeToken(activeVisit.role))}${visitIndex >= 0 ? ` ${visitIndex + 1}/${visibleChapter.visits.length}` : ""}</span>` : ""}
       <span class="min-w-0 truncate">${escapeHtml(displayPath)}</span>
       ${diffstatHtml(fileDiffstatCounts(file), { compact: true })}
     </span>
@@ -4141,6 +4175,24 @@ function toggleWrapLines() {
 function toggleCurrentFileReviewed() {
   const file = activeFile();
   if (!file) return;
+  const activeVisit = visitsForFile(file.id).find((visit) => visit.id === state.activeVisitId) || null;
+  if (activeVisit) {
+    state.reviewedVisits[activeVisit.id] = state.reviewedVisits[activeVisit.id] !== true;
+    state.reviewedFiles[file.id] = isFileReviewed(file.id);
+    const chapter = getReviewChapters().find((item) => (item.visits || []).some((visit) => visit.id === activeVisit.id));
+    if (chapter) state.reviewedChapters[chapter.id] = isChapterReviewed(chapter);
+    if (state.reviewedVisits[activeVisit.id] === true) {
+      const next = nextReviewVisit(reviewData.map, state.reviewedVisits, activeVisit.id, 1);
+      if (next && next.id !== activeVisit.id) {
+        state.activeVisitId = next.id;
+        openFile(next.fileId);
+        return;
+      }
+    }
+    renderTree();
+    scheduleSessionSave();
+    return;
+  }
   const nextReviewed = !isFileReviewed(file.id);
   state.reviewedFiles[file.id] = nextReviewed;
   visitsForFile(file.id).forEach((visit) => {
@@ -4154,6 +4206,16 @@ function toggleCurrentFileReviewed() {
     return;
   }
   renderTree();
+}
+
+function moveReviewVisit(direction) {
+  const visit = nextReviewVisit(reviewData.map, state.reviewedVisits, state.activeVisitId, direction);
+  if (!visit) {
+    moveFile(direction);
+    return;
+  }
+  state.activeVisitId = visit.id;
+  openFile(visit.fileId);
 }
 
 function toggleCurrentChapterReviewed() {
@@ -4291,8 +4353,8 @@ function getKeyboardActions() {
       enabled: () => !!reviewData.source?.github,
       match: key("p"),
     }),
-    shortcutAction("next-file", "Next file", "]", () => moveFile(1), { match: key("]") }),
-    shortcutAction("previous-file", "Previous file", "[", () => moveFile(-1), { match: key("[") }),
+    shortcutAction("next-file", "Next review visit", "]", () => moveReviewVisit(1), { match: key("]") }),
+    shortcutAction("previous-file", "Previous review visit", "[", () => moveReviewVisit(-1), { match: key("[") }),
     shortcutAction("scroll-down", "Move diff focus down", "J / ↓", () => moveDiffFocus(1), {
       match: (event) => key("j")(event) || (!event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && event.key === "ArrowDown"),
     }),
@@ -4304,7 +4366,7 @@ function getKeyboardActions() {
       match: key("c"),
     }),
     shortcutAction("comment-file", "Add file comment", "Shift+C", showFileCommentModal, { match: key("c", { shift: true }) }),
-    shortcutAction("mark-file-reviewed", "Toggle file reviewed and advance", "F / Space", toggleCurrentFileReviewed, { match: toggleReviewedKey }),
+    shortcutAction("mark-file-reviewed", "Complete review visit and advance", "F / Space", toggleCurrentFileReviewed, { match: toggleReviewedKey }),
     shortcutAction("mark-chapter-reviewed", "Toggle review area files", "Shift+F", toggleCurrentChapterReviewed, { match: key("f", { shift: true }) }),
     shortcutAction("stage-finding", "Stage AI finding", "S", stageCurrentFinding, {
       enabled: () => activeFileShowsDiff(),
