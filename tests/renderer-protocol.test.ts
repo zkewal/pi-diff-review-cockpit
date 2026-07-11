@@ -202,8 +202,9 @@ test("rejects unknown fields and invalid enum values in privileged commands", ()
   }
 });
 
-test("renderer checkpoints cannot overwrite host-owned analysis or publish state", () => {
+test("renderer checkpoints cannot overwrite host-owned map, analysis, or publish state", () => {
   for (const snapshot of [
+    { map: { version: 2, status: "semantic" } },
     { analysis: { status: "ready" } },
     { githubPublishIntent: { status: "confirmed" } },
     { githubContext: { owner: "attacker" } },
