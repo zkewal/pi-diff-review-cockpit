@@ -11,6 +11,7 @@ import type {
   AiReviewResolvedPhaseConfig,
   AiReviewResolvedSkillsConfig,
   AiReviewRuntimeConfig,
+  ReviewMapModelPhase,
   AiReviewSkillDefinition,
   AiReviewSkillPreset,
 } from "./types.js";
@@ -18,6 +19,7 @@ import type {
 const CONFIG_ENV_VAR = "PI_DIFF_REVIEW_COCKPIT_CONFIG";
 
 const PHASES: AiReviewPhase[] = ["scout", "chapter", "validation", "synthesis"];
+const MAP_PHASES: ReviewMapModelPhase[] = ["scout", "planner", "critic"];
 
 interface DefaultPhaseRoute {
   provider: string;
@@ -43,6 +45,24 @@ const DEFAULT_ROUTE_BY_DEPTH: Record<AiReviewDepth, Record<AiReviewPhase, Defaul
     chapter: { provider: "openai-codex", model: "gpt-5.6-sol", reasoning: "xhigh" },
     validation: { provider: "openai-codex", model: "gpt-5.6-sol", reasoning: "max" },
     synthesis: { provider: "openai-codex", model: "gpt-5.6-sol", reasoning: "xhigh" },
+  },
+};
+
+const DEFAULT_MAP_ROUTE_BY_DEPTH: Record<AiReviewDepth, Record<ReviewMapModelPhase, DefaultPhaseRoute>> = {
+  fast: {
+    scout: { provider: "openai-codex", model: "gpt-5.6-luna", reasoning: "low" },
+    planner: { provider: "openai-codex", model: "gpt-5.6-luna", reasoning: "medium" },
+    critic: { provider: "openai-codex", model: "gpt-5.6-terra", reasoning: "high" },
+  },
+  standard: {
+    scout: { provider: "openai-codex", model: "gpt-5.6-luna", reasoning: "medium" },
+    planner: { provider: "openai-codex", model: "gpt-5.6-terra", reasoning: "high" },
+    critic: { provider: "openai-codex", model: "gpt-5.6-sol", reasoning: "xhigh" },
+  },
+  deep: {
+    scout: { provider: "openai-codex", model: "gpt-5.6-terra", reasoning: "high" },
+    planner: { provider: "openai-codex", model: "gpt-5.6-sol", reasoning: "xhigh" },
+    critic: { provider: "openai-codex", model: "gpt-5.6-sol", reasoning: "max" },
   },
 };
 
@@ -137,6 +157,7 @@ interface RawAiReviewConfig {
   maxChapterPatchChars?: unknown;
   maxFindingsPerChapter?: unknown;
   phases?: Partial<Record<AiReviewPhase, RawPhaseConfig>>;
+  map?: Partial<Record<ReviewMapModelPhase, RawPhaseConfig>>;
   skills?: unknown;
   reviewSkills?: unknown;
 }
@@ -160,6 +181,7 @@ interface NormalizedConfig {
   maxChapterPatchChars?: number;
   maxFindingsPerChapter?: number;
   phases: Partial<Record<AiReviewPhase, NormalizedPhaseConfig>>;
+  mapPhases: Partial<Record<ReviewMapModelPhase, NormalizedPhaseConfig>>;
   skills?: NormalizedSkillsConfig;
 }
 
@@ -277,12 +299,23 @@ function normalizeConfig(raw: RawConfig): NormalizedConfig {
   const body = configBody(raw);
   const phases: Partial<Record<AiReviewPhase, NormalizedPhaseConfig>> = {};
   const rawPhases = isRecord(body.phases) ? body.phases : {};
+  const rawMapPhases = isRecord(body.map) ? body.map : {};
+  const mapPhases: Partial<Record<ReviewMapModelPhase, NormalizedPhaseConfig>> = {};
   const skills = normalizeSkillsConfig(body.skills ?? body.reviewSkills);
 
   for (const phase of PHASES) {
     const rawPhase = rawPhases[phase];
     if (!isRecord(rawPhase)) continue;
     phases[phase] = {
+      ...(typeof rawPhase.provider === "string" && rawPhase.provider.trim().length > 0 ? { provider: rawPhase.provider.trim() } : {}),
+      ...(typeof rawPhase.model === "string" && rawPhase.model.trim().length > 0 ? { model: rawPhase.model.trim() } : {}),
+      ...(isReasoning(rawPhase.reasoning) ? { reasoning: rawPhase.reasoning } : {}),
+    };
+  }
+  for (const phase of MAP_PHASES) {
+    const rawPhase = rawMapPhases[phase];
+    if (!isRecord(rawPhase)) continue;
+    mapPhases[phase] = {
       ...(typeof rawPhase.provider === "string" && rawPhase.provider.trim().length > 0 ? { provider: rawPhase.provider.trim() } : {}),
       ...(typeof rawPhase.model === "string" && rawPhase.model.trim().length > 0 ? { model: rawPhase.model.trim() } : {}),
       ...(isReasoning(rawPhase.reasoning) ? { reasoning: rawPhase.reasoning } : {}),
@@ -296,6 +329,7 @@ function normalizeConfig(raw: RawConfig): NormalizedConfig {
     maxChapterPatchChars: positiveInteger(body.maxChapterPatchChars),
     maxFindingsPerChapter: positiveInteger(body.maxFindingsPerChapter),
     phases,
+    mapPhases,
     ...(skills ? { skills } : {}),
   };
 }
@@ -329,6 +363,13 @@ function mergeConfig(left: NormalizedConfig, right: NormalizedConfig): Normalize
   ])) as Partial<Record<AiReviewPhase, NormalizedPhaseConfig>>;
 
   const skills = mergeSkillsConfig(left.skills, right.skills);
+  const mergedMapPhases = Object.fromEntries(MAP_PHASES.map((phase) => [
+    phase,
+    {
+      ...(left.mapPhases[phase] ?? {}),
+      ...(right.mapPhases[phase] ?? {}),
+    },
+  ])) as Partial<Record<ReviewMapModelPhase, NormalizedPhaseConfig>>;
   return {
     ...(left.depth ? { depth: left.depth } : {}),
     ...(right.depth ? { depth: right.depth } : {}),
@@ -337,6 +378,7 @@ function mergeConfig(left: NormalizedConfig, right: NormalizedConfig): Normalize
     maxChapterPatchChars: right.maxChapterPatchChars ?? left.maxChapterPatchChars,
     maxFindingsPerChapter: right.maxFindingsPerChapter ?? left.maxFindingsPerChapter,
     phases: mergedPhases,
+    mapPhases: mergedMapPhases,
     ...(skills ? { skills } : {}),
   };
 }
@@ -425,7 +467,7 @@ function supportsReasoningLevel(model: Model<Api>, reasoning: ThinkingLevel): bo
   return getSupportedThinkingLevels(model).includes(reasoning);
 }
 
-function resolveModel(ctx: ExtensionCommandContext, phase: AiReviewPhase, config: NormalizedPhaseConfig | undefined, warnings: string[]): Model<Api> | null {
+function resolveModel(ctx: ExtensionCommandContext, phase: string, config: NormalizedPhaseConfig | undefined, warnings: string[]): Model<Api> | null {
   const fallbackModel = ctx.model ?? null;
   if (!config?.model) return fallbackModel;
 
@@ -444,6 +486,29 @@ function resolveModel(ctx: ExtensionCommandContext, phase: AiReviewPhase, config
     warnings.push(`AI review ${phase} model "${config.model}" was not found; using active PI model instead.`);
   }
   return fallbackModel;
+}
+
+function resolveMapPhaseConfig(
+  ctx: ExtensionCommandContext,
+  phase: ReviewMapModelPhase,
+  config: NormalizedConfig & { depth: AiReviewDepth },
+  warnings: string[],
+): { runtime: AiReviewRuntimeConfig["mapPhases"][ReviewMapModelPhase]; resolved: AiReviewResolvedPhaseConfig } {
+  const phaseConfig = config.mapPhases[phase];
+  const defaultRoute = DEFAULT_MAP_ROUTE_BY_DEPTH[config.depth][phase];
+  const modelConfig = phaseConfig?.model ? phaseConfig : defaultRoute;
+  const model = resolveModel(ctx, `map.${phase}`, modelConfig, warnings);
+  const configuredReasoning = phaseConfig?.reasoning ?? defaultRoute.reasoning;
+  const reasoning = configuredReasoning === "off" || !model?.reasoning || !supportsReasoningLevel(model, configuredReasoning)
+    ? undefined
+    : configuredReasoning;
+  if (configuredReasoning !== "off" && model && (!model.reasoning || !supportsReasoningLevel(model, configuredReasoning))) {
+    warnings.push(`AI review map.${phase} requested ${configuredReasoning} reasoning, but ${describeModel(model)} does not support that level.`);
+  }
+  return {
+    runtime: { model, reasoning, modelLabel: model ? describeModel(model) : "No active PI model" },
+    resolved: { model: model ? describeModel(model) : null, reasoning: reasoning ?? "off" },
+  };
 }
 
 function resolvePhaseConfig(
@@ -493,6 +558,9 @@ export async function loadAiReviewRuntimeConfig(ctx: ExtensionCommandContext, da
   });
   const phases = Object.fromEntries(resolvedPhases.map(({ phase, runtime }) => [phase, runtime])) as AiReviewRuntimeConfig["phases"];
   const publicPhases = Object.fromEntries(resolvedPhases.map(({ phase, resolved }) => [phase, resolved])) as AiReviewResolvedConfig["phases"];
+  const resolvedMapPhases = MAP_PHASES.map((phase) => ({ phase, ...resolveMapPhaseConfig(ctx, phase, config, warnings) }));
+  const mapPhases = Object.fromEntries(resolvedMapPhases.map(({ phase, runtime }) => [phase, runtime])) as AiReviewRuntimeConfig["mapPhases"];
+  const publicMapPhases = Object.fromEntries(resolvedMapPhases.map(({ phase, resolved }) => [phase, resolved])) as AiReviewResolvedConfig["mapPhases"];
   const skills = resolveSkillsConfig(config.skills, warnings);
 
   const parallelChapterReviews = clamp(config.parallelChapterReviews ?? limits.parallelChapterReviews, 1, 12);
@@ -507,6 +575,7 @@ export async function loadAiReviewRuntimeConfig(ctx: ExtensionCommandContext, da
     maxChapterPatchChars,
     maxFindingsPerChapter,
     phases,
+    mapPhases,
     skills,
     public: {
       depth,
@@ -517,6 +586,7 @@ export async function loadAiReviewRuntimeConfig(ctx: ExtensionCommandContext, da
       configPaths: loaded.paths,
       warnings: [...new Set(warnings)],
       phases: publicPhases,
+      mapPhases: publicMapPhases,
       skills,
     },
   };

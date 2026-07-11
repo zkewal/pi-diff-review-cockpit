@@ -1,4 +1,3 @@
-import { completeSimple, type UserMessage } from "@earendil-works/pi-ai/compat";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { parseReviewAnalysisJson, validateAnalysisRelationships } from "./analysis.js";
 import type { ReviewDataset } from "./sources/types.js";
@@ -16,6 +15,7 @@ import type {
   ReviewLocation,
   ReviewFindingSeverity,
 } from "./types.js";
+import { completeStructuredText } from "./structured-model-completion.js";
 
 const SCOUT_SYSTEM_PROMPT = `You are a PI review scout for a code review cockpit.
 
@@ -267,50 +267,14 @@ function buildScoutInput(dataset: ReviewDataset, analysis: ReviewAnalysis, confi
 }
 
 async function completeTextJson(ctx: ExtensionCommandContext, config: AiReviewRuntimeConfig, phase: AiReviewPhase, systemPrompt: string, input: string): Promise<string> {
-  const phaseConfig = config.phases[phase];
-  const model = phaseConfig.model;
-  if (!model) {
-    throw new Error(`No Pi model is selected for ${phase}.`);
-  }
-
-  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-  if (!auth.ok || !auth.apiKey) {
-    throw new Error(auth.ok ? `No API key for ${model.provider}.` : auth.error);
-  }
-
-  const userMessage: UserMessage = {
-    role: "user",
-    timestamp: Date.now(),
-    content: [{ type: "text", text: input }],
-  };
-
-  const response = await completeSimple(
-    model,
-    { systemPrompt, messages: [userMessage] },
-    {
-      apiKey: auth.apiKey,
-      headers: auth.headers,
-      ...(phaseConfig.reasoning ? { reasoning: phaseConfig.reasoning } : {}),
-      ...(ctx.signal ? { signal: ctx.signal } : {}),
-      metadata: {
-        feature: "pi-diff-review-cockpit",
-        phase,
-        depth: config.depth,
-      },
-    },
-  );
-
-  const text = response.content
-    .filter((part): part is { type: "text"; text: string } => part.type === "text")
-    .map((part) => part.text)
-    .join("\n")
-    .trim();
-
-  if (response.stopReason !== "stop" || text.length === 0) {
-    throw new Error("AI review did not complete cleanly.");
-  }
-
-  return text;
+  return await completeStructuredText({
+    ctx,
+    route: config.phases[phase],
+    systemPrompt,
+    input,
+    phase,
+    depth: config.depth,
+  });
 }
 
 async function runScout(ctx: ExtensionCommandContext, dataset: ReviewDataset, analysis: ReviewAnalysis, config: AiReviewRuntimeConfig): Promise<string> {

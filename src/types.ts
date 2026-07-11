@@ -307,6 +307,7 @@ export type AiReviewRunStatus = "idle" | "running" | "done" | "failed";
 export type AiReviewStepStatus = "queued" | "running" | "done" | "failed";
 export type AiReviewDepth = "fast" | "standard" | "deep";
 export type AiReviewPhase = "scout" | "chapter" | "validation" | "synthesis";
+export type ReviewMapModelPhase = "scout" | "planner" | "critic";
 export type AiReviewSkillPreset = "minimal" | "balanced" | "security" | "exhaustive";
 
 export interface AiReviewSkillDefinition {
@@ -337,6 +338,7 @@ export interface AiReviewResolvedConfig {
   configPaths: string[];
   warnings: string[];
   phases: Record<AiReviewPhase, AiReviewResolvedPhaseConfig>;
+  mapPhases: Record<ReviewMapModelPhase, AiReviewResolvedPhaseConfig>;
   skills: AiReviewResolvedSkillsConfig;
 }
 
@@ -353,6 +355,7 @@ export interface AiReviewRuntimeConfig {
   maxChapterPatchChars: number;
   maxFindingsPerChapter: number;
   phases: Record<AiReviewPhase, AiReviewRuntimePhaseConfig>;
+  mapPhases: Record<ReviewMapModelPhase, AiReviewRuntimePhaseConfig>;
   skills: AiReviewResolvedSkillsConfig;
   public: AiReviewResolvedConfig;
 }

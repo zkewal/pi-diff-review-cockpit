@@ -116,6 +116,32 @@ test("AI review config merges later partial phase config without resetting earli
   }
 });
 
+test("AI review config resolves independent semantic map model routes", async () => {
+  const repoRoot = await mkdtemp(join(tmpdir(), "pi-review-map-config-"));
+  const repoConfigDir = join(repoRoot, ".pi-diff-review-cockpit");
+  await mkdir(repoConfigDir, { recursive: true });
+  await writeFile(join(repoConfigDir, "config.json"), JSON.stringify({
+    aiReview: {
+      map: {
+        planner: { provider: "openai-codex", model: "gpt-5.6-sol", reasoning: "max" },
+      },
+    },
+  }));
+  const models = [
+    reasoningModel("openai-codex", "gpt-5.6-luna"),
+    reasoningModel("openai-codex", "gpt-5.6-terra"),
+    reasoningModel("openai-codex", "gpt-5.6-sol"),
+  ];
+
+  const config = await loadAiReviewRuntimeConfig(context(models[0]!, models), dataset(repoRoot));
+
+  assert.deepEqual(config.public.mapPhases, {
+    scout: { model: "openai-codex/gpt-5.6-luna", reasoning: "medium" },
+    planner: { model: "openai-codex/gpt-5.6-sol", reasoning: "max" },
+    critic: { model: "openai-codex/gpt-5.6-sol", reasoning: "xhigh" },
+  });
+});
+
 test("AI review defaults route each depth through the appropriate GPT-5.6 categories", async () => {
   const models = [
     reasoningModel("openai-codex", "gpt-5.6-luna"),
