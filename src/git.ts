@@ -166,6 +166,60 @@ function parseHunkHeader(line: string): { oldStart: number; oldCount: number; ne
   };
 }
 
+export interface CanonicalPatchHunk {
+  header: string;
+  symbol: string | null;
+  originalRanges: ReviewLineRange[];
+  modifiedRanges: ReviewLineRange[];
+  patch: string;
+}
+
+export function parseCanonicalPatchHunks(output: string): CanonicalPatchHunk[] {
+  const lines = output.split(/\r?\n/);
+  const hunks: CanonicalPatchHunk[] = [];
+  let current: CanonicalPatchHunk | null = null;
+  let originalLine = 0;
+  let modifiedLine = 0;
+
+  const finish = (): void => {
+    if (current != null) hunks.push(current);
+    current = null;
+  };
+
+  for (const line of lines) {
+    const hunk = parseHunkHeader(line);
+    if (hunk != null) {
+      finish();
+      const markerEnd = line.indexOf("@@", 2);
+      const symbol = markerEnd < 0 ? "" : line.slice(markerEnd + 2).trim();
+      current = {
+        header: line,
+        symbol: symbol.length > 0 ? symbol : null,
+        originalRanges: [],
+        modifiedRanges: [],
+        patch: line,
+      };
+      originalLine = hunk.oldStart;
+      modifiedLine = hunk.newStart;
+      continue;
+    }
+    if (current == null) continue;
+    current.patch += `\n${line}`;
+    if (line.startsWith(" ")) {
+      originalLine += 1;
+      modifiedLine += 1;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      addCommentableLine(current.originalRanges, originalLine++);
+    } else if (line.startsWith("+") && !line.startsWith("+++")) {
+      addCommentableLine(current.modifiedRanges, modifiedLine++);
+    } else if (!line.startsWith("\\ No newline at end of file")) {
+      finish();
+    }
+  }
+  finish();
+  return hunks;
+}
+
 function parseCommentableLineRanges(output: string): Map<string, CommentableLineRanges> {
   const rangesByPath = new Map<string, CommentableLineRanges>();
   let current: {
