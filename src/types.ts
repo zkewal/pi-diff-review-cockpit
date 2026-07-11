@@ -195,6 +195,7 @@ export interface ReviewActiveInsightState {
 }
 
 export interface ReviewSessionSnapshot {
+  map?: ReviewMap;
   analysis?: ReviewAnalysis;
   overallComment?: string;
   comments?: DiffReviewComment[];
@@ -202,6 +203,7 @@ export interface ReviewSessionSnapshot {
   findingStatuses?: Record<string, ReviewFindingStatus>;
   reviewedFiles?: Record<string, boolean>;
   reviewedChapters?: Record<string, boolean>;
+  reviewedVisits?: Record<string, boolean>;
   activeFileId?: string | null;
   activeSidebarTab?: "review-map" | "files" | "findings";
   currentScope?: ReviewScope;
@@ -433,6 +435,71 @@ export interface ReviewChapter {
   fileIds: string[];
   ranges: ReviewChapterRange[];
   findingIds: string[];
+}
+
+export type ReviewMapStatus = "provisional" | "mapping" | "semantic" | "semantic-repaired" | "fallback";
+export type ReviewVisitRole = "start-here" | "contract" | "implementation" | "caller" | "integration" | "removed-path" | "verification" | "reference";
+
+export interface ReviewChangeStory {
+  intent: string;
+  behaviorBefore: string;
+  behaviorAfter: string;
+  primaryFlows: string[];
+  removedOrReplacedBehavior: string[];
+}
+
+export interface ReviewChangeUnit {
+  id: string;
+  fileId: string;
+  path: string;
+  symbol?: string;
+  ranges: ReviewChapterRange[];
+  status: ChangeStatus;
+  commitIds: string[];
+}
+
+export interface ReviewVisit {
+  id: string;
+  fileId: string;
+  changeUnitIds: string[];
+  role: ReviewVisitRole;
+  reason: string;
+  focus: string[];
+}
+
+export interface ReviewTestEvidence {
+  visitIds: string[];
+  proves: string[];
+  doesNotProve: string[];
+}
+
+export interface SemanticReviewChapter extends ReviewChapter {
+  objective: string;
+  whyItMatters: string;
+  priorityReason: string;
+  dependsOn: string[];
+  reviewQuestions: string[];
+  changeFlow: string[];
+  visits: ReviewVisit[];
+  testEvidence: ReviewTestEvidence[];
+  exitCriteria: string[];
+}
+
+export interface ExactCoverage extends ReviewCoverageSummary {
+  overlappingOriginalLineCount: number;
+  overlappingModifiedLineCount: number;
+}
+
+export interface ReviewMap {
+  version: 2;
+  status: ReviewMapStatus;
+  sourceFingerprint: string;
+  strategyVersion: string;
+  story: ReviewChangeStory;
+  changeUnits: ReviewChangeUnit[];
+  chapters: SemanticReviewChapter[];
+  coverage: ExactCoverage;
+  diagnostics: string[];
 }
 
 export interface ReviewFinding {

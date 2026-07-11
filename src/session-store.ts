@@ -13,6 +13,7 @@ import type {
   GitHubReviewPublishSourceLock,
   ReviewAnalysis,
   ReviewFile,
+  ReviewMap,
   ReviewSessionRestoreStatus,
   ReviewSessionSnapshot,
 } from "./types.js";
@@ -737,6 +738,133 @@ function isReviewAnalysis(value: unknown): value is ReviewAnalysis {
   }
 }
 
+const MAP_STATUSES = new Set(["provisional", "mapping", "semantic", "semantic-repaired", "fallback"]);
+const MAP_PRIORITIES = new Set(["review-first", "high-attention", "standard", "low-attention", "reference"]);
+const VISIT_ROLES = new Set(["start-here", "contract", "implementation", "caller", "integration", "removed-path", "verification", "reference"]);
+const CHANGE_STATUSES = new Set(["modified", "added", "deleted", "renamed"]);
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function isMapRange(value: unknown): boolean {
+  return isRecord(value)
+    && hasOnlyKeys(value, ["fileId", "path", "side", "startLine", "endLine"])
+    && isNonemptyString(value.fileId)
+    && isNonemptyString(value.path)
+    && (value.side === "original" || value.side === "modified")
+    && isPositiveInteger(value.startLine)
+    && isPositiveInteger(value.endLine)
+    && value.startLine <= value.endLine;
+}
+
+export function isReviewMap(value: unknown): value is ReviewMap {
+  if (!isRecord(value)
+    || !hasOnlyKeys(value, ["version", "status", "sourceFingerprint", "strategyVersion", "story", "changeUnits", "chapters", "coverage", "diagnostics"])
+    || value.version !== 2
+    || !MAP_STATUSES.has(String(value.status))
+    || !isNonemptyString(value.sourceFingerprint)
+    || !isNonemptyString(value.strategyVersion)
+    || !isRecord(value.story)
+    || !hasOnlyKeys(value.story, ["intent", "behaviorBefore", "behaviorAfter", "primaryFlows", "removedOrReplacedBehavior"])
+    || typeof value.story.intent !== "string"
+    || typeof value.story.behaviorBefore !== "string"
+    || typeof value.story.behaviorAfter !== "string"
+    || !isStringArray(value.story.primaryFlows)
+    || !isStringArray(value.story.removedOrReplacedBehavior)
+    || !Array.isArray(value.changeUnits)
+    || !Array.isArray(value.chapters)
+    || !isRecord(value.coverage)
+    || !hasOnlyKeys(value.coverage, [
+      "fileCount", "originalLineCount", "modifiedLineCount", "unmappedFileCount",
+      "unmappedOriginalLineCount", "unmappedModifiedLineCount", "overlappingOriginalLineCount",
+      "overlappingModifiedLineCount",
+    ])
+    || !Object.values(value.coverage).every(isNonnegativeInteger)
+    || !isStringArray(value.diagnostics)) return false;
+
+  const unitIds = new Set<string>();
+  const unitFileIds = new Map<string, string>();
+  for (const unit of value.changeUnits) {
+    if (!isRecord(unit)
+      || !hasOnlyKeys(unit, ["id", "fileId", "path", "ranges", "status", "commitIds", "symbol"])
+      || !isNonemptyString(unit.id)
+      || unitIds.has(unit.id)
+      || !isNonemptyString(unit.fileId)
+      || !isNonemptyString(unit.path)
+      || (unit.symbol != null && typeof unit.symbol !== "string")
+      || !Array.isArray(unit.ranges)
+      || unit.ranges.length === 0
+      || !unit.ranges.every(isMapRange)
+      || !CHANGE_STATUSES.has(String(unit.status))
+      || !isStringArray(unit.commitIds)) return false;
+    if (unit.ranges.some((range) => (range as { fileId: string }).fileId !== unit.fileId)) return false;
+    unitIds.add(unit.id);
+    unitFileIds.set(unit.id, unit.fileId);
+  }
+
+  const chapterIds = new Set<string>();
+  const visitIds = new Set<string>();
+  let expectedOrder = 1;
+  for (const chapter of value.chapters) {
+    if (!isRecord(chapter)
+      || !hasOnlyKeys(chapter, [
+        "id", "title", "objective", "whyItMatters", "summary", "reviewOrder", "reviewWeight",
+        "priority", "priorityReason", "attentionTags", "dependsOn", "reviewQuestions", "changeFlow",
+        "visits", "testEvidence", "exitCriteria", "fileIds", "ranges", "findingIds",
+      ])
+      || !isNonemptyString(chapter.id)
+      || chapterIds.has(chapter.id)
+      || !isNonemptyString(chapter.title)
+      || !isNonemptyString(chapter.objective)
+      || !isNonemptyString(chapter.whyItMatters)
+      || !isNonemptyString(chapter.summary)
+      || chapter.reviewOrder !== expectedOrder++
+      || !isPositiveInteger(chapter.reviewWeight)
+      || !MAP_PRIORITIES.has(String(chapter.priority))
+      || !isNonemptyString(chapter.priorityReason)
+      || !isStringArray(chapter.attentionTags)
+      || !isStringArray(chapter.dependsOn)
+      || !isStringArray(chapter.reviewQuestions)
+      || !isStringArray(chapter.changeFlow)
+      || !Array.isArray(chapter.visits)
+      || !Array.isArray(chapter.testEvidence)
+      || !isStringArray(chapter.exitCriteria)
+      || !isStringArray(chapter.fileIds)
+      || !Array.isArray(chapter.ranges)
+      || !chapter.ranges.every(isMapRange)
+      || !isStringArray(chapter.findingIds)) return false;
+    chapterIds.add(chapter.id);
+    for (const visit of chapter.visits) {
+      if (!isRecord(visit)
+        || !hasOnlyKeys(visit, ["id", "fileId", "changeUnitIds", "role", "reason", "focus"])
+        || !isNonemptyString(visit.id)
+        || visitIds.has(visit.id)
+        || !isNonemptyString(visit.fileId)
+        || !isStringArray(visit.changeUnitIds)
+        || visit.changeUnitIds.length === 0
+        || !VISIT_ROLES.has(String(visit.role))
+        || !isNonemptyString(visit.reason)
+        || !isStringArray(visit.focus)
+        || visit.changeUnitIds.some((id) => !unitIds.has(id) || unitFileIds.get(id) !== visit.fileId)) return false;
+      visitIds.add(visit.id);
+    }
+    for (const evidence of chapter.testEvidence) {
+      if (!isRecord(evidence)
+        || !hasOnlyKeys(evidence, ["visitIds", "proves", "doesNotProve"])
+        || !isStringArray(evidence.visitIds)
+        || !isStringArray(evidence.proves)
+        || !isStringArray(evidence.doesNotProve)) return false;
+    }
+  }
+  const chapters = value.chapters as Array<{
+    dependsOn: string[];
+    testEvidence: Array<{ visitIds: string[] }>;
+  }>;
+  return chapters.every((chapter) => chapter.dependsOn.every((id) => chapterIds.has(id)))
+    && chapters.every((chapter) => chapter.testEvidence.every((evidence) => evidence.visitIds.every((id) => visitIds.has(id))));
+}
+
 function isPublishIntent(value: unknown): value is GitHubReviewPublishIntent {
   if (!isRecord(value) || !hasOnlyKeys(value, [
     "version", "status", "correlationId", "source", "representedCommentIds",
@@ -845,12 +973,13 @@ export function isGitHubReviewContextSnapshot(value: unknown): boolean {
 
 function isReviewSnapshot(value: unknown): value is ReviewSessionSnapshot {
   if (!isRecord(value) || !hasOnlyKeys(value, [
-    "analysis", "overallComment", "comments", "acceptedFindingComments", "findingStatuses",
-    "reviewedFiles", "reviewedChapters", "activeFileId", "activeSidebarTab", "currentScope",
+    "map", "analysis", "overallComment", "comments", "acceptedFindingComments", "findingStatuses",
+    "reviewedFiles", "reviewedChapters", "reviewedVisits", "activeFileId", "activeSidebarTab", "currentScope",
     "selectedCommitSha", "activeInsight", "hideUnchanged", "wrapLines", "sidebarCollapsed",
     "aiReviewCompleted", "aiReviewStatus", "dismissedFindingLocationKeys", "githubPublishIntent", "githubContext",
     "updatedAt",
   ])) return false;
+  if (value.map != null && !isReviewMap(value.map)) return false;
   if (value.analysis != null && !isReviewAnalysis(value.analysis)) return false;
   if (value.overallComment != null && typeof value.overallComment !== "string") return false;
   if (value.comments != null) {
@@ -862,6 +991,7 @@ function isReviewSnapshot(value: unknown): value is ReviewSessionSnapshot {
   if (value.findingStatuses != null && !isFindingStatusRecord(value.findingStatuses)) return false;
   if (value.reviewedFiles != null && !isBooleanRecord(value.reviewedFiles)) return false;
   if (value.reviewedChapters != null && !isBooleanRecord(value.reviewedChapters)) return false;
+  if (value.reviewedVisits != null && !isBooleanRecord(value.reviewedVisits)) return false;
   if (!isOptionalString(value.activeFileId) || !isOptionalString(value.selectedCommitSha)) return false;
   if (value.activeSidebarTab != null
     && value.activeSidebarTab !== "review-map"
@@ -943,6 +1073,18 @@ function hasValidSessionReferences(
     || !recordKeysBelongTo(snapshot.findingStatuses, findingIds)
     || !recordKeysBelongTo(snapshot.reviewedChapters, chapterIds)) return false;
 
+  const map = snapshot.map;
+  if (map != null) {
+    const mapChapterIds = new Set(map.chapters.map((chapter) => chapter.id));
+    const visitIds = new Set(map.chapters.flatMap((chapter) => chapter.visits.map((visit) => visit.id)));
+    if (!recordKeysBelongTo(snapshot.reviewedVisits, visitIds)
+      || map.changeUnits.some((unit) => !fileIds.has(unit.fileId))
+      || map.chapters.some((chapter) => chapter.fileIds.some((fileId) => !fileIds.has(fileId)))) return false;
+    if (snapshot.activeInsight?.type === "chapter" && !mapChapterIds.has(snapshot.activeInsight.id ?? "")) return false;
+  } else if (snapshot.reviewedVisits != null) {
+    return false;
+  }
+
   for (const chapter of analysis.chapters) {
     if (chapter.fileIds.some((fileId) => !fileIds.has(fileId))) return false;
     if (chapter.findingIds.some((findingId) => !findingIds.has(findingId))) return false;
@@ -963,7 +1105,10 @@ function hasValidSessionReferences(
   if (analysis.approvalPacket.unresolvedFindings.some((id) => !findingIds.has(id))) return false;
 
   const activeInsight = snapshot.activeInsight;
-  if (activeInsight?.type === "chapter" && !chapterIds.has(activeInsight.id ?? "")) return false;
+  if (activeInsight?.type === "chapter") {
+    const activeChapterIds = map == null ? chapterIds : new Set(map.chapters.map((chapter) => chapter.id));
+    if (!activeChapterIds.has(activeInsight.id ?? "")) return false;
+  }
   if (activeInsight?.type === "finding" && !findingIds.has(activeInsight.id ?? "")) return false;
   if (activeInsight?.type === "comment") {
     const commentIds = new Set((snapshot.comments ?? []).map((comment) => comment.id));
