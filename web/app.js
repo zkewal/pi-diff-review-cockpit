@@ -265,6 +265,7 @@ const state = {
     progress: null,
     config: reviewData.aiReviewConfig || null,
   },
+  reviewMapProgress: null,
   githubContext: restoredSession.githubContext || null,
   githubContextRequestId: null,
   githubContextStatus: "idle",
@@ -938,7 +939,7 @@ function isUnmappedReviewChapter(chapter) {
 }
 
 function getReviewChapters() {
-  const chapters = reviewData.analysis?.chapters || [];
+  const chapters = reviewData.map?.chapters || reviewData.analysis?.chapters || [];
   const hasExplicitReviewOrder = chapters.some((chapter) => Number.isInteger(chapter?.reviewOrder) && chapter.reviewOrder > 0);
   return chapters
     .map((chapter, index) => ({ chapter, index }))
@@ -3786,6 +3787,30 @@ window.__reviewReceive = function (message) {
     return;
   }
 
+  if (message.type === "review-map-progress") {
+    state.reviewMapProgress = message.progress || null;
+    renderTree();
+    return;
+  }
+
+  if (message.type === "review-map-result") {
+    const activeFileId = state.activeFileId;
+    reviewData.map = message.map;
+    reviewData.analysis = {
+      ...reviewData.analysis,
+      chapters: message.map?.chapters || [],
+      coverage: message.map?.coverage || reviewData.analysis?.coverage,
+    };
+    state.reviewMapProgress = {
+      phase: message.map?.status === "fallback" ? "failed" : "done",
+      message: message.map?.diagnostics?.at(-1) || "Review plan ready.",
+    };
+    if (activeFileId && reviewData.files.some((file) => file.id === activeFileId)) state.activeFileId = activeFileId;
+    renderAll({ restoreFileScroll: true });
+    maybeStartAiReview();
+    return;
+  }
+
   if (message.type === "ai-review-progress") {
     if (message.requestId !== state.aiReview.requestId) return;
     state.aiReview = {
@@ -3980,6 +4005,7 @@ function shouldAutoStartAiReview() {
   return Boolean(canSendRendererMessage())
     && state.aiReview.status === "idle"
     && !state.aiReviewCompleted
+    && ["semantic", "semantic-repaired", "fallback"].includes(reviewData.map?.status)
     && state.currentScope !== "all-files"
     && getReviewChapters().length > 0;
 }

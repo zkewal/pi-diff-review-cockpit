@@ -405,7 +405,24 @@ export interface ReviewAiReviewErrorMessage {
   progress: AiReviewProgress;
 }
 
-export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewSaveSessionResultMessage | ReviewGitHubContextResultMessage | ReviewPublishGitHubReviewResultMessage | ReviewAiReviewProgressMessage | ReviewAiReviewPartialResultMessage | ReviewAiReviewResultMessage | ReviewAiReviewErrorMessage;
+export type ReviewMapProgressPhase = "scout" | "planner" | "critic" | "compile" | "done" | "failed";
+
+export interface ReviewMapProgress {
+  phase: ReviewMapProgressPhase;
+  message: string;
+}
+
+export interface ReviewMapProgressMessage {
+  type: "review-map-progress";
+  progress: ReviewMapProgress;
+}
+
+export interface ReviewMapResultMessage {
+  type: "review-map-result";
+  map: ReviewMap;
+}
+
+export type ReviewHostMessage = ReviewFileDataMessage | ReviewFileErrorMessage | ReviewSaveSessionResultMessage | ReviewGitHubContextResultMessage | ReviewPublishGitHubReviewResultMessage | ReviewAiReviewProgressMessage | ReviewAiReviewPartialResultMessage | ReviewAiReviewResultMessage | ReviewAiReviewErrorMessage | ReviewMapProgressMessage | ReviewMapResultMessage;
 
 export type ReviewFindingSeverity = "critical" | "high" | "medium" | "low" | "info";
 export type ReviewFindingKind = "bug" | "security" | "migration-risk" | "api-contract" | "test-gap" | "performance" | "question" | "informational";

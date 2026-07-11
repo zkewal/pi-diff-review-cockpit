@@ -103,7 +103,7 @@ test("attaches listeners before loading the static shell and waits for boot befo
 
   controller.start();
   assert.deepEqual(window.calls, ["on:message", "on:closed", "on:error", "once:ready", "on:ready"]);
-  assert.equal(controller.sendHostMessage({ type: "file-data" }), false);
+  assert.equal(controller.sendHostMessage({ type: "review-map-progress", progress: { phase: "scout", message: "Scanning" } }), true);
   window.emit("ready");
   assert.deepEqual(window.calls, ["on:message", "on:closed", "on:error", "once:ready", "on:ready", "loadFile:/package with spaces/web/index.html"]);
   assert.equal(window.shown.length, 0);
@@ -120,8 +120,9 @@ test("attaches listeners before loading the static shell and waits for boot befo
   window.emit("message", frame(context, { type: "renderer-booted" }));
   assert.deepEqual(window.shown, [{ title: "Diff review" }]);
   assert.deepEqual(dispatched, []);
-  assert.equal(controller.sendHostMessage({ type: "file-data" }), true);
   assert.match(window.sent[1], /^window\.__reviewReceive\(/);
+  assert.equal(controller.sendHostMessage({ type: "file-data" }), true);
+  assert.match(window.sent[2], /^window\.__reviewReceive\(/);
 
   window.emit("message", frame(context, { type: "request-file", requestId: "request-1", fileId: "file-1", scope: "git-diff" }));
   assert.deepEqual(dispatched, ["request-file"]);

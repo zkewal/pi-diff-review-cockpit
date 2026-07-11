@@ -78,6 +78,7 @@ export class ReviewWindowController {
   #rendererBooted = false;
   #closeRequested = false;
   #preBootMessages: RendererCommand[] = [];
+  #preBootHostMessages: unknown[] = [];
 
   constructor(options: ReviewWindowControllerOptions) {
     this.#window = options.window;
@@ -113,12 +114,18 @@ export class ReviewWindowController {
     this.#window.removeListener("error", this.#handleError);
     this.#window.removeListener("ready", this.#handleReady);
     this.#preBootMessages = [];
+    this.#preBootHostMessages = [];
     this.#protocol = null;
     this.#settled = true;
   }
 
   sendHostMessage(message: unknown): boolean {
-    if (!this.#rendererBooted || this.#protocol == null) return false;
+    if (this.#protocol == null) return false;
+    if (!this.#rendererBooted) {
+      if (this.#preBootHostMessages.length >= MAX_PRE_BOOT_MESSAGES) return false;
+      this.#preBootHostMessages.push(message);
+      return true;
+    }
     let decoded = message;
     if (message != null
       && typeof message === "object"
@@ -202,6 +209,11 @@ export class ReviewWindowController {
       for (const queuedMessage of queuedMessages) {
         if (this.#settled || this.#protocol == null) break;
         this.#dispatchMessage(queuedMessage);
+      }
+      const queuedHostMessages = this.#preBootHostMessages.splice(0);
+      for (const queuedMessage of queuedHostMessages) {
+        if (this.#settled || this.#protocol == null) break;
+        this.sendHostMessage(queuedMessage);
       }
       return;
     }
