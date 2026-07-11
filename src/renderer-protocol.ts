@@ -42,6 +42,7 @@ export interface RendererProtocolContext {
   commitShas: ReadonlySet<string>;
   findingIds: ReadonlySet<string>;
   chapterIds: ReadonlySet<string>;
+  visitIds?: ReadonlySet<string>;
 }
 
 export interface RendererReadyMessage {
@@ -346,8 +347,8 @@ function decodeStringMap(value: unknown, known: ReadonlySet<string>): Record<str
 function decodeSnapshot(value: unknown, context: RendererProtocolContext): ReviewRendererSessionSnapshot | null {
   if (!isRecord(value)) return null;
   const allowed = [
-    "overallComment", "comments", "acceptedFindingComments", "findingStatuses", "reviewedFiles", "reviewedChapters",
-    "activeFileId", "activeSidebarTab", "currentScope", "selectedCommitSha", "activeInsight", "hideUnchanged", "wrapLines",
+    "overallComment", "comments", "acceptedFindingComments", "findingStatuses", "reviewedFiles", "reviewedChapters", "reviewedVisits",
+    "activeFileId", "activeVisitId", "activeSidebarTab", "currentScope", "selectedCommitSha", "activeInsight", "hideUnchanged", "wrapLines",
     "sidebarCollapsed", "aiReviewCompleted", "aiReviewStatus", "dismissedFindingLocationKeys", "updatedAt",
   ];
   if (!hasKeys(value, [], allowed)) return null;
@@ -388,10 +389,20 @@ function decodeSnapshot(value: unknown, context: RendererProtocolContext): Revie
     if (reviewedChapters == null) return null;
     snapshot.reviewedChapters = reviewedChapters;
   }
+  if (Object.hasOwn(value, "reviewedVisits")) {
+    const reviewedVisits = decodeBooleanMap(value.reviewedVisits, context.visitIds ?? new Set());
+    if (reviewedVisits == null) return null;
+    snapshot.reviewedVisits = reviewedVisits;
+  }
   if (Object.hasOwn(value, "activeFileId")) {
     const activeFileId = nullableFileIdValue(value.activeFileId, context);
     if (activeFileId === INVALID) return null;
     snapshot.activeFileId = activeFileId;
+  }
+  if (Object.hasOwn(value, "activeVisitId")) {
+    const activeVisitId = nullableString(value.activeVisitId, MAX_ID_LENGTH);
+    if (activeVisitId === INVALID || (activeVisitId != null && !(context.visitIds ?? new Set()).has(activeVisitId))) return null;
+    snapshot.activeVisitId = activeVisitId;
   }
   if (Object.hasOwn(value, "activeSidebarTab")) {
     const activeSidebarTab = enumValue(value.activeSidebarTab, ["review-map", "files", "findings"] as const);

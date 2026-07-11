@@ -250,6 +250,7 @@ function rendererProtocolContext(files: ReviewFile[], commits: { sha: string }[]
     commitShas: new Set(commits.map((commit) => commit.sha)),
     findingIds: new Set(analysis.findings.map((finding) => finding.id)),
     chapterIds: new Set((map?.chapters ?? analysis.chapters).map((chapter) => chapter.id)),
+    visitIds: new Set(map?.chapters.flatMap((chapter) => chapter.visits.map((visit) => visit.id)) ?? []),
   };
 }
 
@@ -930,7 +931,7 @@ export default function (pi: ExtensionAPI) {
             onPartialResult: (partial) => {
               if (!canUpdateReviewWindow()) return;
               analysis = partial.analysis;
-              windowController?.updateProtocolContext(rendererProtocolContext(files, dataset.commits, analysis));
+              windowController?.updateProtocolContext(rendererProtocolContext(files, dataset.commits, analysis, reviewMap));
               queueSessionSave({
                 ...(sessionSnapshot ?? {}),
                 analysis,
@@ -946,7 +947,7 @@ export default function (pi: ExtensionAPI) {
           });
           if (!canUpdateReviewWindow()) return;
           analysis = result.analysis;
-          windowController?.updateProtocolContext(rendererProtocolContext(files, dataset.commits, analysis));
+          windowController?.updateProtocolContext(rendererProtocolContext(files, dataset.commits, analysis, reviewMap));
           queueSessionSave({
             ...(sessionSnapshot ?? {}),
             analysis,
@@ -1083,7 +1084,7 @@ export default function (pi: ExtensionAPI) {
           shellPath: getReviewShellPath(),
           title,
           bootstrap: reviewData,
-          protocol: rendererProtocolContext(files, dataset.commits, analysis),
+          protocol: rendererProtocolContext(files, dataset.commits, analysis, reviewMap),
           onMessage,
           onClosed: lifecycle.callbacks.onRendererClosed,
           onError: lifecycle.callbacks.onControllerError,

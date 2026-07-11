@@ -974,7 +974,7 @@ export function isGitHubReviewContextSnapshot(value: unknown): boolean {
 function isReviewSnapshot(value: unknown): value is ReviewSessionSnapshot {
   if (!isRecord(value) || !hasOnlyKeys(value, [
     "map", "analysis", "overallComment", "comments", "acceptedFindingComments", "findingStatuses",
-    "reviewedFiles", "reviewedChapters", "reviewedVisits", "activeFileId", "activeSidebarTab", "currentScope",
+    "reviewedFiles", "reviewedChapters", "reviewedVisits", "activeFileId", "activeVisitId", "activeSidebarTab", "currentScope",
     "selectedCommitSha", "activeInsight", "hideUnchanged", "wrapLines", "sidebarCollapsed",
     "aiReviewCompleted", "aiReviewStatus", "dismissedFindingLocationKeys", "githubPublishIntent", "githubContext",
     "updatedAt",
@@ -992,7 +992,7 @@ function isReviewSnapshot(value: unknown): value is ReviewSessionSnapshot {
   if (value.reviewedFiles != null && !isBooleanRecord(value.reviewedFiles)) return false;
   if (value.reviewedChapters != null && !isBooleanRecord(value.reviewedChapters)) return false;
   if (value.reviewedVisits != null && !isBooleanRecord(value.reviewedVisits)) return false;
-  if (!isOptionalString(value.activeFileId) || !isOptionalString(value.selectedCommitSha)) return false;
+  if (!isOptionalString(value.activeFileId) || !isOptionalString(value.activeVisitId) || !isOptionalString(value.selectedCommitSha)) return false;
   if (value.activeSidebarTab != null
     && value.activeSidebarTab !== "review-map"
     && value.activeSidebarTab !== "files"
@@ -1080,8 +1080,9 @@ function hasValidSessionReferences(
     if (!recordKeysBelongTo(snapshot.reviewedVisits, visitIds)
       || map.changeUnits.some((unit) => !fileIds.has(unit.fileId))
       || map.chapters.some((chapter) => chapter.fileIds.some((fileId) => !fileIds.has(fileId)))) return false;
+    if (snapshot.activeVisitId != null && !visitIds.has(snapshot.activeVisitId)) return false;
     if (snapshot.activeInsight?.type === "chapter" && !mapChapterIds.has(snapshot.activeInsight.id ?? "")) return false;
-  } else if (snapshot.reviewedVisits != null) {
+  } else if (snapshot.reviewedVisits != null || snapshot.activeVisitId != null) {
     return false;
   }
 

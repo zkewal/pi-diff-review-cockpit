@@ -22,6 +22,7 @@ import { replaceDiffEditorModels } from "./model-lifecycle.js";
 import { applyAuthoritativePublishedCommentState } from "./publish-comment-state.js";
 import { expandDisclosure, isDisclosureExpanded, toggleDisclosure } from "./review-disclosure-state.js";
 import { isFileCanvasActive } from "./review-navigation-state.js";
+import { isFileReviewComplete, reconcileReviewMapState } from "./review-visit-state.js";
 import { createSessionSaveScheduler } from "./session-save-scheduler.js";
 import { renderSafeMarkdown, safeExternalUrl } from "./safe-markdown.js";
 import {
@@ -233,6 +234,8 @@ const state = {
   collapsedDirs: {},
   reviewedFiles: booleanMapOrEmpty(restoredSession.reviewedFiles),
   reviewedChapters: booleanMapOrEmpty(restoredSession.reviewedChapters),
+  reviewedVisits: booleanMapOrEmpty(restoredSession.reviewedVisits),
+  activeVisitId: typeof restoredSession.activeVisitId === "string" ? restoredSession.activeVisitId : null,
   findingStatuses: restoredFindingStatuses(),
   acceptedFindingComments: restoredAcceptedFindingComments(),
   scrollPositions: {},
@@ -548,7 +551,9 @@ function buildSessionSnapshot() {
     findingStatuses: state.findingStatuses,
     reviewedFiles: state.reviewedFiles,
     reviewedChapters: state.reviewedChapters,
+    reviewedVisits: state.reviewedVisits,
     activeFileId: state.activeFileId,
+    activeVisitId: state.activeVisitId,
     activeSidebarTab: state.activeSidebarTab,
     currentScope: state.currentScope,
     selectedCommitSha: state.selectedCommitSha,
@@ -972,7 +977,8 @@ function getFileById(fileId) {
 }
 
 function isFileReviewed(fileId) {
-  return state.reviewedFiles[fileId] === true;
+  const hasVisits = (reviewData.map?.chapters || []).some((chapter) => (chapter.visits || []).some((visit) => visit.fileId === fileId));
+  return hasVisits ? isFileReviewComplete(reviewData.map, state.reviewedVisits, fileId) : state.reviewedFiles[fileId] === true;
 }
 
 function uniqueFiles(files) {
@@ -995,7 +1001,24 @@ function fileReviewProgress(files) {
 }
 
 function chapterReviewProgress(chapter) {
+  const visits = chapter?.visits || [];
+  if (visits.length > 0) {
+    return { reviewed: visits.filter((visit) => state.reviewedVisits[visit.id] === true).length, total: visits.length };
+  }
   return fileReviewProgress(getChapterDisplayFiles(chapter));
+}
+
+function visitsForFile(fileId) {
+  return getReviewChapters().flatMap((chapter) => chapter.visits || []).filter((visit) => visit.fileId === fileId);
+}
+
+function selectVisitForFile(fileId) {
+  const visits = visitsForFile(fileId);
+  const selected = visits.find((visit) => visit.id === state.activeVisitId)
+    || visits.find((visit) => state.reviewedVisits[visit.id] !== true)
+    || visits[0]
+    || null;
+  state.activeVisitId = selected?.id || null;
 }
 
 function isChapterReviewed(chapter) {
@@ -1597,6 +1620,7 @@ function ensureFileLoaded(fileId, scope = state.currentScope) {
 function openFile(fileId) {
   const alreadyOpen = isFileCanvasActive(state.activeCanvas, state.activeFileId, fileId);
   state.activeCanvas = "file";
+  selectVisitForFile(fileId);
   if (state.activeInsight.type === "chapter") {
     state.activeInsight = { type: "default", id: null };
   }
@@ -2327,6 +2351,7 @@ function openFileFromAnalysis(fileId) {
     commitSelectEl.value = preferred.commitSha;
   }
   state.activeFileId = file.id;
+  selectVisitForFile(file.id);
   renderAll({ restoreFileScroll: true });
   ensureFileLoaded(file.id, state.currentScope);
 }
@@ -3795,6 +3820,11 @@ window.__reviewReceive = function (message) {
 
   if (message.type === "review-map-result") {
     const activeFileId = state.activeFileId;
+    const reconciled = reconcileReviewMapState(reviewData.map, message.map, {
+      reviewedVisits: state.reviewedVisits,
+      activeVisitId: state.activeVisitId,
+      activeFileId,
+    });
     reviewData.map = message.map;
     reviewData.analysis = {
       ...reviewData.analysis,
@@ -3805,6 +3835,8 @@ window.__reviewReceive = function (message) {
       phase: message.map?.status === "fallback" ? "failed" : "done",
       message: message.map?.diagnostics?.at(-1) || "Review plan ready.",
     };
+    state.reviewedVisits = reconciled.reviewedVisits;
+    state.activeVisitId = reconciled.activeVisitId;
     if (activeFileId && reviewData.files.some((file) => file.id === activeFileId)) state.activeFileId = activeFileId;
     renderAll({ restoreFileScroll: true });
     maybeStartAiReview();
@@ -4111,6 +4143,9 @@ function toggleCurrentFileReviewed() {
   if (!file) return;
   const nextReviewed = !isFileReviewed(file.id);
   state.reviewedFiles[file.id] = nextReviewed;
+  visitsForFile(file.id).forEach((visit) => {
+    state.reviewedVisits[visit.id] = nextReviewed;
+  });
   const chapter = chapterForFile(file.id);
   if (chapter) {
     state.reviewedChapters[chapter.id] = isChapterReviewed(chapter);
@@ -4129,6 +4164,9 @@ function toggleCurrentChapterReviewed() {
   const markReviewed = !isChapterReviewed(chapter);
   files.forEach((file) => {
     state.reviewedFiles[file.id] = markReviewed;
+  });
+  (chapter.visits || []).forEach((visit) => {
+    state.reviewedVisits[visit.id] = markReviewed;
   });
   state.reviewedChapters[chapter.id] = markReviewed;
   state.activeInsight = { type: "chapter", id: chapter.id };

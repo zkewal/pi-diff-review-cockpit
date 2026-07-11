@@ -204,6 +204,7 @@ export interface ReviewSessionSnapshot {
   reviewedFiles?: Record<string, boolean>;
   reviewedChapters?: Record<string, boolean>;
   reviewedVisits?: Record<string, boolean>;
+  activeVisitId?: string | null;
   activeFileId?: string | null;
   activeSidebarTab?: "review-map" | "files" | "findings";
   currentScope?: ReviewScope;
