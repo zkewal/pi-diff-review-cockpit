@@ -210,8 +210,12 @@ test("review workspace is consolidated around one sidebar and checkout drawer", 
   assert.equal(css.includes("review-scan-pulse"), false);
   assert.equal(appJs.includes("sidebar-scanning-icon"), true);
   assert.equal(html.includes("chapter-brief-container"), true);
+  assert.equal(html.includes('id="ai-review-result-container"'), true);
+  assert.equal(html.includes('aria-label="Open overall AI review"'), true);
   assert.equal(html.includes('id="session-notice"'), true);
   assert.equal(html.includes("chapter-brief-view"), true);
+  assert.equal(appJs.includes("mountAiReviewResult"), true);
+  assert.equal(appJs.includes('activeCanvas === "ai-review"'), true);
   assert.equal(appJs.includes("openCheckoutDrawer"), true);
   assert.equal(appJs.includes("closeCheckoutDrawer"), true);
   assert.equal(appJs.includes("renderInsightPanel();"), false);
