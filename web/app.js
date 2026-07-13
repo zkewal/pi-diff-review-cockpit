@@ -22,7 +22,11 @@ import { createCommentEditBuffer } from "./comment-edit-buffer.js";
 import { replaceDiffEditorModels } from "./model-lifecycle.js";
 import { applyAuthoritativePublishedCommentState } from "./publish-comment-state.js";
 import { expandDisclosure, isDisclosureExpanded, toggleDisclosure } from "./review-disclosure-state.js";
-import { isFileCanvasActive } from "./review-navigation-state.js";
+import {
+  firstUnreviewedVisitInChapter,
+  isFileCanvasActive,
+  nextGuidedReviewDestination,
+} from "./review-navigation-state.js";
 import { isFileReviewComplete, nextReviewVisit, reconcileReviewMapState } from "./review-visit-state.js";
 import { createSessionSaveScheduler } from "./session-save-scheduler.js";
 import { renderSafeMarkdown, safeExternalUrl } from "./safe-markdown.js";
@@ -1659,6 +1663,30 @@ function openChapterBrief(chapterId) {
   return true;
 }
 
+function getReviewVisit(visitId) {
+  for (const chapter of getReviewChapters()) {
+    const visit = (chapter.visits || []).find((item) => item.id === visitId);
+    if (visit) return visit;
+  }
+  return null;
+}
+
+function openReviewVisit(visitId) {
+  const visit = getReviewVisit(visitId);
+  if (!visit || !getFileById(visit.fileId)) return false;
+  state.activeVisitId = visit.id;
+  openFile(visit.fileId);
+  requestAnimationFrame(focusDiffPane);
+  return true;
+}
+
+function applyGuidedReviewDestination(destination) {
+  if (destination.kind === "visit") return openReviewVisit(destination.visitId);
+  if (destination.kind === "chapter") return openChapterBrief(destination.chapterId);
+  if (destination.kind === "ai-review") return openAiReviewResult();
+  return false;
+}
+
 function openAiReviewResult() {
   saveCurrentScrollPosition();
   state.activeCanvas = "ai-review";
@@ -1693,15 +1721,7 @@ function openChapterByIndex(index) {
   const boundedIndex = Math.max(0, Math.min(chapters.length - 1, index));
   const chapter = chapters[boundedIndex];
   if (!chapter) return false;
-  state.activeSidebarTab = "review-map";
-  state.activeInsight = { type: "chapter", id: chapter.id };
-  const fileId = firstExistingChapterFileId(chapter);
-  if (fileId) {
-    openFileWithPendingHunk(fileId, 1);
-  } else {
-    renderAll({ restoreFileScroll: false });
-  }
-  return true;
+  return openChapterBrief(chapter.id);
 }
 
 function moveChapter(direction) {
@@ -2379,11 +2399,6 @@ function openFileFromAnalysis(fileId) {
   selectVisitForFile(file.id);
   renderAll({ restoreFileScroll: true });
   ensureFileLoaded(file.id, state.currentScope);
-}
-
-function firstExistingChapterFileId(chapter) {
-  const files = getChapterDisplayFiles(chapter);
-  return files.find((file) => !isFileReviewed(file.id))?.id ?? files[0]?.id ?? null;
 }
 
 function firstDraftableFindingLocation(finding) {
@@ -3594,7 +3609,13 @@ function chapterBriefHtml(chapter) {
   const findings = chapterFindings(chapter).filter((finding) => (state.findingStatuses[finding.id] || "new") === "new");
   const visits = chapter.visits || [];
   const evidence = chapter.testEvidence || [];
-  const firstFileId = firstExistingChapterFileId(chapter);
+  const firstUnreviewedVisit = firstUnreviewedVisitInChapter(chapter, state.reviewedVisits);
+  const firstUnreviewedFile = firstUnreviewedVisit ? getFileById(firstUnreviewedVisit.fileId) : null;
+  const firstUnreviewedLegacyFile = visits.length === 0
+    ? files.find((file) => !isFileReviewed(file.id)) || null
+    : null;
+  const chapterActionFile = firstUnreviewedFile || firstUnreviewedLegacyFile;
+  const chapterActionLabel = progress.reviewed > 0 ? "Continue review" : "Start review";
   const reviewedLabel = progress.total > 0 ? `${progress.reviewed}/${progress.total} reviewed` : "No files";
 
   return `
@@ -3609,7 +3630,7 @@ function chapterBriefHtml(chapter) {
           <h1 data-canvas-heading tabindex="-1" class="max-w-3xl text-2xl font-semibold leading-tight text-white outline-none">${escapeHtml(chapterDisplayTitle(chapter))}</h1>
           <p class="mt-3 max-w-3xl text-sm leading-6 text-review-muted">${escapeHtml(chapter.summary || "Review the changed files in this area before marking it complete.")}</p>
         </div>
-        ${firstFileId ? `<button type="button" data-open-chapter-file="${escapeHtml(firstFileId)}" class="cursor-pointer rounded-md border border-[#1f6feb]/40 bg-[#1f6feb] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#388bfd]">Start review</button>` : ""}
+        ${chapterActionFile ? `<button type="button" data-open-chapter-file="${escapeHtml(chapterActionFile.id)}"${firstUnreviewedVisit ? ` data-review-visit-id="${escapeHtml(firstUnreviewedVisit.id)}"` : ""} class="cursor-pointer rounded-md border border-[#1f6feb]/40 bg-[#1f6feb] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#388bfd]">${escapeHtml(chapterActionLabel)}</button>` : `<span class="rounded-md border border-[#238636]/40 bg-[#238636]/10 px-3 py-1.5 text-xs font-semibold text-[#3fb950]">Chapter complete</span>`}
       </div>
 
       ${overallAiReviewCardHtml()}
@@ -4371,12 +4392,12 @@ function toggleCurrentFileReviewed() {
     const chapter = getReviewChapters().find((item) => (item.visits || []).some((visit) => visit.id === activeVisit.id));
     if (chapter) state.reviewedChapters[chapter.id] = isChapterReviewed(chapter);
     if (state.reviewedVisits[activeVisit.id] === true) {
-      const next = nextReviewVisit(reviewData.map, state.reviewedVisits, activeVisit.id, 1);
-      if (next && next.id !== activeVisit.id) {
-        state.activeVisitId = next.id;
-        openFile(next.fileId);
-        return;
-      }
+      const destination = nextGuidedReviewDestination(
+        getReviewChapters(),
+        state.reviewedVisits,
+        activeVisit.id,
+      );
+      if (applyGuidedReviewDestination(destination)) return;
     }
     renderTree();
     scheduleSessionSave();

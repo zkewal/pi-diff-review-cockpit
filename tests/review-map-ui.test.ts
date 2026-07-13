@@ -55,3 +55,13 @@ test("the header AI result trigger contains phrasing content only", () => {
   assert.doesNotMatch(app, /summaryEl\.innerHTML = `\s*<div/);
   assert.match(app, /summaryEl\.innerHTML = `\s*<span/);
 });
+
+test("review completion pauses at chapter boundaries and ends on AI results", () => {
+  assert.match(app, /firstUnreviewedVisitInChapter/);
+  assert.match(app, /nextGuidedReviewDestination/);
+  assert.match(app, /applyGuidedReviewDestination/);
+  assert.match(app, /openChapterBrief\(destination\.chapterId\)/);
+  assert.match(app, /openAiReviewResult\(\)/);
+  assert.match(app, /Continue review/);
+  assert.match(app, /data-review-visit-id/);
+});
