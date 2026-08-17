@@ -1,8 +1,9 @@
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
-import "monaco-editor/esm/vs/language/typescript/monaco.contribution.js";
+import "monaco-editor/esm/vs/basic-languages/typescript/typescript.contribution.js";
+import "monaco-editor/esm/vs/basic-languages/javascript/javascript.contribution.js";
 import "monaco-editor/esm/vs/language/json/monaco.contribution.js";
-import "monaco-editor/esm/vs/language/css/monaco.contribution.js";
-import "monaco-editor/esm/vs/language/html/monaco.contribution.js";
+import "monaco-editor/esm/vs/basic-languages/css/css.contribution.js";
+import "monaco-editor/esm/vs/basic-languages/html/html.contribution.js";
 import "monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution.js";
 import "monaco-editor/esm/vs/basic-languages/shell/shell.contribution.js";
 import "monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution.js";
@@ -13,13 +14,14 @@ import "monaco-editor/esm/vs/basic-languages/python/python.contribution.js";
 import "monaco-editor/esm/vs/basic-languages/go/go.contribution.js";
 import editorWorkerSource from "review-worker:editor";
 import jsonWorkerSource from "review-worker:json";
-import cssWorkerSource from "review-worker:css";
-import htmlWorkerSource from "review-worker:html";
-import typescriptWorkerSource from "review-worker:typescript";
 import { buildAiReviewResultState } from "./ai-review-result-state.js";
 import { createCommentEditorSavePolicy } from "./comment-editor-save-policy.js";
 import { createCommentEditBuffer } from "./comment-edit-buffer.js";
-import { replaceDiffEditorModels } from "./model-lifecycle.js";
+import { fileLoadView, isCurrentFileReply } from "./file-load-state.js";
+import { firstValidFindingLocation } from "./finding-navigation-state.js";
+import { buildHeaderStatusState, githubThreadLabel } from "./header-status-state.js";
+import { languageForPath } from "./language-for-path.js";
+import { detachDiffEditorModels, replaceDiffEditorModels } from "./model-lifecycle.js";
 import { applyAuthoritativePublishedCommentState } from "./publish-comment-state.js";
 import { expandDisclosure, isDisclosureExpanded, toggleDisclosure } from "./review-disclosure-state.js";
 import {
@@ -40,25 +42,12 @@ import {
 const localWorkerSources = Object.freeze({
   editor: editorWorkerSource,
   json: jsonWorkerSource,
-  css: cssWorkerSource,
-  html: htmlWorkerSource,
-  typescript: typescriptWorkerSource,
 });
 const workerObjectUrls = new Map();
 const workerProbe = Object.freeze({ __piDiffReviewWorkerProbe: "v1" });
 
 function workerKindForLabel(label) {
-  return {
-    json: "json",
-    css: "css",
-    scss: "css",
-    less: "css",
-    html: "html",
-    handlebars: "html",
-    razor: "html",
-    typescript: "typescript",
-    javascript: "typescript",
-  }[label] || "editor";
+  return label === "json" ? "json" : "editor";
 }
 
 function workerObjectUrl(kind) {
@@ -90,9 +79,6 @@ async function verifyLocalWorkers() {
   const workers = [
     ["editor", "editorWorkerService"],
     ["json", "json"],
-    ["css", "css"],
-    ["html", "html"],
-    ["typescript", "typescript"],
   ];
   const verified = [];
   for (const [name, label] of workers) {
@@ -308,6 +294,10 @@ const currentFileLabelEl = document.getElementById("current-file-label");
 const modeHintEl = document.getElementById("mode-hint");
 const fileCommentsContainer = document.getElementById("file-comments-container");
 const editorContainerEl = document.getElementById("editor-container");
+const editorStageEl = document.getElementById("editor-stage");
+const editorStatusEl = document.getElementById("editor-status");
+const editorStatusTitleEl = document.getElementById("editor-status-title");
+const editorStatusMessageEl = document.getElementById("editor-status-message");
 const chapterBriefContainerEl = document.getElementById("chapter-brief-container");
 const aiReviewResultContainerEl = document.getElementById("ai-review-result-container");
 const insightPanelEl = document.getElementById("insight-panel");
@@ -370,9 +360,19 @@ function currentUnresolvedGithubThreads() {
 }
 
 function updateGithubThreadCount() {
-  if (!reviewData.source?.github) return;
+  if (!reviewData.source?.github) {
+    githubThreadCountButton.classList.add("hidden");
+    return;
+  }
   const count = unresolvedThreadCount(state.githubContext);
-  githubThreadCountButton.textContent = `◌ ${count}`;
+  const label = githubThreadLabel(count);
+  if (!label) {
+    githubThreadCountButton.textContent = "";
+    githubThreadCountButton.classList.add("hidden");
+    return;
+  }
+  githubThreadCountButton.textContent = label;
+  githubThreadCountButton.setAttribute("aria-label", `Open ${label}`);
   githubThreadCountButton.classList.remove("hidden");
 }
 
@@ -532,6 +532,7 @@ let monacoApi = null;
 let diffEditor = null;
 let originalModel = null;
 let modifiedModel = null;
+let mountedContentKey = null;
 let originalDecorations = [];
 let modifiedDecorations = [];
 let originalKeyboardDecorations = [];
@@ -612,25 +613,6 @@ function scheduleSessionSave() {
     snapshot: buildSessionSnapshot(),
   });
   sessionSaveScheduler.schedule();
-}
-
-function inferLanguage(path) {
-  if (!path) return "plaintext";
-  const lower = path.toLowerCase();
-  if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "typescript";
-  if (lower.endsWith(".js") || lower.endsWith(".jsx") || lower.endsWith(".mjs") || lower.endsWith(".cjs")) return "javascript";
-  if (lower.endsWith(".json")) return "json";
-  if (lower.endsWith(".md")) return "markdown";
-  if (lower.endsWith(".css")) return "css";
-  if (lower.endsWith(".html")) return "html";
-  if (lower.endsWith(".sh")) return "shell";
-  if (lower.endsWith(".yml") || lower.endsWith(".yaml")) return "yaml";
-  if (lower.endsWith(".rs")) return "rust";
-  if (lower.endsWith(".java")) return "java";
-  if (lower.endsWith(".kt")) return "kotlin";
-  if (lower.endsWith(".py")) return "python";
-  if (lower.endsWith(".go")) return "go";
-  return "plaintext";
 }
 
 function scopeLabel(scope) {
@@ -774,8 +756,18 @@ function setSummary(summary, counts = null, progress = null) {
   const reviewed = Math.max(0, Math.min(total, Number(progress.reviewed || 0)));
   const percent = total > 0 ? Math.round((reviewed / total) * 100) : 0;
   const staged = Math.max(0, Number(progress.staged || 0));
+  const headerStatus = buildHeaderStatusState({
+    detail: summary,
+    aiStatus: progress.aiStatus,
+    reviewed,
+    total,
+    staged,
+  });
+  summaryEl.setAttribute("aria-label", `Open overall AI review: ${headerStatus.accessibleLabel}`);
+  summaryEl.title = headerStatus.accessibleLabel;
   summaryEl.innerHTML = `
-    <span class="flex min-w-0 items-center gap-2">
+    <span class="xl:hidden">${escapeHtml(headerStatus.compact)}</span>
+    <span class="hidden min-w-0 items-center gap-2 xl:flex">
       ${stats ? `<span class="shrink-0">${stats}</span>` : ""}
       <span class="min-w-0 truncate">${escapeHtml(summary)}</span>
       <span class="shrink-0 rounded bg-[#161b22] px-1.5 py-0.5 text-[10px] font-medium text-review-muted">${reviewed}/${total} reviewed</span>
@@ -2447,7 +2439,7 @@ function openFindingLocation(location, options = {}) {
 }
 
 function firstExistingFindingLocation(finding) {
-  return (finding.locations || []).find((item) => getFileById(item.fileId)) || null;
+  return firstValidFindingLocation(finding, (fileId) => getFileById(fileId) != null);
 }
 
 function openFirstFindingLocation(finding) {
@@ -2523,6 +2515,13 @@ function renderTree() {
       reviewed: reviewProgress.reviewed,
       total: reviewProgress.total,
       staged: comments,
+      aiStatus: state.aiReview.status === "done" || state.aiReviewCompleted
+        ? "done"
+        : state.aiReview.status === "running"
+          ? "running"
+          : state.aiReview.status === "failed"
+            ? "failed"
+            : "queued",
     },
   );
   updateToggleButtons();
@@ -3477,19 +3476,29 @@ function renderFileComments() {
   });
 }
 
-function getPlaceholderContents(file, scope) {
-  const path = getScopeDisplayPath(file, scope);
-  const requestState = getRequestState(file.id, scope);
-  if (requestState.error) {
-    const body = `Failed to load ${path}\n\n${requestState.error}`;
-    return { originalContent: body, modifiedContent: body };
-  }
-  const body = `Loading ${path}...`;
-  return { originalContent: body, modifiedContent: body };
+function detachMountedModels() {
+  if (!diffEditor || (!originalModel && !modifiedModel)) return;
+  const next = detachDiffEditorModels(diffEditor, { original: originalModel, modified: modifiedModel });
+  originalModel = next.original;
+  modifiedModel = next.modified;
+  mountedContentKey = null;
 }
 
-function getMountedContents(file, scope = state.currentScope) {
-  return getRequestState(file.id, scope).contents || getPlaceholderContents(file, scope);
+function showEditorStatus(view) {
+  detachMountedModels();
+  editorContainerEl.classList.add("hidden");
+  editorStatusEl.classList.remove("hidden");
+  editorStatusEl.classList.add("flex");
+  editorStatusEl.setAttribute("data-status", view.kind);
+  editorStatusTitleEl.textContent = view.title;
+  editorStatusMessageEl.textContent = view.message;
+}
+
+function showEditorContents() {
+  editorStatusEl.classList.add("hidden");
+  editorStatusEl.classList.remove("flex");
+  editorStatusEl.removeAttribute("data-status");
+  editorContainerEl.classList.remove("hidden");
 }
 
 function currentAiReviewResult() {
@@ -3520,6 +3529,17 @@ function aiReviewProgressHtml(result) {
 function aiReviewListHtml(items, emptyMessage) {
   if (items.length === 0) return `<p class="text-sm text-review-muted">${escapeHtml(emptyMessage)}</p>`;
   return `<ul class="space-y-2 text-sm leading-6 text-review-text">${items.map((item) => `<li class="flex gap-2"><span class="text-[#d2a8ff]">•</span><span>${escapeHtml(item)}</span></li>`).join("")}</ul>`;
+}
+
+function unresolvedFindingsHtml(items) {
+  if (items.length === 0) return `<p class="text-sm text-review-muted">No unresolved AI findings.</p>`;
+  return `<ul class="space-y-2 text-sm leading-6 text-review-text">${items.map((item) => {
+    const label = `${humanizeToken(item.severity)} · ${item.title}`;
+    const content = `<span class="text-[#d2a8ff]">•</span><span>${escapeHtml(label)}</span>`;
+    return item.hasLocation
+      ? `<li><button type="button" data-unresolved-finding-id="${escapeHtml(item.id)}" class="flex w-full cursor-pointer gap-2 rounded text-left hover:text-white focus:outline-none focus:ring-1 focus:ring-[#8957e5]/50">${content}</button></li>`
+      : `<li class="flex gap-2">${content}</li>`;
+  }).join("")}</ul>`;
 }
 
 function overallAiReviewCardHtml() {
@@ -3580,7 +3600,7 @@ function overallAiReviewResultHtml() {
         <div class="mt-4 grid gap-4 lg:grid-cols-2">
           <section class="rounded-lg border border-review-border bg-[#010409] p-5">
             <h2 class="mb-3 text-sm font-semibold text-white">Unresolved findings</h2>
-            ${aiReviewListHtml(result.unresolvedFindings, "No unresolved AI findings.")}
+            ${unresolvedFindingsHtml(result.unresolvedFindings)}
           </section>
           <section class="rounded-lg border border-review-border bg-[#010409] p-5">
             <h2 class="mb-3 text-sm font-semibold text-white">Accepted risks</h2>
@@ -3728,6 +3748,12 @@ function bindAiReviewSurfaceActions(container) {
   container.querySelectorAll('[data-action="submit-review"]').forEach((button) => {
     button.addEventListener("click", () => submitReview());
   });
+  container.querySelectorAll("[data-unresolved-finding-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const finding = getReviewFinding(button.getAttribute("data-unresolved-finding-id"));
+      if (finding) openFirstFindingLocation(finding);
+    });
+  });
 }
 
 function clearFileCanvasForOverview() {
@@ -3738,7 +3764,7 @@ function clearFileCanvasForOverview() {
     originalKeyboardDecorations = diffEditor.getOriginalEditor().deltaDecorations(originalKeyboardDecorations, []);
     modifiedKeyboardDecorations = diffEditor.getModifiedEditor().deltaDecorations(modifiedKeyboardDecorations, []);
   }
-  editorContainerEl.classList.add("hidden");
+  editorStageEl.classList.add("hidden");
   fileCommentsContainer.className = "hidden border-b border-review-border bg-[#0d1117] px-4 py-0";
 }
 
@@ -3792,21 +3818,11 @@ function mountFile(options = {}) {
   state.activeCanvas = "file";
   chapterBriefContainerEl.classList.add("hidden");
   aiReviewResultContainerEl.classList.add("hidden");
-  editorContainerEl.classList.remove("hidden");
+  editorStageEl.classList.remove("hidden");
   if (!file) {
     currentFileLabelEl.textContent = "No file selected";
     clearViewZones();
-    const nextModels = replaceDiffEditorModels(
-      diffEditor,
-      { original: originalModel, modified: modifiedModel },
-      {
-        createOriginal: () => monacoApi.editor.createModel("", "plaintext"),
-        createModified: () => monacoApi.editor.createModel("", "plaintext"),
-      },
-    );
-    originalModel = nextModels.original;
-    modifiedModel = nextModels.modified;
-    applyEditorOptions();
+    showEditorStatus({ kind: "empty", title: "No file selected", message: "Choose a changed file from the review plan." });
     updateDecorations();
     renderFileComments();
     requestAnimationFrame(layoutEditor);
@@ -3817,8 +3833,9 @@ function mountFile(options = {}) {
 
   const preserveScroll = options.preserveScroll === true;
   const scrollState = preserveScroll ? captureScrollState() : null;
-  const language = inferLanguage(getScopeFilePath(file) || file.path);
-  const contents = getMountedContents(file, state.currentScope);
+  const language = languageForPath(getScopeFilePath(file) || file.path);
+  const requestState = getRequestState(file.id, state.currentScope);
+  const fileView = fileLoadView({ path: getScopeDisplayPath(file, state.currentScope), ...requestState });
   const reviewed = isFileReviewed(file.id);
   const chapter = chapterForFile(file.id);
   const activeVisit = visitsForFile(file.id).find((visit) => visit.id === state.activeVisitId) || null;
@@ -3839,16 +3856,29 @@ function mountFile(options = {}) {
     </span>
   `;
 
-  const nextModels = replaceDiffEditorModels(
-    diffEditor,
-    { original: originalModel, modified: modifiedModel },
-    {
-      createOriginal: () => monacoApi.editor.createModel(contents.originalContent, language),
-      createModified: () => monacoApi.editor.createModel(contents.modifiedContent, language),
-    },
-  );
-  originalModel = nextModels.original;
-  modifiedModel = nextModels.modified;
+  if (fileView.kind !== "ready") {
+    showEditorStatus(fileView);
+    renderFileComments();
+    return;
+  }
+
+  showEditorContents();
+  const contents = fileView.contents;
+  const contentKey = cacheKey(state.currentScope, file.id);
+
+  if (mountedContentKey !== contentKey || !originalModel || !modifiedModel) {
+    const nextModels = replaceDiffEditorModels(
+      diffEditor,
+      { original: originalModel, modified: modifiedModel },
+      {
+        createOriginal: () => monacoApi.editor.createModel(contents.originalContent, language),
+        createModified: () => monacoApi.editor.createModel(contents.modifiedContent, language),
+      },
+    );
+    originalModel = nextModels.original;
+    modifiedModel = nextModels.modified;
+    mountedContentKey = contentKey;
+  }
   applyEditorOptions();
   syncViewZones();
   updateDecorations();
@@ -4152,6 +4182,7 @@ window.__reviewReceive = function (message) {
   state.selectedCommitSha = previousSelectedCommitSha;
 
   if (message.type === "file-data") {
+    if (!isCurrentFileReply(state.pendingRequestIds[key], message.requestId)) return;
     state.fileContents[key] = {
       originalContent: message.originalContent,
       modifiedContent: message.modifiedContent,
@@ -4166,6 +4197,7 @@ window.__reviewReceive = function (message) {
   }
 
   if (message.type === "file-error") {
+    if (!isCurrentFileReply(state.pendingRequestIds[key], message.requestId)) return;
     state.fileErrors[key] = message.message || "Unknown error";
     delete state.pendingRequestIds[key];
     renderTree();
